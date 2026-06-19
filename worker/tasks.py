@@ -8,6 +8,7 @@ import pickle
 import base64
 import pandas as pd
 from deconvolve import devconvolve
+from covvfit import run_covvfit_inference
 
 # Initialize Celery
 app = Celery(
@@ -215,3 +216,65 @@ def run_deconvolve(self, mutation_counts_df, mutation_variant_matrix_df,
         progress_data["status"] = f"Error: {error_message}"
         redis_client.set(progress_key, json.dumps(progress_data), ex=3600)
         raise
+
+@app.task(bind=True)
+def run_covvfit(self, location_data, matrix_df, max_days=180, horizon=90):
+    """
+   A task that runs covvfit fitness inference with progress tracking.
+
+   Runs no-smoothing deconvolution per location, pools the results, and runs
+   covvfit inference, returning the generated figures.
+
+   Args:
+       location_data (dict): {location_name: counts_df} — each counts_df is a
+           base64-encoded pickle string of the mutation counts DataFrame.
+       matrix_df (str): base64-encoded pickle string of the mutation-variant matrix.
+       max_days (int): number of past days to restrict the analysis to.
+       horizon (int): number of future days to forecast.
+   """
+
+    task_id = self.request.id
+    progress_key = f"task_progress:{task_id}"
+
+    def update_progress(current, total, message):
+        redis_client.set(
+            progress_key,
+            json.dumps({"current": current, "total": total, "status": message}),
+            ex=3600
+        )
+
+    # deserialize inputs and run
+    try:
+        update_progress(1, 3, "Deserializing inputs")
+
+        # matrix_df arrives as a base64-encoded pickle string (same as run_deconvolve)
+        if isinstance(matrix_df, str):
+            matrix_df = pickle.loads(base64.b64decode(matrix_df))
+
+        # location_data is {location: counts_df}, each counts_df a pickle string
+        deserialized_location_data = {}
+        for location, counts_df in location_data.items():
+            if isinstance(counts_df, str):
+                counts_df = pickle.loads(base64.b64decode(counts_df))
+            deserialized_location_data[location] = counts_df
+
+        update_progress(2, 3, "Running no-smoothing deconvolution and covvfit inference")
+
+        result = run_covvfit_inference(
+            location_data=deserialized_location_data,
+            matrix_df=matrix_df,
+            max_days=max_days,
+            horizon=horizon,
+        )
+
+        update_progress(3, 3, "Completed")
+
+        return result
+
+    except Exception as e:
+        update_progress(0, 3, f"Error: {str(e)}")
+        raise
+
+
+
+
