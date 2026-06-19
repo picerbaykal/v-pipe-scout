@@ -18,6 +18,7 @@ from pydantic import BaseModel
 from typing import List
 import logging
 import os
+import json
 import pickle  
 import base64 
 import asyncio
@@ -1155,8 +1156,113 @@ def app():
                 celery_app,
                 redis_client
             )
-                
-                    
+
+            # ============== COVVFIT FITNESS INFERENCE SECTION ==============
+            # covvfit needs completed deconvolution for all locations.
+            all_locations_done = (
+                    len(st.session_state.location_results) == len(st.session_state.location_tasks)
+                    and len(st.session_state.location_results) > 0
+            )
+
+            if all_locations_done:
+                st.markdown("---")
+                st.subheader("Variant fitness inference (covvfit)")
+
+                # Initialize covvfit session state
+                if 'covvfit_task_id' not in st.session_state:
+                    st.session_state.covvfit_task_id = None
+                if 'covvfit_result' not in st.session_state:
+                    st.session_state.covvfit_result = None
+
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    max_days = st.slider(
+                        "Days of past data to use",
+                        min_value=60, max_value=365, value=180, step=10,
+                        help="How many days of historical data covvfit fits the model to.",
+                    )
+                with col_b:
+                    horizon = st.slider(
+                        "Days to forecast",
+                        min_value=30, max_value=180, value=90, step=10,
+                        help="How many days into the future covvfit projects.",
+                    )
+
+                if st.button("Run fitness inference", type="primary"):
+                    matrix_pickle = base64.b64encode(pickle.dumps(matrix_df)).decode("utf-8")
+
+                    location_data_pickled = {}
+                    for loc, counts_df in st.session_state.location_data.items():
+                        location_data_pickled[loc] = base64.b64encode(
+                            pickle.dumps(counts_df)
+                        ).decode("utf-8")
+
+                    task = celery_app.send_task(
+                        "tasks.run_covvfit",
+                        kwargs={
+                            "location_data": location_data_pickled,
+                            "matrix_df": matrix_pickle,
+                            "max_days": max_days,
+                            "horizon": horizon,
+                        },
+                    )
+
+                    st.session_state.covvfit_task_id = task.id
+                    st.session_state.covvfit_result = None
+                    st.rerun()
+
+                # Poll / display covvfit result
+                if st.session_state.covvfit_task_id is not None:
+                    if st.session_state.covvfit_result is not None:
+                        # We already have the result — display it
+                        # TODO: with a single location covvfit places the legend far
+                        # from the panel, leaving a large gap. Could be tuned via a
+                        # covvfit plot config (right / panel_width / wspace). Left as-is
+                        # for now since multi-location runs (the common case) look fine.
+                        figure_png_b64 = st.session_state.covvfit_result["figure_png"]
+                        st.image(base64.b64decode(figure_png_b64))
+
+                        st.markdown("#### Download fitness data")
+
+                        if "figure_pdf" in st.session_state.covvfit_result:
+                            st.download_button(
+                                label="Download figure (PDF)",
+                                data=base64.b64decode(st.session_state.covvfit_result["figure_pdf"]),
+                                file_name="covvfit_figure.pdf",
+                                mime="application/pdf",
+                            )
+
+                        if "pairwise_fitnesses_csv" in st.session_state.covvfit_result:
+                            st.download_button(
+                                label="Download fitness results (CSV)",
+                                data=st.session_state.covvfit_result["pairwise_fitnesses_csv"],
+                                file_name="covvfit_pairwise_fitnesses.csv",
+                                mime="text/csv",
+                            )
+
+                    else:
+                        # Task is running — check status
+                        covvfit_task = celery_app.AsyncResult(st.session_state.covvfit_task_id)
+                        if covvfit_task.ready():
+                            try:
+                                st.session_state.covvfit_result = covvfit_task.get()
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"covvfit failed: {str(e)}")
+                        else:
+                            # Show progress from Redis
+                            progress_raw = redis_client.get(
+                                f"task_progress:{st.session_state.covvfit_task_id}"
+                            )
+                            if progress_raw:
+                                progress = json.loads(progress_raw)
+                                st.info(f"⏳ {progress.get('status', 'Running covvfit...')}")
+                            else:
+                                st.info("⏳ Running covvfit...")
+
+                            from streamlit_autorefresh import st_autorefresh
+                            st_autorefresh(interval=5000, key="covvfit_autorefresh")
+
         else:
             # No tasks have been started yet
             if not st.session_state.location_data:

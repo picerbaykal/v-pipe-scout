@@ -135,6 +135,12 @@ def run_covvfit_inference(
             with open(figure_pdf_path, "rb") as f:
                 result["figure_pdf"] = base64.b64encode(f.read()).decode("utf-8")
 
+        # pairwise fitness table (relative fitness between each pair of variants)
+        pairwise_csv_path = output_dir / "pairwise_fitnesses.csv"
+        if pairwise_csv_path.exists():
+            with open(pairwise_csv_path, "r") as f:
+                result["pairwise_fitnesses_csv"] = f.read()
+
     return result
 
 
