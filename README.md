@@ -33,6 +33,9 @@ Specifically, V-Pipe Scout enables:
 - **Composition of variant signatures for abundance estimates**  
     - Leveraging clinical sequence databases (e.g., [CovSpectrum](https://cov-spectrum.org/))  
     - Using curated variant signatures
+- **Variant fitness inference**  
+    - Estimates relative fitness advantages with [covvfit](https://github.com/cbg-ethz/covvfit)  
+    - Pooling data across selected locations, with forecasts of future variant dynamics
 - **URL-based session sharing**  
     - Share analysis configurations via URLs
     - Collaborate by sharing specific page setups
@@ -42,7 +45,8 @@ Further, we will implement:
 - On-demand variant abundance estimates by [Lollipop](https://github.com/cbg-ethz/LolliPop)
 
 V-Pipe Scout brings together:
-- [V-pipe](https://github.com/cbg-ethz/V-pipe) - our prime Wastewater Viral Analysis Pipeline, see [publication](https://www.biorxiv.org/content/10.1101/2023.10.16.562462v1.full). 
+- [V-pipe](https://github.com/cbg-ethz/V-pipe) - our prime Wastewater Viral Analysis Pipeline, see [publication](https://www.biorxiv.org/content/10.1101/2023.10.16.562462v1.full).
+- [covvfit](https://github.com/cbg-ethz/covvfit) - fitness estimates of SARS-CoV-2 variants from variant abundance data, see [publication](https://doi.org/10.1016/j.watres.2026.126018)
 - [GenSpectrum](https://genspectrum.org/) - in particular the novel fast database for genomic sequences [LAPIS-SILO](https://github.com/GenSpectrum/LAPIS-SILO), see [publication](https://bmcbioinformatics.biomedcentral.com/articles/10.1186/s12859-023-05364-3)
 
 
