@@ -5,7 +5,7 @@ channels:
   - defaults
 dependencies:
   # Python and lollipop dependencies
-  - python=3.13
+  - python=3.11
   - numpy>=1.23
   - scipy>=1.9
   - pandas>=1.5
@@ -35,3 +35,4 @@ dependencies:
   - pip
   - pip:
       - redis==5.0.1
+      - covvfit
