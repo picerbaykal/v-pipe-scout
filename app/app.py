@@ -11,6 +11,7 @@ import subpages.abundance as abundance
 import subpages.untracked as untracked
 import subpages.region as region
 import subpages.coocurrences as coocurrences
+import subpages.abundance_cooc as abundance_cooc
 from utils.system_health import initialize_health_monitoring, display_global_system_status
 
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -35,6 +36,7 @@ if __name__ == "__main__":
         {"app": untracked.app, "title": "Untracked Mutations", "icon": "👀", "url_path": "untracked"},
         {"app": signature_explorer.app, "title": "Variant Signature Explorer", "icon": "🔍", "url_path": "signature-explorer"},
         {"app": abundance.app, "title": "Variant Abundances", "icon": "🧩", "url_path": "abundance"},
+        {"app": abundance_cooc.app, "title": "Abundance & Co-occurrence", "icon": "🧬", "url_path": "abundance-cooc"},
         {"app": region.app, "title": "Region Explorer", "icon": "📍", "url_path": "region"},
         {"app": coocurrences.app, "title": "Co-occurrence", "icon": "🔗", "url_path": "cooccurrence"},
     ]
