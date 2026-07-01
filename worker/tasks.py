@@ -215,3 +215,53 @@ def run_deconvolve(self, mutation_counts_df, mutation_variant_matrix_df,
         progress_data["status"] = f"Error: {error_message}"
         redis_client.set(progress_key, json.dumps(progress_data), ex=3600)
         raise
+
+@app.task(bind=True)
+def run_deconvolve_lapis(self, location: str, start_date: str, end_date: str,
+                         variants: list, bootstraps: int = 100, bandwidth: int = 10):
+    """
+    Celery task for LAPIS-sourced deconvolution.
+    Used by the Abundance & Co-occurrence tab.
+
+    Args:
+        location: Location name e.g. "Lugano (TI)"
+        start_date: ISO date string e.g. "2026-01-06"
+        end_date: ISO date string e.g. "2026-04-06"
+        variants: List of pango lineage names
+        bootstraps: Bootstrap iterations (default 100 = Standard)
+        bandwidth: Gaussian kernel bandwidth (default 10 = Narrow)
+    """
+    from datetime import datetime
+    from abundance_cooc import run_deconv_lapis
+
+    task_id = self.request.id
+    progress_key = f"task_progress:{task_id}"
+
+    try:
+        redis_client.set(progress_key, json.dumps({
+            "current": 1, "total": 4,
+            "status": f"Fetching mutation data from LAPIS for {location}..."
+        }), ex=3600)
+
+        result = run_deconv_lapis(
+            location=location,
+            start_date=datetime.fromisoformat(start_date),
+            end_date=datetime.fromisoformat(end_date),
+            variants=variants,
+            bootstraps=bootstraps,
+            bandwidth=bandwidth,
+        )
+
+        redis_client.set(progress_key, json.dumps({
+            "current": 4, "total": 4,
+            "status": "Deconvolution complete."
+        }), ex=3600)
+
+        return result
+
+    except Exception as e:
+        redis_client.set(progress_key, json.dumps({
+            "current": 0, "total": 4,
+            "status": f"Error: {str(e)}"
+        }), ex=3600)
+        raise
