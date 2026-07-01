@@ -1,5 +1,13 @@
 .streamlit/secrets.toml
 __pycache__/
 data/known_variants
+
+# Pango summary runtime cache
 .cache/
 app/.cache/
+
+# PyCharm project settings
+.idea/
+
+# PyCharm project settings
+.idea/
