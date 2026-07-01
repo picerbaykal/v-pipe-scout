@@ -1,3 +1,5 @@
 .streamlit/secrets.toml
 __pycache__/
 data/known_variants
+.cache/
+app/.cache/
