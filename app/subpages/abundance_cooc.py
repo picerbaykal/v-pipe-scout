@@ -17,6 +17,7 @@ import os
 from datetime import datetime
 from celery import Celery
 import redis
+from api.pango_loader import PangoLoader, get_pango_summary_path
 
 from api.wiseloculus import WiseLoculusLapis
 from utils.config import get_wiseloculus_url
@@ -41,6 +42,15 @@ wise_server_ip = get_wiseloculus_url()
 wiseLoculus = WiseLoculusLapis(wise_server_ip)
 
 
+@st.cache_resource
+def cached_get_pango_loader() -> PangoLoader:
+    """
+    Return a cached PangoLoader instance, loaded once per app session.
+    Uses get_pango_summary_path() to prefer the runtime copy when available.
+    """
+    return PangoLoader(get_pango_summary_path())
+
+
 def app():
     st.title("Abundance & Co-occurrence")
     st.subheader(
@@ -60,7 +70,15 @@ def app():
     st.markdown("---")
 
     st.subheader("Variant Panel")
-    st.info("Variant selection coming next.")
+
+    # ── Variant Panel ────────────────────────────────────────────────────────
+    st.subheader("Variant Panel")
+    st.write(
+        "Select known variants of interest, or add any pango lineage by name. "
+        "Requires at least 2 variants to run deconvolution."
+    )
+
+
 
 if __name__ == "__main__":
     app()
