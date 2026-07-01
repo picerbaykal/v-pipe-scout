@@ -175,6 +175,7 @@ def run_deconv_lapis(
 
         # Write deconv_config.yaml
         deconv_config_fp = tmpdir_path / "deconv_config.yaml"
+
         with open(deconv_config_fp, "w") as f:
             yaml.dump({
                 "bootstrap": bootstraps,

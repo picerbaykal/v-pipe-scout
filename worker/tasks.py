@@ -8,6 +8,8 @@ import pickle
 import base64
 import pandas as pd
 from deconvolve import devconvolve
+import logging
+logger = logging.getLogger(__name__)
 
 # Initialize Celery
 app = Celery(
@@ -104,7 +106,6 @@ def run_deconvolve(self, mutation_counts_df, mutation_variant_matrix_df,
         deconv_params (dict, optional): Parameters for deconvolution
         locationName (str, optional): Name of the location for proper result structuring
     """
-    
     task_id = self.request.id
     progress_key = f"task_progress:{task_id}"
     
@@ -207,6 +208,8 @@ def run_deconvolve(self, mutation_counts_df, mutation_variant_matrix_df,
         progress_data["status"] = "Completed"
         progress_data["partial_results"] = {"summary": "Deconvolution completed successfully"}
         redis_client.set(progress_key, json.dumps(progress_data), ex=3600)
+
+
         
         return deconvolved_data
     except Exception as e:
@@ -256,6 +259,7 @@ def run_deconvolve_lapis(self, location: str, start_date: str, end_date: str,
             "current": 4, "total": 4,
             "status": "Deconvolution complete."
         }), ex=3600)
+
 
         return result
 
