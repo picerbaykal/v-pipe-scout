@@ -21,3 +21,12 @@ data/known_variants/*.yaml
 # Pango summary runtime cache
 .cache/
 app/.cache/
+# PyCharm project settings
+.idea/
+
+# direnv local environment
+.envrc
+
+# Pango summary runtime cache
+.cache/
+app/.cache/
