@@ -48,6 +48,15 @@ def cached_get_pango_loader() -> PangoLoader:
     """
     return PangoLoader(get_pango_summary_path())
 
+@st.cache_data
+def cached_get_variant_names() -> list:
+    """
+    Return cached list of curated variant names from cowwid.
+    Cached per session to avoid repeated GitHub API calls.
+    """
+    from api.signatures import get_variant_names
+    return get_variant_names()
+
 
 def app():
 
@@ -76,19 +85,40 @@ def app():
 
         # ── Variant Panel ────────────────────────────────────────────────────────
         st.subheader("Variant Panel")
-        pango_loader = cached_get_pango_loader()
-        available_lineages = sorted(pango_loader.get_raw_data().keys())
+
+        # Surveillance panel - cowwid curated variants
+        curated_variants = cached_get_variant_names()
 
         selected_variants = st.multiselect(
-            "Select variants of interest",
-            options=available_lineages,
+            "Surveillance variants",
+            options=curated_variants,
             placeholder="Start typing to search for a lineage...",
-            help="Select any pango lineage. Requires at least 2 variants to run deconvolution.",
+            help="Curated variants from the Swiss wastewater surveillance panel (cowwid).",
             key="accoc_variant_multiselect"
         )
 
-        if len(selected_variants) < 2:
+        # Manual add - for v0, user can add any lineage they already know about
+        # In v1, this will be replaced/augmented by the scanner's + button on the tree
+        with st.expander("➕ Add lineage manually", expanded=False):
+            pango_loader = cached_get_pango_loader()
+            available_lineages = sorted(pango_loader.get_raw_data().keys())
+            extra_options = [v for v in available_lineages if v not in selected_variants]
+
+            extra_variants = st.multiselect(
+                "Search pango lineage",
+                options=extra_options,
+                placeholder="e.g. KP.2.3",
+                help="Add any pango lineage to the panel. Strategy D enrichment applied automatically.",
+                key="acooc_extra_variants",
+            )
+
+        # Combined panel
+        all_selected_variants = selected_variants + extra_variants
+
+        if len(all_selected_variants) < 2:
             st.warning("Select at least 2 variants to run deconvolution.")
+        else:
+            st.caption(f"{len(all_selected_variants)} variants in panel")
 
         st.markdown("---")
 
@@ -172,7 +202,7 @@ def app():
 
         # ── Run Button ────────────────────────────────────────────────────────
         can_run = (
-                len(selected_variants) >= 2
+                len(all_selected_variants) >= 2
                 and len(selected_locations) >= 1
                 and end_date > start_date
         )
