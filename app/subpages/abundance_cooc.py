@@ -14,14 +14,13 @@ until that lands.
 
 import streamlit as st
 import os
-from datetime import datetime
 from celery import Celery
 import redis
 from api.pango_loader import PangoLoader, get_pango_summary_path
 
 from api.wiseloculus import WiseLoculusLapis
 from utils.config import get_wiseloculus_url
-from utils.url_state import create_url_state_manager, load_date_range_from_url_with_validation
+from datetime import date
 
 # Initialize Celery
 celery_app = Celery(
@@ -69,8 +68,6 @@ def app():
 
     st.markdown("---")
 
-    st.subheader("Variant Panel")
-
     # ── Variant Panel ────────────────────────────────────────────────────────
     st.subheader("Variant Panel")
     pango_loader = cached_get_pango_loader()
@@ -86,6 +83,55 @@ def app():
 
     if len(selected_variants) < 2:
         st.warning("Select at least 2 variants to run deconvolution.")
+
+    st.markdown("---")
+
+    # ── Location & Date Range ─────────────────────────────────────────────
+    st.subheader("Sampling Locations & Date Range")
+
+    available_locations = wiseLoculus.fetch_locations()
+
+    selected_locations = st.multiselect(
+        "Select sampling locations",
+        options=available_locations,
+        default=st.session_state.get("acooc_selected_locations", []),
+        placeholder="Select one or more locations...",
+        key="acooc_location_multiselect",
+    )
+
+    if not selected_locations:
+        st.warning("Select at least one location.")
+
+    default_start, default_end, min_date, max_date = wiseLoculus.get_cached_date_range_with_bounds("abundance_cooc")
+
+    default_start, default_end, min_date, max_date = wiseLoculus.get_cached_date_range_with_bounds("abundance_cooc")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        start_date = st.date_input(
+            "Start Date",
+            value=default_start,
+            min_value=min_date,
+            max_value=max_date,
+            key="acooc_start_date",
+        )
+    with col2:
+        end_date = st.date_input(
+            "End Date",
+            value=default_end,
+            min_value=min_date,
+            max_value=max_date,
+            key="acooc_end_date",
+        )
+
+    if end_date <= start_date:
+        st.warning("End date must be after start date.")
+    else:
+        date_range = (start_date, end_date)
+
+        if len(date_range) != 2:
+            st.warning("Please select a start and end date.")
 
 
 
