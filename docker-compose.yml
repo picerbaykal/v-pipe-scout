@@ -41,12 +41,12 @@ services:
   # Celery worker: Processes background tasks
   worker:
     build:
-      # Use the worker subdirectory as build context so environment.yml is available
       context: ./worker
       dockerfile: Dockerfile
     restart: unless-stopped
     volumes:
       - ./worker:/app
+      - ./app:/app_shared
     depends_on:
       redis:
         condition: service_healthy
@@ -56,6 +56,8 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=${REDIS_PASSWORD:-defaultpassword123}
+      - PYTHONPATH=/app:/app_shared
+
 
 volumes:
   redis-data:

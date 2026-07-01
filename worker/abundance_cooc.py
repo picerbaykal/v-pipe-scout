@@ -32,8 +32,7 @@ import yaml
 logger = logging.getLogger(__name__)
 
 # Add app/ to sys.path so worker container can import from api/ and utils/
-sys.path.insert(0, str(Path(__file__).parent.parent / "app"))
-
+sys.path.insert(0, "/app_shared")
 
 def _build_variant_membership_columns(
         df_tally: pd.DataFrame,
@@ -155,16 +154,16 @@ def run_deconv_lapis(
     # ── 3. Write files + run lollipop ────────────────────────────────────────
     with TemporaryDirectory() as tmpdir:
         tmpdir_path = Path(tmpdir)
-        output_dir = tmpdir / "output"
+        output_dir = tmpdir_path / "output"
         output_dir.mkdir(parents=True, exist_ok=True)
 
         # Write tallymut TSV - already in the shape, no gawk/xsv needed
-        tallymut_fp = tmpdir / "tallymut.tsv"
+        tallymut_fp = tmpdir_path / "tallymut.tsv"
         df_tally.to_csv(tallymut_fp, sep="\t", index=False)
 
         # Write variants_config.yaml
         # NOTe: start_date goes here, NOT in deconv_config
-        variants_config_fp = tmpdir / "variants_config.json"
+        variants_config_fp = tmpdir_path / "variants_config.json"
         with open(variants_config_fp, "w") as f:
             yaml.dump({
                 "variants_pangolin": {v: v for v in variants},
@@ -175,7 +174,7 @@ def run_deconv_lapis(
             }, f)
 
         # Write deconv_config.yaml
-        deconv_config_fp = tmpdir / "deconv_config.yaml"
+        deconv_config_fp = tmpdir_path / "deconv_config.yaml"
         with open(deconv_config_fp, "w") as f:
             yaml.dump({
                 "bootstrap": bootstraps,

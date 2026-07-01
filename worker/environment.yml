@@ -17,6 +17,9 @@ dependencies:
   - click>=8.0
   - click-option-group>=0.5
   - lollipop>=0.5.3
+  - aiohttp
+  - requests
+  - pydantic>=1.9,<2
   
   # CLI tools - for tallymut assembly
   - xsv=0.13.0

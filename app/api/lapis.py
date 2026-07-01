@@ -3,7 +3,6 @@
 import logging
 import requests
 from urllib.parse import urlparse
-import streamlit as st
 
 class Lapis:
     """Base class for LAPIS API queries."""
@@ -36,6 +35,7 @@ class Lapis:
             return url_string # Fallback in case of any parsing error
 
     def fetch_locations(self, default_locations=None) -> list[str]:
+        import streamlit as st  # ← add here, first line of method
         """Fetches locations from the API endpoint."""
         if "locations" in st.session_state:
             locations = st.session_state.locations

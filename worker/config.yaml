@@ -1,0 +1,7 @@
+server:
+  lapis_address: "https://lapis.wasap.genspectrum.org/covid"
+  cov_spectrum_api: "https://lapis.cov-spectrum.org"
+
+curated_variant_definitions:
+  # Full GitHub repository URL (e.g., https://github.com/cbg-ethz/cowwid)
+  github_url: "https://github.com/cbg-ethz/cowwid/tree/master/voc"
