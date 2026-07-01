@@ -73,10 +73,19 @@ def app():
 
     # ── Variant Panel ────────────────────────────────────────────────────────
     st.subheader("Variant Panel")
-    st.write(
-        "Select known variants of interest, or add any pango lineage by name. "
-        "Requires at least 2 variants to run deconvolution."
+    pango_loader = cached_get_pango_loader()
+    available_lineages = sorted(pango_loader.get_raw_data().keys())
+
+    selected_variants = st.multiselect(
+        "Select variants of interest",
+        options=available_lineages,
+        placeholder="Start typing to search for a lineage...",
+        help="Select any pango lineage. Requires at least 2 variants to run deconvolution.",
+        key="accoc_variant_multiselect"
     )
+
+    if len(selected_variants) < 2:
+        st.warning("Select at least 2 variants to run deconvolution.")
 
 
 
