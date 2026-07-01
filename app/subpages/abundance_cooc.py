@@ -17,6 +17,8 @@ import os
 from celery import Celery
 import redis
 from api.pango_loader import PangoLoader, get_pango_summary_path
+import logging
+logger = logging.getLogger(__name__)
 
 from api.wiseloculus import WiseLoculusLapis
 from utils.config import get_wiseloculus_url
@@ -217,7 +219,75 @@ def app():
             st.session_state["acooc_trigger_run"] = True
 
     with col_results:
-        st.info("Results will appear here after running deconvolution.")
+        with col_results:
+
+            # ── Task submission ───────────────────────────────────────────────────
+            if st.session_state.get("acooc_trigger_run"):
+                st.session_state["acooc_trigger_run"] = False
+
+                # Submit one Celery task per location
+                location_tasks = {}
+                for loc in selected_locations:
+                    task = celery_app.send_task(
+                        "tasks.run_deconvolve_lapis",
+                        kwargs={
+                            "location": loc,
+                            "start_date": start_date.isoformat(),
+                            "end_date": end_date.isoformat(),
+                            "variants": all_selected_variants,
+                            "bootstraps": bootstraps,
+                            "bandwidth": bandwidth,
+                        }
+                    )
+                    location_tasks[loc] = task.id
+                    logger.info(f"Submitted task {task.id} for {loc}")
+
+                st.session_state["acooc_location_tasks"] = location_tasks
+                st.rerun()
+
+            # ── Results / polling ─────────────────────────────────────────────────
+            location_tasks = st.session_state.get("acooc_location_tasks", {})
+
+            if not location_tasks:
+                st.info("Results will appear here after running deconvolution.")
+            else:
+                # Auto-refresh every 5 seconds while tasks are running
+                any_running = any(
+                    celery_app.AsyncResult(task_id).state in ("PENDING", "STARTED", "RETRY")
+                    for task_id in location_tasks.values()
+                )
+                if any_running:
+                    from streamlit_autorefresh import st_autorefresh
+                    st_autorefresh(interval=5000, key="acooc_autorefresh")
+                for loc, task_id in location_tasks.items():
+                    st.subheader(f"{loc}")
+
+                    # Check progress from Redis
+                    progress_key = f"task_progress:{task_id}"
+                    progress_data = redis_client.get(progress_key)
+
+                    task_result = celery_app.AsyncResult(task_id)
+
+                    if task_result.state == "PENDING":
+                        st.spinner(f"Waiting to start...")
+
+                    elif task_result.state == "STARTED" or task_result.state == "RETRY":
+                        if progress_data:
+                            progress = json.loads(progress_data)
+                            st.progress(
+                                progress["current"] / progress["total"],
+                                text=progress.get("status", "Running...")
+                            )
+                        else:
+                            st.spinner("Running deconvolution...")
+
+                    elif task_result.state == "SUCCESS":
+                        st.success("Deconvolution complete.")
+                        result = task_result.result
+                        st.json(result)
+
+                    elif task_result.state == "FAILURE":
+                        st.error(f"Task failed: {task_result.info}")
 
 
 
