@@ -9,5 +9,5 @@ app/.cache/
 # PyCharm project settings
 .idea/
 
-# PyCharm project settings
-.idea/
+# direnv local environment
+.envrc

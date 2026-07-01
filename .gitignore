@@ -11,3 +11,13 @@ deployment.log
 
 # Exclude data files that shouldn't be committed
 data/known_variants/*.yaml
+
+# PyCharm project settings
+.idea/
+
+# direnv local environment
+.envrc
+
+# Pango summary runtime cache
+.cache/
+app/.cache/
