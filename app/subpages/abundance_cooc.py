@@ -20,7 +20,6 @@ from api.pango_loader import PangoLoader, get_pango_summary_path
 
 from api.wiseloculus import WiseLoculusLapis
 from utils.config import get_wiseloculus_url
-from datetime import date
 
 # Initialize Celery
 celery_app = Celery(
@@ -51,6 +50,8 @@ def cached_get_pango_loader() -> PangoLoader:
 
 
 def app():
+
+    # ── Header ───────────────────────────────────────────────────────────────
     st.title("Abundance & Co-occurrence")
     st.subheader(
         "Estimate the proportion of variants circulating in wastewater over time, "
@@ -68,70 +69,125 @@ def app():
 
     st.markdown("---")
 
-    # ── Variant Panel ────────────────────────────────────────────────────────
-    st.subheader("Variant Panel")
-    pango_loader = cached_get_pango_loader()
-    available_lineages = sorted(pango_loader.get_raw_data().keys())
+    # ── Two-column layout ─────────────────────────────────────────────────────
+    col_controls, col_results = st.columns([1, 3])
 
-    selected_variants = st.multiselect(
-        "Select variants of interest",
-        options=available_lineages,
-        placeholder="Start typing to search for a lineage...",
-        help="Select any pango lineage. Requires at least 2 variants to run deconvolution.",
-        key="accoc_variant_multiselect"
-    )
+    with col_controls:
 
-    if len(selected_variants) < 2:
-        st.warning("Select at least 2 variants to run deconvolution.")
+        # ── Variant Panel ────────────────────────────────────────────────────────
+        st.subheader("Variant Panel")
+        pango_loader = cached_get_pango_loader()
+        available_lineages = sorted(pango_loader.get_raw_data().keys())
 
-    st.markdown("---")
-
-    # ── Location & Date Range ─────────────────────────────────────────────
-    st.subheader("Sampling Locations & Date Range")
-
-    available_locations = wiseLoculus.fetch_locations()
-
-    selected_locations = st.multiselect(
-        "Select sampling locations",
-        options=available_locations,
-        default=st.session_state.get("acooc_selected_locations", []),
-        placeholder="Select one or more locations...",
-        key="acooc_location_multiselect",
-    )
-
-    if not selected_locations:
-        st.warning("Select at least one location.")
-
-    default_start, default_end, min_date, max_date = wiseLoculus.get_cached_date_range_with_bounds("abundance_cooc")
-
-    default_start, default_end, min_date, max_date = wiseLoculus.get_cached_date_range_with_bounds("abundance_cooc")
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        start_date = st.date_input(
-            "Start Date",
-            value=default_start,
-            min_value=min_date,
-            max_value=max_date,
-            key="acooc_start_date",
-        )
-    with col2:
-        end_date = st.date_input(
-            "End Date",
-            value=default_end,
-            min_value=min_date,
-            max_value=max_date,
-            key="acooc_end_date",
+        selected_variants = st.multiselect(
+            "Select variants of interest",
+            options=available_lineages,
+            placeholder="Start typing to search for a lineage...",
+            help="Select any pango lineage. Requires at least 2 variants to run deconvolution.",
+            key="accoc_variant_multiselect"
         )
 
-    if end_date <= start_date:
-        st.warning("End date must be after start date.")
-    else:
-        date_range = (start_date, end_date)
+        if len(selected_variants) < 2:
+            st.warning("Select at least 2 variants to run deconvolution.")
 
-        if len(date_range) != 2:
-            st.warning("Please select a start and end date.")
+        st.markdown("---")
+
+        # ── Locations ─────────────────────────────────────────────
+        st.subheader("Locations")
+
+        available_locations = wiseLoculus.fetch_locations()
+
+        selected_locations = st.multiselect(
+            "Select sampling locations",
+            options=available_locations,
+            placeholder="Select one or more locations...",
+            key="acooc_location_multiselect",
+        )
+
+        if not selected_locations:
+            st.warning("Select at least one location.")
+
+        st.markdown("---")
+
+        # ── Date Range ────────────────────────────────────────────────────────
+        st.subheader("Date Range")
+
+        default_start, default_end, min_date, max_date = wiseLoculus.get_cached_date_range_with_bounds("abundance_cooc")
+
+        col_start, col_end = st.columns(2)
+
+        with col_start:
+            start_date = st.date_input(
+                "Start Date",
+                value=default_start,
+                min_value=min_date,
+                max_value=max_date,
+                key="acooc_start_date",
+            )
+        with col_end:
+            end_date = st.date_input(
+                "End Date",
+                value=default_end,
+                min_value=min_date,
+                max_value=max_date,
+                key="acooc_end_date",
+            )
+
+        if end_date <= start_date:
+            st.warning("End date must be after start date.")
+
+        # ── LolliPop Parameters ───────────────────────────────────────────────
+        with st.expander("⚙️ LolliPop Parameters", expanded=False):
+            bootstrap_options = {
+                "Rapid (Fast)": 50,
+                "Standard": 100,
+                "Reliable (Slower)": 300,
+            }
+            selected_bootstrap = st.radio(
+                "Bootstrap Iterations",
+                options=list(bootstrap_options.keys()),
+                index=1,
+                help="More iterations = tighter confidence intervals but slower runtime.",
+                key="acooc_bootstrap",
+            )
+            bootstraps = bootstrap_options[selected_bootstrap]
+            st.caption(f"Selected: {bootstraps} bootstrap iterations")
+
+            bandwidth_options = {
+                "Narrow": 10,
+                "Medium": 20,
+                "Wide": 30,
+            }
+            selected_bandwidth = st.radio(
+                "Bandwidth (Gaussian Kernel Smoothing)",
+                options=list(bandwidth_options.keys()),
+                index=0,
+                help="Narrow preserves short-term variation, Wide smooths long-term trends.",
+                key="acooc_bandwidth",
+            )
+            bandwidth = bandwidth_options[selected_bandwidth]
+            st.caption(f"Selected: Bandwidth = {bandwidth}")
+
+        st.markdown("---")
+
+        # ── Run Button ────────────────────────────────────────────────────────
+        can_run = (
+                len(selected_variants) >= 2
+                and len(selected_locations) >= 1
+                and end_date > start_date
+        )
+
+        if st.button(
+                "▶ Run",
+                type="primary",
+                disabled=not can_run,
+                key="acooc_run_button",
+                help="Select at least 2 variants and 1 location to run.",
+        ):
+            st.session_state["acooc_trigger_run"] = True
+
+    with col_results:
+        st.info("Results will appear here after running deconvolution.")
 
 
 
