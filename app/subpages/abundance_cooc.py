@@ -23,6 +23,8 @@ logger = logging.getLogger(__name__)
 from api.wiseloculus import WiseLoculusLapis
 from utils.config import get_wiseloculus_url
 
+from components.abundance_cooc_tree import render_panel_tree
+
 # Initialize Celery
 celery_app = Celery(
     'tasks',
@@ -123,6 +125,16 @@ def app():
             st.warning("Select at least 2 variants to run deconvolution.")
         else:
             st.caption(f"{len(all_selected_variants)} variants in panel")
+
+        st.markdown("---")
+
+        # ── Variant Tree ──────────────────────────────────────────────────────
+        st.subheader("Variant Tree")
+        render_panel_tree(
+            selected_variants=all_selected_variants,
+            yaml_variants=curated_variants,
+            pango_loader=cached_get_pango_loader(),
+        )
 
         st.markdown("---")
 
