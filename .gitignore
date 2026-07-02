@@ -30,3 +30,6 @@ app/.cache/
 # Pango summary runtime cache
 .cache/
 app/.cache/
+
+# Worker runtime cache (cowwid YAMLs downloaded by api/signatures.py)
+worker/data/
