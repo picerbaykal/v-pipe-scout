@@ -253,6 +253,11 @@ def run_deconvolve_lapis(self, location: str, start_date: str, end_date: str,
             variants=variants,
             bootstraps=bootstraps,
             bandwidth=bandwidth,
+            progress_callback=lambda step, msg: redis_client.set(
+                progress_key,
+                json.dumps({"current": step, "total": 4, "status": msg}),
+                ex=3600
+            )
         )
 
         redis_client.set(progress_key, json.dumps({

@@ -77,6 +77,7 @@ def run_deconv_lapis(
         regressor: str = "robust",
         regressor_params: dict = None,
         deconv_params: dict = None,
+        progress_callback=None,
 ) -> Dict:
     """
     Run LolliPop deconvolution sourced live from LAPIS.
@@ -172,12 +173,18 @@ def run_deconv_lapis(
             "Check that this location and date range have data."
         )
 
+    if progress_callback:
+        progress_callback(2, "Building variant membership matrix...")
+
     logger.info(f"Tallymut: {len(df_tally)} rows, {df_tally['date'].nunique()} dates")
 
     # ── 2. Build binary variant-membership columns ────────────────────────────
     df_tally = _build_variant_membership_columns(
         df_tally, variants, pango_loader, cowwid_variants
     )
+
+    if progress_callback:
+        progress_callback(3, "Running LolliPop deconvolution...")
 
     # ── 3. Write files + run lollipop ────────────────────────────────────────
     with TemporaryDirectory() as tmpdir:
