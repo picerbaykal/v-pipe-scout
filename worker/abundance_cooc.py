@@ -34,10 +34,12 @@ logger = logging.getLogger(__name__)
 # Add app/ to sys.path so worker container can import from api/ and utils/
 sys.path.insert(0, "/app_shared")
 
+
 def _build_variant_membership_columns(
         df_tally: pd.DataFrame,
         variants: List[str],
         pango_loader,
+        cowwid_variants=None, #fallback for reconstructed nddes
 ) -> pd.DataFrame:
     """
     Add binary variant-membership columns to the tallymut DataFrame.
@@ -54,9 +56,15 @@ def _build_variant_membership_columns(
     """
     df = df_tally.copy()
     for variant in variants:
-        signature = pango_loader.get_signature(variant)
+        # Use cowwid signature for reconstructed nodes
+        if (variant in pango_loader._reconstructed_signatures
+                and cowwid_variants
+                and variant in cowwid_variants):
+            signature = cowwid_variants[variant]
+            logger.info(f"Using cowwid signature for reconstructed node {variant}: {len(signature)} mutations")
+        else:
+            signature = pango_loader.get_signature(variant)
         df[variant] = df["pos"].isin(signature).astype(int)
-
     return df
 
 def run_deconv_lapis(
@@ -126,6 +134,21 @@ def run_deconv_lapis(
     client = WiseLoculusLapis(wise_url)
     pango_loader = PangoLoader(get_pango_summary_path())
 
+    # Load cowwid signatures as fallback for reconstructed centroid nodes
+    from api.signatures import get_variant_list
+    cowwid_variants = {}
+    try:
+        variant_list = get_variant_list()
+        for v in variant_list.variants:
+            # Convert cowwid mutation format to tallymut pos format
+            cowwid_variants[v.name] = {
+                m[1:] for m in v.signature_mutations
+                if len(m) > 1
+            }
+        logger.info(f"Loaded cowwid signatures for {len(cowwid_variants)} variants")
+    except Exception as e:
+        logger.warning(f"Could not load cowwid signatures: {e}")
+
     logger.info(f"Fetching tallymut: {location} {start_date.date()} → {end_date.date()}")
 
     try:
@@ -135,6 +158,8 @@ def run_deconv_lapis(
                 date_range=(start_date, end_date),
                 variants=variants,
                 pango_loader=pango_loader,
+                cowwid_variants=cowwid_variants,
+
             )
         )
     except Exception as e:
@@ -150,7 +175,9 @@ def run_deconv_lapis(
     logger.info(f"Tallymut: {len(df_tally)} rows, {df_tally['date'].nunique()} dates")
 
     # ── 2. Build binary variant-membership columns ────────────────────────────
-    df_tally = _build_variant_membership_columns(df_tally, variants, pango_loader)
+    df_tally = _build_variant_membership_columns(
+        df_tally, variants, pango_loader, cowwid_variants
+    )
 
     # ── 3. Write files + run lollipop ────────────────────────────────────────
     with TemporaryDirectory() as tmpdir:

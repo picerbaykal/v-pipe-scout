@@ -367,6 +367,7 @@ class WiseLoculusLapis(Lapis):
             date_range: Tuple[datetime, datetime],
             variants: List[str],
             pango_loader,
+            cowwid_variants=None, #fallback for reconstructed nodes
     ) -> pd.DataFrame:
         """
         Build a tallymut-compatible DataFrame from LAPIS mutation counts,
@@ -394,10 +395,11 @@ class WiseLoculusLapis(Lapis):
         # Collect all unique positions from selected variants' signatures
         positions: set = set()
         for variant in variants:
-            signature = pango_loader.get_signature(variant)
+            if variant in pango_loader._reconstructed_signatures and cowwid_variants and variant in cowwid_variants:
+                signature = cowwid_variants[variant]
+            else:
+                signature = pango_loader.get_signature(variant)
             for mut in signature:
-                # signature mutations are in tallymut pos format e.g. "241T"
-                # extract the integer position
                 m = re.match(r"^(\d+)", mut)
                 if m:
                     positions.add(int(m.group(1)))

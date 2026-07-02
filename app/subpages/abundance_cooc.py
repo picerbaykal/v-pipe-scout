@@ -96,12 +96,19 @@ def app():
         # Surveillance panel - cowwid curated variants
         curated_variants = cached_get_variant_names()
 
+        col_select_all, col_clear = st.columns(2)
+        with col_select_all:
+            if st.button("Select all", key="acooc_select_all", use_container_width=True):
+                st.session_state["acooc_variant_multiselect"] = curated_variants
+        with col_clear:
+            if st.button("Clear", key="acooc_clear_variants", use_container_width=True):
+                st.session_state["acooc_variant_multiselect"] = []
+
         selected_variants = st.multiselect(
             "Surveillance variants",
             options=curated_variants,
-            placeholder="Start typing to search for a lineage...",
             help="Curated variants from the Swiss wastewater surveillance panel (cowwid).",
-            key="accoc_variant_multiselect"
+            key="acooc_variant_multiselect",
         )
 
         # Manual add - for v0, user can add any lineage they already know about
