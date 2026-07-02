@@ -3,13 +3,9 @@ import logging
 from streamlit_theme import st_theme
 
 import subpages.index as index
-import subpages.resistance as resistance
-import subpages.proportion as proportion
-import subpages.proportion as proportion
+
 import subpages.signature_explorer as signature_explorer
 import subpages.abundance as abundance
-import subpages.untracked as untracked
-import subpages.region as region
 import subpages.coocurrences as coocurrences
 from utils.system_health import initialize_health_monitoring, display_global_system_status
 
@@ -30,12 +26,8 @@ if __name__ == "__main__":
     # Page configurations
     PAGE_CONFIGS = [
         {"app": index.app, "title": "Home", "icon": "🏠", "default": True, "url_path": None},
-        {"app": resistance.app, "title": "Resistance Mutations", "icon": "🧬", "url_path": "resistance"},
-        {"app": proportion.app, "title": "Search by Proportion", "icon": "🧮", "url_path": "proportion"},
-        {"app": untracked.app, "title": "Untracked Mutations", "icon": "👀", "url_path": "untracked"},
         {"app": signature_explorer.app, "title": "Variant Signature Explorer", "icon": "🔍", "url_path": "signature-explorer"},
         {"app": abundance.app, "title": "Variant Abundances", "icon": "🧩", "url_path": "abundance"},
-        {"app": region.app, "title": "Region Explorer", "icon": "📍", "url_path": "region"},
         {"app": coocurrences.app, "title": "Co-occurrence", "icon": "🔗", "url_path": "cooccurrence"},
     ]
     
