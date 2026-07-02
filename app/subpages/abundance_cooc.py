@@ -61,6 +61,8 @@ def cached_get_variant_names() -> list:
 
 
 def app():
+    st.session_state.setdefault("location_results", {})
+    st.session_state.setdefault("acooc_location_tasks", {})
 
     # ── Header ───────────────────────────────────────────────────────────────
     st.title("Abundance & Co-occurrence")
@@ -219,76 +221,68 @@ def app():
             st.session_state["acooc_trigger_run"] = True
 
     with col_results:
-        with col_results:
 
-            # ── Task submission ───────────────────────────────────────────────────
-            if st.session_state.get("acooc_trigger_run"):
-                st.session_state["acooc_trigger_run"] = False
+        # ── Task submission ───────────────────────────────────────────────────
+        if st.session_state.get("acooc_trigger_run"):
+            st.session_state["acooc_trigger_run"] = False
 
-                # Submit one Celery task per location
-                location_tasks = {}
-                for loc in selected_locations:
-                    task = celery_app.send_task(
-                        "tasks.run_deconvolve_lapis",
-                        kwargs={
-                            "location": loc,
-                            "start_date": start_date.isoformat(),
-                            "end_date": end_date.isoformat(),
-                            "variants": all_selected_variants,
-                            "bootstraps": bootstraps,
-                            "bandwidth": bandwidth,
-                        }
-                    )
-                    location_tasks[loc] = task.id
-                    logger.info(f"Submitted task {task.id} for {loc}")
+            location_tasks = {}
+            for loc in selected_locations:
+                task = celery_app.send_task(
+                    "tasks.run_deconvolve_lapis",
+                    kwargs={
+                        "location": loc,
+                        "start_date": start_date.isoformat(),
+                        "end_date": end_date.isoformat(),
+                        "variants": all_selected_variants,
+                        "bootstraps": bootstraps,
+                        "bandwidth": bandwidth,
+                    }
+                )
+                location_tasks[loc] = task.id
+                logger.info(f"Submitted task {task.id} for {loc}")
 
-                st.session_state["acooc_location_tasks"] = location_tasks
-                st.rerun()
+            st.session_state["acooc_location_tasks"] = location_tasks
+            st.session_state["location_results"] = {}
+            st.rerun()
 
-            # ── Results / polling ─────────────────────────────────────────────────
+        # ── Results ───────────────────────────────────────────────────────────
+        from components.multi_location_results import render_location_results_tabs
+
+        location_tasks = st.session_state.get("acooc_location_tasks", {})
+        location_results = st.session_state.get("location_results", {})
+
+        if not location_tasks:
+            st.info("Results will appear here after running deconvolution.")
+        else:
             location_tasks = st.session_state.get("acooc_location_tasks", {})
 
-            if not location_tasks:
-                st.info("Results will appear here after running deconvolution.")
-            else:
-                # Auto-refresh every 5 seconds while tasks are running
-                any_running = any(
-                    celery_app.AsyncResult(task_id).state in ("PENDING", "STARTED", "RETRY")
-                    for task_id in location_tasks.values()
-                )
-                if any_running:
-                    from streamlit_autorefresh import st_autorefresh
-                    st_autorefresh(interval=5000, key="acooc_autorefresh")
-                for loc, task_id in location_tasks.items():
-                    st.subheader(f"{loc}")
+            # Check task states
+            states = {
+                task_id: celery_app.AsyncResult(task_id).state
+                for task_id in location_tasks.values()
+            }
 
-                    # Check progress from Redis
-                    progress_key = f"task_progress:{task_id}"
-                    progress_data = redis_client.get(progress_key)
+            any_running = any(
+                s in ("PENDING", "STARTED", "RETRY")
+                for s in states.values()
+            )
 
-                    task_result = celery_app.AsyncResult(task_id)
+            any_just_completed = any(
+                s == "SUCCESS"
+                for s in states.values()
+            ) and len(st.session_state.location_results) < len(location_tasks)
 
-                    if task_result.state == "PENDING":
-                        st.spinner(f"Waiting to start...")
+            if any_running or any_just_completed:
+                from streamlit_autorefresh import st_autorefresh
+                st_autorefresh(interval=2000, key="acooc_autorefresh")
 
-                    elif task_result.state == "STARTED" or task_result.state == "RETRY":
-                        if progress_data:
-                            progress = json.loads(progress_data)
-                            st.progress(
-                                progress["current"] / progress["total"],
-                                text=progress.get("status", "Running...")
-                            )
-                        else:
-                            st.spinner("Running deconvolution...")
-
-                    elif task_result.state == "SUCCESS":
-                        st.success("Deconvolution complete.")
-                        result = task_result.result
-                        st.json(result)
-
-                    elif task_result.state == "FAILURE":
-                        st.error(f"Task failed: {task_result.info}")
-
+            render_location_results_tabs(
+                location_tasks=location_tasks,
+                location_results=st.session_state.location_results,
+                celery_app=celery_app,
+                redis_client=redis_client,
+            )
 
 
 if __name__ == "__main__":

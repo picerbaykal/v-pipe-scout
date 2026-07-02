@@ -56,6 +56,7 @@ def _build_variant_membership_columns(
     for variant in variants:
         signature = pango_loader.get_signature(variant)
         df[variant] = df["pos"].isin(signature).astype(int)
+
     return df
 
 def run_deconv_lapis(
@@ -163,7 +164,7 @@ def run_deconv_lapis(
 
         # Write variants_config.yaml
         # NOTe: start_date goes here, NOT in deconv_config
-        variants_config_fp = tmpdir_path / "variants_config.json"
+        variants_config_fp = tmpdir_path / "variants_config.yaml"
         with open(variants_config_fp, "w") as f:
             yaml.dump({
                 "variants_pangolin": {v: v for v in variants},
@@ -183,46 +184,47 @@ def run_deconv_lapis(
                 "regressor": regressor,
                 "regressor_params": regressor_params,
                 "deconv_params": deconv_params,
+                "remove_deletions": True,
             }, f)
 
-            # Output files
-            output_json_fp = output_dir / "deconvolved.json"
-            output_csv_fp = output_dir / "deconvolved.csv"
+        # Output files
+        output_json_fp = output_dir / "deconvolved.json"
+        output_csv_fp = output_dir / "deconvolved.csv"
 
-            # Run lollipop deconvolute
-            # No --namefield flag — our tallymut already has pos/base natively
-            # so lollipop auto-builds the mutations name field (gotcha #4)
-            run_command = [
-                "lollipop", "deconvolute",
-                "--output", str(output_csv_fp),
-                "--out-json", str(output_json_fp),
-                "-c", str(variants_config_fp),
-                "--deconv-config", str(deconv_config_fp),
-                "--seed", "42",
-                str(tallymut_fp),
-            ]
+        # Run lollipop deconvolute
+        # No --namefield flag — our tallymut already has pos/base natively
+        # so lollipop auto-builds the mutations name field (gotcha #4)
+        run_command = [
+            "lollipop", "deconvolute",
+            "--output", str(output_csv_fp),
+            "--out-json", str(output_json_fp),
+            "-c", str(variants_config_fp),
+            "--deconv-config", str(deconv_config_fp),
+            "--seed", "42",
+            str(tallymut_fp),
+        ]
 
-            try:
-                result = subprocess.run(
-                    run_command,
-                    check=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                )
-                logger.info(f"lollipop deconvolute completed")
-                if result.stderr:
-                    logger.debug(f"lollipop stderr: {result.stderr}")
-            except subprocess.CalledProcessError as e:
-                logger.error(f"lollipop deconvolute failed: {e}")
-                if e.stderr:
-                    logger.error(f"stderr: {e.stderr}")
-                raise RuntimeError(
-                    f"lollipop deconvolute failed: {e.stderr}"
-                ) from e
+        try:
+            result = subprocess.run(
+                run_command,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            logger.info(f"lollipop deconvolute completed")
+            if result.stderr:
+                logger.debug(f"lollipop stderr: {result.stderr}")
+        except subprocess.CalledProcessError as e:
+            logger.error(f"lollipop deconvolute failed: {e}")
+            if e.stderr:
+                logger.error(f"stderr: {e.stderr}")
+            raise RuntimeError(
+                f"lollipop deconvolute failed: {e.stderr}"
+            ) from e
 
-            # ── 4. Parse and return results ───────────────────────────────────────
-            with open(output_json_fp, "r") as f:
-                deconvolved_data = json.load(f)
+        # ── 4. Parse and return results ───────────────────────────────────────
+        with open(output_json_fp, "r") as f:
+            deconvolved_data = json.load(f)
 
-        return deconvolved_data
+    return deconvolved_data

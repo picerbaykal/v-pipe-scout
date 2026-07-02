@@ -117,11 +117,42 @@ class PangoLoader:
                 if isinstance(mutation, str) and len(mutation) > 1:
                     private_mutations.add(self._normalize_substitution(mutation))
 
+            # Add nucleotide deletions — pango_summary stores as ranges
+            # e.g. "11288-11296" → expand to "11288-", "11289-", ..., "11296-"
+            # matching the tallymut pos format used by LolliPop
+            nuc_deletions = entry.get("nucDeletions", [])
+            if not isinstance(nuc_deletions, list):
+                nuc_deletions = []
+
+            for deletion in nuc_deletions:
+                if isinstance(deletion, str) and '-' in deletion:
+                    try:
+                        start, end = deletion.split('-')
+                        for pos in range(int(start), int(end) + 1):
+                            signature.add(f"{pos}-")
+                    except (ValueError, IndexError):
+                        pass
+
+            nuc_deletions_new = entry.get("nucDeletionsNew", [])
+            if not isinstance(nuc_deletions_new, list):
+                nuc_deletions_new = []
+
+            for deletion in nuc_deletions_new:
+                if isinstance(deletion, str) and '-' in deletion:
+                    try:
+                        start, end = deletion.split('-')
+                        for pos in range(int(start), int(end) + 1):
+                            private_mutations.add(f"{pos}-")
+                    except (ValueError, IndexError):
+                        pass
+
+
             self._signatures[lineage] = signature
             self._private_mutations[lineage] = private_mutations
             self._designation_dates[lineage] = (
                 designation_date if isinstance(designation_date, str) else None
             )
+
 
     def _fill_empty_node_signatures(self) -> None:
         """
