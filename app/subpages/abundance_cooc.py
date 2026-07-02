@@ -24,6 +24,7 @@ from api.wiseloculus import WiseLoculusLapis
 from utils.config import get_wiseloculus_url
 
 from components.abundance_cooc_tree import render_panel_tree
+from components.jaccard_heatmap import render_jaccard_heatmap
 
 # Initialize Celery
 celery_app = Celery(
@@ -295,6 +296,15 @@ def app():
                 celery_app=celery_app,
                 redis_client=redis_client,
             )
+
+        # ── Signature similarity ──────────────────────────────────────────────
+        if len(all_selected_variants) >= 2:
+            st.markdown("---")
+            render_jaccard_heatmap(
+                variants=all_selected_variants,
+                pango_loader=cached_get_pango_loader(),
+            )
+
 
 
 if __name__ == "__main__":
