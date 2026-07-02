@@ -116,6 +116,7 @@ def devconvolve(
                 "regressor": regressor,
                 "regressor_params": regressor_params,
                 "deconv_params": deconv_params,
+                "remove_deletions": True,
             }
             yaml.dump(deconv_config, f)
 
@@ -158,8 +159,6 @@ def devconvolve(
         # Create output filename with descriptive suffix
         tallymut_file = output_dir / (mutation_counts.stem + "_tallymut.tsv")
 
-        # DEBUG: Print head of mutation_counts_fp
-        logger.debug(f"Mutation counts file: {mutation_counts_fp}")
         # do head in the terminal
         head_command = ["head", "-n", "5", str(mutation_counts_fp)]
         try:
