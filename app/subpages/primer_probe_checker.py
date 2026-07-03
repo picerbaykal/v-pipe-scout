@@ -54,7 +54,7 @@ def fetch_locations():
     """Fetch available wastewater locations from LAPIS."""
     async def _fetch():
         lapis = WiseLoculusLapis(get_wiseloculus_url())
-        return await lapis.get_locations()
+        return await lapis.fetch_locations()
     try:
         locations = asyncio.run(_fetch())
         return sorted(locations), None
