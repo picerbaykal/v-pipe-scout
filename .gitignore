@@ -10,4 +10,5 @@ deployment.log
 .vscode/
 
 # Exclude data files that shouldn't be committed
-data/known_variants/*.yaml
+data/known_variants/*.yaml.envrc
+.idea/
