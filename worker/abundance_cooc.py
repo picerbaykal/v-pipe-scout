@@ -34,6 +34,26 @@ logger = logging.getLogger(__name__)
 # Add app/ to sys.path so worker container can import from api/ and utils/
 sys.path.insert(0, "/app_shared")
 
+# Load cowwid signatures once at worker startup — used as fallback
+# for reconstructed centroid nodes (e.g. BA.3.2) where pango_summary
+# has no direct sequences. Loading here avoids re-downloading 29 YAML
+# files from GitHub on every task execution.
+def _load_cowwid_variants() -> dict:
+    try:
+        from api.signatures import get_variant_list
+        variant_list = get_variant_list()
+        result = {
+            v.name: {m[1:] for m in v.signature_mutations if len(m) > 1}
+            for v in variant_list.variants
+        }
+        logger.info(f"Loaded cowwid signatures for {len(result)} variants")
+        return result
+    except Exception as e:
+        logger.warning(f"Could not load cowwid signatures: {e}")
+        return {}
+
+_COWWID_VARIANTS = _load_cowwid_variants()
+
 
 def _build_variant_membership_columns(
         df_tally: pd.DataFrame,
@@ -136,21 +156,7 @@ def run_deconv_lapis(
     pango_loader = PangoLoader(get_pango_summary_path())
 
     # Load cowwid signatures as fallback for reconstructed centroid nodes
-    from api.signatures import get_variant_list
-    cowwid_variants = {}
-    try:
-        variant_list = get_variant_list()
-        for v in variant_list.variants:
-            # Convert cowwid mutation format to tallymut pos format
-            cowwid_variants[v.name] = {
-                m[1:] for m in v.signature_mutations
-                if len(m) > 1
-            }
-        logger.info(f"Loaded cowwid signatures for {len(cowwid_variants)} variants")
-    except Exception as e:
-        logger.warning(f"Could not load cowwid signatures: {e}")
-
-    logger.info(f"Fetching tallymut: {location} {start_date.date()} → {end_date.date()}")
+    cowwid_variants = _COWWID_VARIANTS
 
     try:
         df_tally = asyncio.run(
