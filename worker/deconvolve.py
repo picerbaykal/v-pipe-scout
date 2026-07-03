@@ -60,7 +60,8 @@ def devconvolve(
         if isinstance(mutation_counts_df.index, pd.MultiIndex):
             logger.debug("Detected MultiIndex in mutation_counts_df, resetting to columns")
             mutation_counts_df = mutation_counts_df.reset_index()
-        
+
+
         # Save the dataframes to CSV files in the input directory
         pd.DataFrame.to_csv(
             mutation_counts_df,
