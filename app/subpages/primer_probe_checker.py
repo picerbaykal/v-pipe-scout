@@ -2,7 +2,11 @@
 Primer & Probe Checker
 ======================
 Checks whether SARS-CoV-2 primer/probe binding sites have mutations
-in Swiss wastewater data, using real sampling dates only.
+in Swiss wastewater data.
+
+Uses two LAPIS endpoints:
+1. /sample/nucleotideMutations — find which mutations exist at primer positions
+2. /component/nucleotideMutationsOverTime — fetch monthly time series for those mutations
 """
 
 import asyncio
@@ -11,31 +15,18 @@ import logging
 import re
 from datetime import date, datetime, timedelta
 
+import aiohttp
 import pandas as pd
 import streamlit as st
 from Bio import SeqIO
 from Bio.Seq import Seq
+from dateutil.relativedelta import relativedelta
 
-from api.wiseloculus import WiseLoculusLapis
 from utils.config import get_wiseloculus_url
 
 logger = logging.getLogger(__name__)
 
-# ── Cached LAPIS client ────────────────────────────────────────────────────────
-@st.cache_resource
-def get_lapis_client():
-    return WiseLoculusLapis(get_wiseloculus_url())
-
 # ── Helper functions ───────────────────────────────────────────────────────────
-
-def fetch_locations():
-    """Fetch available wastewater locations from LAPIS."""
-    try:
-        lapis = get_lapis_client()
-        locations = lapis.fetch_locations()
-        return sorted(locations), None
-    except Exception as e:
-        return None, str(e)
 
 def get_piece_type(name):
     """Detect if a primer/probe piece is forward, reverse or probe."""
@@ -80,14 +71,139 @@ def build_genspectrum_urls(start, end, reference, location=None):
     link_b = base + "%7C".join([str(pos) for pos in positions])
     return link_a, link_b
 
-def process_time_series(df, results):
-    """Process raw mutation DataFrame into monthly proportions per position."""
-    if df.empty:
+def build_monthly_ranges(date_from, date_to):
+    """Build monthly date ranges between two dates."""
+    ranges = []
+    current = date_from.replace(day=1)
+    while current <= date_to:
+        last = (current + relativedelta(months=1)) - timedelta(days=1)
+        ranges.append({
+            "dateFrom": current.strftime("%Y-%m-%d"),
+            "dateTo": min(last, date_to).strftime("%Y-%m-%d")
+        })
+        current = current + relativedelta(months=1)
+    return ranges
+
+# ── LAPIS fetch functions ──────────────────────────────────────────────────────
+
+@st.cache_data(ttl=3600)
+def fetch_locations_list():
+    """Fetch available wastewater locations from LAPIS."""
+    async def _fetch():
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{get_wiseloculus_url()}/sample/aggregated",
+                params={"fields": "locationName"},
+                headers={"accept": "application/json"}
+            ) as response:
+                if response.status != 200:
+                    return []
+                data = await response.json()
+                return [
+                    d["locationName"]
+                    for d in data.get("data", [])
+                    if d.get("locationName")
+                ]
+    try:
+        locations = asyncio.run(_fetch())
+        return sorted(locations), None
+    except Exception as e:
+        return [], str(e)
+
+@st.cache_data(ttl=3600)
+def fetch_primer_mutations(location, positions_tuple):
+    """
+    Step 1: fetch which mutations exist at primer/probe positions.
+    Uses /sample/nucleotideMutations — fast, one call.
+    positions_tuple: tuple of int positions (hashable for cache)
+    """
+    async def _fetch():
+        params = {"limit": 100000}
+        if location:
+            params["locationName"] = location
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{get_wiseloculus_url()}/sample/nucleotideMutations",
+                params=params,
+                headers={"accept": "application/json"}
+            ) as response:
+                if response.status != 200:
+                    return []
+                data = await response.json()
+                positions = set(positions_tuple)
+                return [
+                    entry["mutation"]
+                    for entry in data.get("data", [])
+                    if entry.get("position") in positions
+                ]
+    try:
+        return asyncio.run(_fetch())
+    except Exception as e:
+        logger.error(f"fetch_primer_mutations error: {e}")
+        return []
+
+@st.cache_data(ttl=3600)
+def fetch_time_series(mutations_tuple, location, date_from_str, date_to_str):
+    """
+    Step 2: fetch monthly time series for specific mutations.
+    Uses /component/nucleotideMutationsOverTime — one call, fast.
+    """
+    mutations_list = list(mutations_tuple)
+    if not mutations_list:
         return {}
 
-    df = df.copy()
-    df["month"] = df["date"].dt.to_period("M").astype(str)
+    date_from = datetime.strptime(date_from_str, "%Y-%m-%d")
+    date_to = datetime.strptime(date_to_str, "%Y-%m-%d")
+    date_ranges = build_monthly_ranges(date_from, date_to)
 
+    filters = {}
+    if location:
+        filters["locationName"] = location
+
+    async def _fetch():
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=120)
+        ) as session:
+            async with session.post(
+                f"{get_wiseloculus_url()}/component/nucleotideMutationsOverTime",
+                json={
+                    "filters": filters,
+                    "dateRanges": date_ranges,
+                    "includeMutations": mutations_list,
+                    "dateField": "samplingDate"
+                },
+                headers={"content-type": "application/json"}
+            ) as response:
+                if response.status != 200:
+                    logger.error(f"nucleotideMutationsOverTime failed: {response.status}")
+                    return {}
+                data = (await response.json())["data"]
+                mutations = data["mutations"]
+                date_labels = [r["dateFrom"][:7] for r in data["dateRanges"]]
+                result = {}
+                for i, mut in enumerate(mutations):
+                    result[mut] = {}
+                    for j, label in enumerate(date_labels):
+                        cell = data["data"][i][j]
+                        if cell["coverage"] > 0:
+                            result[mut][label] = cell["count"] / cell["coverage"]
+                        else:
+                            result[mut][label] = 0.0
+                return result
+
+    try:
+        return asyncio.run(_fetch())
+    except Exception as e:
+        logger.error(f"fetch_time_series error: {e}")
+        return {}
+
+# ── Data processing ────────────────────────────────────────────────────────────
+
+def process_time_series(time_series, results):
+    """
+    Process time series dict into position_data for heatmap.
+    Filters out months with no data.
+    """
     position_data = {}
 
     for r in results:
@@ -98,38 +214,29 @@ def process_time_series(df, results):
         end = r["End"]
         piece_type = get_piece_type(name)
 
-        def in_range(pos_str):
+        for mut, proportions in time_series.items():
+            # extract position number from mutation string e.g. T28297C → 28297
             try:
-                pos_num = int(''.join(filter(str.isdigit, str(pos_str))))
-                return start <= pos_num <= end
-            except Exception:
-                return False
-
-        region_df = df[df["pos"].apply(in_range)]
-        if region_df.empty:
-            continue
-
-        for pos_mut in region_df["pos"].unique():
-            try:
-                pos_num = int(''.join(filter(str.isdigit, str(pos_mut))))
+                pos_num = int(re.search(r'\d+', mut).group())
             except Exception:
                 continue
 
-            if pos_num not in position_data:
-                position_data[pos_num] = {
-                    "name": name,
-                    "piece_type": piece_type,
-                    "monthly": {}
-                }
-
-            pos_df = region_df[region_df["pos"] == pos_mut]
-            for month, group in pos_df.groupby("month"):
-                avg_frac = group["frac"].mean()
-                if month not in position_data[pos_num]["monthly"]:
-                    position_data[pos_num]["monthly"][month] = {}
-                position_data[pos_num]["monthly"][month][pos_mut] = avg_frac
+            if start <= pos_num <= end:
+                if pos_num not in position_data:
+                    position_data[pos_num] = {
+                        "name": name,
+                        "piece_type": piece_type,
+                        "monthly": {}
+                    }
+                for month, frac in proportions.items():
+                    if frac > 0:
+                        if month not in position_data[pos_num]["monthly"]:
+                            position_data[pos_num]["monthly"][month] = {}
+                        position_data[pos_num]["monthly"][month][mut] = frac
 
     return position_data
+
+# ── Heatmap ────────────────────────────────────────────────────────────────────
 
 def build_html_heatmap(position_data):
     """Build custom HTML heatmap from position data."""
@@ -236,6 +343,8 @@ def build_html_heatmap(position_data):
 </div>"""
     return html
 
+# ── Summary table ──────────────────────────────────────────────────────────────
+
 def build_summary_table(position_data, threshold):
     """Build summary table — one row per primer/probe piece."""
     primer_summary = {}
@@ -280,14 +389,14 @@ def app():
     st.title("🔬 Primer & Probe Checker")
     st.markdown(
         """
-        Upload a reference genome and a primer/probe FASTA file.
+        Upload a reference genome and primer/probe sequences.
         The app checks whether binding sites have mutations in Swiss wastewater data.
         """
     )
     st.divider()
 
     # ── Fetch locations ────────────────────────────────────────────────────────
-    locations, loc_error = fetch_locations()
+    locations, loc_error = fetch_locations_list()
     if loc_error or not locations:
         st.error(f"Could not load locations from LAPIS: {loc_error}")
         locations = []
@@ -320,37 +429,48 @@ def app():
 
     st.divider()
 
-    # ── File uploads ───────────────────────────────────────────────────────────
-    col_ref, col_primer = st.columns(2)
+    # ── Step 1: Reference genome ───────────────────────────────────────────────
+    st.subheader("Step 1 — Upload reference genome")
+    ref_file = st.file_uploader(
+        "Reference genome (FASTA)",
+        type=["fasta", "fa"],
+        help="e.g. Wuhan reference NC_045512.2 (29,903 bp)",
+        key="ppc_ref_upload",
+    )
 
-    with col_ref:
-        ref_file = st.file_uploader(
-            "Reference genome (FASTA)",
-            type=["fasta", "fa"],
-            help="e.g. Wuhan reference NC_045512.2",
-            key="ppc_ref_upload",
-        )
-
-    with col_primer:
-        primer_file = st.file_uploader(
-            "Primer/probe FASTA",
-            type=["fasta", "fa"],
-            help="e.g. CDC N1/N2 diagnostic primers, or ARTIC amplicon primers",
-            key="ppc_fasta_upload",
-        )
-
-    if ref_file is None or primer_file is None:
-        st.info("👆 Upload both a reference genome and a primer/probe FASTA file to get started.")
+    if ref_file is None:
+        st.info("👆 Upload a reference genome to get started.")
         return
 
-    # ── Parse reference ────────────────────────────────────────────────────────
+    # validate reference
     try:
         ref_content = ref_file.read().decode("utf-8")
         ref_record = next(SeqIO.parse(io.StringIO(ref_content), "fasta"))
         reference = str(ref_record.seq).upper()
-        st.caption(f"Reference: {ref_record.id} ({len(reference):,} bp)")
     except Exception as e:
-        st.error(f"Could not parse reference genome: {e}")
+        st.error(f"Could not parse file: {e}")
+        return
+
+    if len(reference) < 1000:
+        st.error(
+            f"This file looks like a primer file ({len(reference):,} bp), not a reference genome. "
+            "Please upload a full genome reference like NC_045512.2 (29,903 bp)."
+        )
+        return
+
+    st.success(f"✅ Reference genome accepted: {ref_record.id} ({len(reference):,} bp)")
+
+    # ── Step 2: Primer/probe FASTA ─────────────────────────────────────────────
+    st.subheader("Step 2 — Upload primer/probe FASTA")
+    primer_file = st.file_uploader(
+        "Primer/probe FASTA",
+        type=["fasta", "fa"],
+        help="e.g. CDC N1/N2 diagnostic primers, or ARTIC amplicon primers",
+        key="ppc_fasta_upload",
+    )
+
+    if primer_file is None:
+        st.info("👆 Now upload your primer/probe FASTA file.")
         return
 
     # ── Parse primers ──────────────────────────────────────────────────────────
@@ -389,7 +509,9 @@ def app():
                 })
                 continue
 
-        link_a, link_b = build_genspectrum_urls(start, end, reference, location=selected_location)
+        link_a, link_b = build_genspectrum_urls(
+            start, end, reference, location=selected_location
+        )
         results.append({
             "Name": clean_name, "Start": start, "End": end,
             "Strand": strand, "Method": method,
@@ -409,39 +531,40 @@ def app():
         st.error("No sequences could be mapped to the reference genome.")
         return
 
-    # ── Collect positions to query ─────────────────────────────────────────────
+    # ── Collect positions ──────────────────────────────────────────────────────
     all_positions = set()
     for r in found:
         all_positions.update(range(r["Start"], r["End"] + 1))
 
-    # ── Fetch mutation data from LAPIS ─────────────────────────────────────────
-    date_range = (
-        datetime.combine(date_from, datetime.min.time()),
-        datetime.combine(date_to, datetime.max.time()),
-    )
+    positions_tuple = tuple(sorted(all_positions))
+    date_from_str = date_from.strftime("%Y-%m-%d")
+    date_to_str = date_to.strftime("%Y-%m-%d")
 
-    lapis = get_lapis_client()
+    # ── Step 1: find mutations at primer positions ─────────────────────────────
+    with st.spinner("Finding mutations at primer-probe positions..."):
+        mutations_list = fetch_primer_mutations(selected_location, positions_tuple)
 
-    with st.spinner("Fetching mutation data from LAPIS..."):
-        try:
-            df = asyncio.run(
-                lapis.get_mutations_at_positions(
-                    locationName=selected_location,
-                    date_range=date_range,
-                    positions=all_positions,
-                )
-            )
-        except Exception as e:
-            st.error(f"Error fetching data from LAPIS: {e}")
-            logger.error(f"LAPIS error: {e}")
-            return
-
-    if df.empty:
-        st.warning("No mutation data found for the selected site and date range.")
+    if not mutations_list:
+        st.success("✅ No mutations found at primer-probe positions for the selected site.")
         return
 
-    # ── Process time series ────────────────────────────────────────────────────
-    position_data = process_time_series(df, found)
+    st.caption(f"Found {len(mutations_list)} mutations at primer-probe positions")
+
+    # ── Step 2: fetch time series ──────────────────────────────────────────────
+    with st.spinner("Fetching time series data..."):
+        time_series = fetch_time_series(
+            tuple(sorted(mutations_list)),
+            selected_location,
+            date_from_str,
+            date_to_str
+        )
+
+    if not time_series:
+        st.warning("No time series data available for the selected period.")
+        return
+
+    # ── Process data ───────────────────────────────────────────────────────────
+    position_data = process_time_series(time_series, found)
 
     if not position_data:
         st.success("✅ No mutations found in primer-probe regions for the selected period.")
@@ -469,7 +592,9 @@ def app():
     # ── GenSpectrum links ──────────────────────────────────────────────────────
     st.subheader("GenSpectrum links")
     for r in found:
-        with st.expander(f"🧬 {r['Name']} — positions {r['Start']}–{r['End']} ({r['Strand']} strand)"):
+        with st.expander(
+            f"🧬 {r['Name']} — positions {r['Start']}–{r['End']} ({r['Strand']} strand)"
+        ):
             col1, col2 = st.columns(2)
             with col1:
                 st.markdown("**Link A — reference sequence prevalence**")
