@@ -6,7 +6,7 @@ in Swiss wastewater data.
 
 Uses two LAPIS endpoints:
 1. /sample/nucleotideMutations — find which mutations exist at primer positions
-2. /component/nucleotideMutationsOverTime — fetch monthly time series for those mutations
+2. /component/nucleotideMutationsOverTime — fetch monthly time series
 """
 
 import asyncio
@@ -29,7 +29,6 @@ logger = logging.getLogger(__name__)
 # ── Helper functions ───────────────────────────────────────────────────────────
 
 def get_piece_type(name):
-    """Detect if a primer/probe piece is forward, reverse or probe."""
     clean = name.split("::")[0].upper()
     if clean.endswith("-P") or clean.endswith("_P"):
         return "probe"
@@ -40,14 +39,12 @@ def get_piece_type(name):
     return "unknown"
 
 def extract_positions_from_header(header):
-    """ARTIC format: extract start/end from ::NC_045512.2:47-78"""
     match = re.search(r"NC_045512\.2:(\d+)-(\d+)", header.strip())
     if match:
         return int(match.group(1)), int(match.group(2)), "+"
     return None
 
 def search_reference(primer_seq, ref_seq):
-    """CDC format: find primer position by string search."""
     seq_len = len(primer_seq)
     pos = ref_seq.find(primer_seq)
     if pos != -1:
@@ -59,7 +56,6 @@ def search_reference(primer_seq, ref_seq):
     return None
 
 def build_genspectrum_urls(start, end, reference, location=None):
-    """Build GenSpectrum Link A and Link B for a primer/probe region."""
     region = reference[start - 1:end]
     positions = list(range(start, end + 1))
     base = "https://genspectrum.org/swiss-wastewater/covid?"
@@ -72,7 +68,6 @@ def build_genspectrum_urls(start, end, reference, location=None):
     return link_a, link_b
 
 def build_monthly_ranges(date_from, date_to):
-    """Build monthly date ranges between two dates."""
     ranges = []
     current = date_from.replace(day=1)
     while current <= date_to:
@@ -88,7 +83,6 @@ def build_monthly_ranges(date_from, date_to):
 
 @st.cache_data(ttl=3600)
 def fetch_locations_list():
-    """Fetch available wastewater locations from LAPIS."""
     async def _fetch():
         async with aiohttp.ClientSession() as session:
             async with session.get(
@@ -114,8 +108,7 @@ def fetch_locations_list():
 def fetch_primer_mutations(location, positions_tuple):
     """
     Step 1: fetch which mutations exist at primer/probe positions.
-    Uses /sample/nucleotideMutations — fast, one call.
-    positions_tuple: tuple of int positions (hashable for cache)
+    location=None means all sites.
     """
     async def _fetch():
         params = {"limit": 100000}
@@ -146,7 +139,7 @@ def fetch_primer_mutations(location, positions_tuple):
 def fetch_time_series(mutations_tuple, location, date_from_str, date_to_str):
     """
     Step 2: fetch monthly time series for specific mutations.
-    Uses /component/nucleotideMutationsOverTime — one call, fast.
+    location=None means all sites.
     """
     mutations_list = list(mutations_tuple)
     if not mutations_list:
@@ -200,10 +193,7 @@ def fetch_time_series(mutations_tuple, location, date_from_str, date_to_str):
 # ── Data processing ────────────────────────────────────────────────────────────
 
 def process_time_series(time_series, results):
-    """
-    Process time series dict into position_data for heatmap.
-    Filters out months with no data.
-    """
+    """Process time series dict into position_data for heatmap."""
     position_data = {}
 
     for r in results:
@@ -215,7 +205,6 @@ def process_time_series(time_series, results):
         piece_type = get_piece_type(name)
 
         for mut, proportions in time_series.items():
-            # extract position number from mutation string e.g. T28297C → 28297
             try:
                 pos_num = int(re.search(r'\d+', mut).group())
             except Exception:
@@ -239,7 +228,6 @@ def process_time_series(time_series, results):
 # ── Heatmap ────────────────────────────────────────────────────────────────────
 
 def build_html_heatmap(position_data):
-    """Build custom HTML heatmap from position data."""
     if not position_data:
         return "<p>No mutations found in primer-probe regions.</p>"
 
@@ -345,18 +333,26 @@ def build_html_heatmap(position_data):
 
 # ── Summary table ──────────────────────────────────────────────────────────────
 
-def build_summary_table(position_data, threshold):
-    """Build summary table — one row per primer/probe piece."""
+def build_summary_table(position_data, found, threshold):
+    """Build summary table — one row per primer/probe piece including clean ones."""
+    # initialise all primers — including clean ones with no mutations
     primer_summary = {}
+    for r in found:
+        if r["Start"] is None:
+            continue
+        name = r["Name"]
+        piece_type = get_piece_type(name)
+        primer_summary[name] = {
+            "piece_type": piece_type,
+            "worst_mutation": None,
+            "worst_proportion": 0.0,
+        }
+
+    # update with actual mutation data
     for pos, info in position_data.items():
         name = info["name"]
-        piece_type = info["piece_type"]
         if name not in primer_summary:
-            primer_summary[name] = {
-                "piece_type": piece_type,
-                "worst_mutation": None,
-                "worst_proportion": 0.0,
-            }
+            continue
         for month, muts in info["monthly"].items():
             for mut, frac in muts.items():
                 if frac > primer_summary[name]["worst_proportion"]:
@@ -407,10 +403,10 @@ def app():
     with col1:
         selected_location = st.selectbox(
             "Wastewater site",
-            options=locations,
+            options=["All sites"] + locations,
             index=0,
             key="ppc_location",
-            help="Select a wastewater treatment plant"
+            help="Select a wastewater treatment plant or all sites combined"
         )
 
     with col2:
@@ -427,6 +423,9 @@ def app():
             key="ppc_date_to",
         )
 
+    # location filter — None means all sites
+    location_filter = None if selected_location == "All sites" else selected_location
+
     st.divider()
 
     # ── Step 1: Reference genome ───────────────────────────────────────────────
@@ -442,7 +441,6 @@ def app():
         st.info("👆 Upload a reference genome to get started.")
         return
 
-    # validate reference
     try:
         ref_content = ref_file.read().decode("utf-8")
         ref_record = next(SeqIO.parse(io.StringIO(ref_content), "fasta"))
@@ -497,9 +495,9 @@ def app():
             start, end, strand = positions
             method = "from header"
         else:
-            found = search_reference(seq, reference)
-            if found:
-                start, end, strand = found
+            found_pos = search_reference(seq, reference)
+            if found_pos:
+                start, end, strand = found_pos
                 method = "string search"
             else:
                 results.append({
@@ -510,7 +508,7 @@ def app():
                 continue
 
         link_a, link_b = build_genspectrum_urls(
-            start, end, reference, location=selected_location
+            start, end, reference, location=location_filter
         )
         results.append({
             "Name": clean_name, "Start": start, "End": end,
@@ -542,7 +540,7 @@ def app():
 
     # ── Step 1: find mutations at primer positions ─────────────────────────────
     with st.spinner("Finding mutations at primer-probe positions..."):
-        mutations_list = fetch_primer_mutations(selected_location, positions_tuple)
+        mutations_list = fetch_primer_mutations(location_filter, positions_tuple)
 
     if not mutations_list:
         st.success("✅ No mutations found at primer-probe positions for the selected site.")
@@ -554,7 +552,7 @@ def app():
     with st.spinner("Fetching time series data..."):
         time_series = fetch_time_series(
             tuple(sorted(mutations_list)),
-            selected_location,
+            location_filter,
             date_from_str,
             date_to_str
         )
@@ -572,6 +570,7 @@ def app():
 
     # ── Heatmap ────────────────────────────────────────────────────────────────
     st.subheader("Mutation prevalence over time")
+    st.caption(f"Site: {selected_location} | {date_from_str} to {date_to_str}")
     html = build_html_heatmap(position_data)
     st.html(html)
 
@@ -586,11 +585,14 @@ def app():
     )
     st.caption("Controls when a mutation is flagged as Warning or Critical in the table below.")
 
-    summary_df = build_summary_table(position_data, threshold)
+    summary_df = build_summary_table(position_data, found, threshold)
     st.dataframe(summary_df, use_container_width=True, hide_index=True)
 
     # ── GenSpectrum links ──────────────────────────────────────────────────────
     st.subheader("GenSpectrum links")
+    if selected_location == "All sites":
+        st.info("💡 Links below have no location filter. Select a specific site for location-filtered links.")
+
     for r in found:
         with st.expander(
             f"🧬 {r['Name']} — positions {r['Start']}–{r['End']} ({r['Strand']} strand)"
