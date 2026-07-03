@@ -114,19 +114,17 @@ def lapis_mutation_to_pos(mutation: str) -> Optional[str]:
     Returns:
         str: tallymut pos format e.g. "241T", "508-"
         None: if the mutation string is malformed or an insertion
-
-    Examples:
-        >>> lapis_mutation_to_pos("C241T")
-        "241T"
-        >>> lapis_mutation_to_pos("T508-")
-        "508-"
-        >>> lapis_mutation_to_pos("malformed")
-        None
     """
-    m = re.match(r"^[A-Z](\d+)([A-Z\-])$", mutation)
-    if m:
-        return m.group(1) + m.group(2)
-    return None
+    if not mutation or len(mutation) < 3:
+        return None
+    match = re.match(r'^[A-Z](\d+)([A-Z\-])$', mutation)
+    if not match:
+        return None
+    position = match.group(1)
+    alt = match.group(2)
+    if alt == '-':
+        return f"{position}-"
+    return f"{position}{alt}"
 
 def sort_mutations_by_position(mutations: List[str]) -> List[str]:
     """Sort a list of mutations by their genomic position in ascending order.
