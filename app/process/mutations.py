@@ -215,3 +215,25 @@ def possible_mutations_at_position(position: int, mutation_type: MutationType, g
             mutations.append(f"{position}-")
     
     return mutations
+def lapis_mutation_to_pos(mutation: str) -> Optional[str]:
+    """
+    Convert a LAPIS nucleotide mutation string to tallymut pos format.
+    LAPIS returns mutations as "C241T" (ref + position + alt).
+    Tallymut format used by LolliPop is "241T" (position + alt, no ref).
+    Args:
+        mutation: LAPIS mutation string e.g. "C241T", "T508-"
+    Returns:
+        str: tallymut pos format e.g. "241T", "508-"
+        None: if the mutation string is malformed or an insertion
+    """
+    if not mutation or len(mutation) < 3:
+        return None
+    match = re.match(r'^[A-Z](\d+)([A-Z\-])$', mutation)
+    if not match:
+        return None
+    position = match.group(1)
+    alt = match.group(2)
+    # skip insertions
+    if alt == '-':
+        return f"{position}-"
+    return f"{position}{alt}"
