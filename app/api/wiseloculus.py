@@ -12,6 +12,7 @@ import pandas as pd
 from .lapis import Lapis
 from .exceptions import APIError
 from interface import MutationType
+from process.mutations import lapis_mutation_to_pos
 
 # Constants for fallback date range
 # When API fails, use the last 3 months instead of an entire year to avoid huge API calls
@@ -760,122 +761,156 @@ class WiseLoculusLapis(Lapis):
             logging.error(traceback.format_exc())
             raise APIError(f"Unexpected error while fetching co-occurrence data: {str(e)}", details=str(e))
 
+
     async def _get_sampling_dates(
-            self,
-            locationName: str,
-            date_range: Tuple[datetime, datetime],
+        self,
+        locationName: str,
+        date_range: Tuple[datetime, datetime],
     ) -> List[str]:
-        """Get all real sampling dates for a location and date range."""
+        """
+        Fetch actual sampling dates available for a location and date range.
+        Wastewater is sampled ~2x/week, not daily.
+        """
         payload = {
+            "locationName": locationName,
             "samplingDateFrom": date_range[0].strftime('%Y-%m-%d'),
             "samplingDateTo": date_range[1].strftime('%Y-%m-%d'),
-            "locationName": locationName,
-            "fields": "samplingDate",
+            "fields": ["samplingDate"],
         }
         try:
             timeout = aiohttp.ClientTimeout(total=30)
             async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(
-                        f'{self.server_ip}/sample/details',
-                        params=payload,
-                        headers={'accept': 'application/json'}
+                async with session.post(
+                        f'{self.server_ip}/sample/aggregated',
+                        headers={
+                            'accept': 'application/json',
+                            'Content-Type': 'application/json'
+                        },
+                        json=payload
                 ) as response:
                     if response.status == 200:
                         data = await response.json()
-                        dates = list({
-                            entry['samplingDate']
-                            for entry in data.get('data', [])
-                            if entry.get('samplingDate')
+                        dates = sorted({
+                            row["samplingDate"]
+                            for row in data.get("data", [])
+                            if row.get("samplingDate")
                         })
-                        return sorted(dates)
+                        return dates
                     else:
-                        logging.error(f"Failed to fetch sampling dates: {response.status}")
-                        return []
+                        error_text = await response.text()
+                        raise APIError(
+                            f"API request failed with status {response.status}",
+                            status_code=response.status,
+                            details=error_text,
+                            payload=payload
+                        )
+        except APIError:
+            raise
+        except OSError as e:
+            raise self._handle_connection_error(e, "fetching sampling dates")
+        except aiohttp.ClientError as e:
+            raise self._handle_connection_error(e, "fetching sampling dates")
         except Exception as e:
             logging.error(f"Error fetching sampling dates: {e}")
-            return []
+            raise APIError(
+                f"Unexpected error fetching sampling dates: {str(e)}",
+                details=str(e)
+            )
 
     async def _fetch_mutation_counts_for_date(
             self,
+            session: aiohttp.ClientSession,
             locationName: str,
-            sampling_date: str,
-            positions: set,  # set of int positions
+            date_str: str,
+            positions: set,
     ) -> List[dict]:
-        """Fetch nucleotide mutations for a specific date and set of positions."""
-        payload = {
-            "samplingDate": sampling_date,
+        """Fetch mutation counts for a single sampling date."""
+        params = {
             "locationName": locationName,
-            "limit": 100000,
-            "dataFormat": "JSON",
-            "downloadAsFile": "false",
+            "samplingDateFrom": date_str,
+            "samplingDateTo": date_str,
+            "limit": 50000,
         }
         try:
-            timeout = aiohttp.ClientTimeout(total=30)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(
-                        f'{self.server_ip}/sample/nucleotideMutations',
-                        params=payload,
-                        headers={'accept': 'application/json'}
-                ) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        rows = []
-                        for entry in data.get('data', []):
-                            pos = entry.get('position')
-                            if pos in positions:
-                                rows.append({
-                                    'date': sampling_date,
-                                    'pos': entry.get('mutation'),  # e.g. "28297C"
-                                    'cov': entry.get('coverage', 0),
-                                    'var': entry.get('count', 0),
-                                })
-                        return rows
-                    else:
-                        logging.error(f"Failed for date {sampling_date}: {response.status}")
-                        return []
+            async with session.get(
+                    f'{self.server_ip}/sample/nucleotideMutations',
+                    params=params,
+                    headers={'accept': 'application/json'}
+            ) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    raise APIError(
+                        f"nucleotideMutations failed for {date_str}: status {response.status}",
+                        status_code=response.status,
+                        details=error_text,
+                        payload=params
+                    )
+                data = await response.json()
+                rows = []
+                for entry in data.get("data", []):
+                    pos = entry.get("position")
+                    if pos in positions:
+                        rows.append({
+                            "date": date_str,
+                            "pos": entry.get("mutation"),
+                            "cov": entry.get("coverage", 0),
+                            "var": entry.get("count", 0),
+                        })
+                return rows
+        except APIError:
+            raise
         except Exception as e:
-            logging.error(f"Error fetching mutations for date {sampling_date}: {e}")
-            return []
+            raise APIError(
+                f"Unexpected error fetching mutations for {date_str}: {str(e)}",
+                details=str(e)
+            )
 
     async def _fetch_mutations_per_date(
             self,
             locationName: str,
             date_range: Tuple[datetime, datetime],
-            positions: set,  # set of int positions
+            positions: set,
     ) -> List[dict]:
-        """
-        Fetch nucleotide mutations per real sampling date.
-        Only returns rows for real sampling dates — no zero-padding.
-        """
-        sampling_dates = await self._get_sampling_dates(locationName, date_range)
-        if not sampling_dates:
+        """Fetch mutation counts across all sampling dates, concurrently."""
+        dates = await self._get_sampling_dates(locationName, date_range)
+        if not dates:
+            logging.warning(f"No sampling dates found for {locationName}")
             return []
-
         connector = aiohttp.TCPConnector(
             limit=MAX_CONCURRENT_CONNECTIONS,
             limit_per_host=MAX_CONNECTIONS_PER_HOST
         )
+        timeout = aiohttp.ClientTimeout(total=60)
         async with aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=60),
+                timeout=timeout,
                 connector=connector
         ) as session:
             tasks = [
-                self._fetch_mutation_counts_for_date(locationName, d, positions)
-                for d in sampling_dates
+                self._fetch_mutation_counts_for_date(
+                    session, locationName, date_str, positions
+                )
+                for date_str in dates
             ]
             results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        rows = []
-        for result in results:
-            if isinstance(result, list):
-                rows.extend(result)
-        return rows
+        all_rows: List[dict] = []
+        failed_dates = []
+        for date_str, result in zip(dates, results):
+            if isinstance(result, Exception):
+                logging.error(f"Failed to fetch mutations for {date_str}: {result}")
+                failed_dates.append(date_str)
+                continue
+            all_rows.extend(result)
+        if failed_dates:
+            logging.warning(
+                f"Mutation fetch failed for {len(failed_dates)}/{len(dates)} sampling dates"
+            )
+        return all_rows
 
     async def get_mutations_at_positions(
             self,
             locationName: str,
             date_range: Tuple[datetime, datetime],
-            positions: set,  # set of int e.g. {28297, 28311}
+            positions: set,
     ) -> pd.DataFrame:
         """
         Public method for primer-probe checker.
@@ -892,4 +927,3 @@ class WiseLoculusLapis(Lapis):
         )
         df['date'] = pd.to_datetime(df['date'])
         return df.sort_values('date').reset_index(drop=True)
-
