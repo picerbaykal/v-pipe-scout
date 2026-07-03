@@ -52,11 +52,9 @@ def load_reference():
 @st.cache_data(ttl=3600)
 def fetch_locations():
     """Fetch available wastewater locations from LAPIS."""
-    async def _fetch():
-        lapis = WiseLoculusLapis(get_wiseloculus_url())
-        return await lapis.fetch_locations()
     try:
-        locations = asyncio.run(_fetch())
+        lapis = WiseLoculusLapis(get_wiseloculus_url())
+        locations = lapis.fetch_locations()
         return sorted(locations), None
     except Exception as e:
         return None, str(e)
@@ -321,7 +319,7 @@ def app():
     # ── Fetch locations ────────────────────────────────────────────────────────
     locations, loc_error = fetch_locations()
     if loc_error or not locations:
-        st.warning("Could not load locations from LAPIS.")
+        st.error(f"Could not load locations from LAPIS: {loc_error}")
         locations = []
 
     # ── Filters — inline on page (not sidebar) ─────────────────────────────────
