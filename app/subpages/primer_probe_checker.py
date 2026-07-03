@@ -3,18 +3,10 @@ Primer & Probe Checker
 ======================
 Checks whether SARS-CoV-2 primer/probe binding sites have mutations
 in Swiss wastewater data, using real sampling dates only.
-
-Follows the abundance_cooc.py conventions:
-- WiseLoculusLapis for LAPIS queries
-- asyncio.run() for async calls
-- ppc_ prefix for session state keys
-- Inline location multiselect (not sidebar)
-- Celery for heavy computation (position scanning)
 """
 
 import asyncio
 import io
-import json
 import logging
 import os
 import re
@@ -24,20 +16,19 @@ import pandas as pd
 import streamlit as st
 from Bio import SeqIO
 from Bio.Seq import Seq
-from celery import Celery
-from redis import Redis
 
 from api.wiseloculus import WiseLoculusLapis
 from utils.config import get_wiseloculus_url
 
-# ── Module-level Celery / Redis setup (same pattern as abundance_cooc) ─────────
-celery_app = Celery("tasks", broker="redis://redis:6379/0")
-redis_client = Redis(host="redis", port=6379, db=0)
-
 logger = logging.getLogger(__name__)
 
 # ── Reference genome path ──────────────────────────────────────────────────────
-REF_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "SARS-CoV-2.primer.fasta")
+REF_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "NC_045512.2.fasta")
+
+# ── Cached LAPIS client ────────────────────────────────────────────────────────
+@st.cache_resource
+def get_lapis_client():
+    return WiseLoculusLapis(get_wiseloculus_url())
 
 # ── Helper functions ───────────────────────────────────────────────────────────
 
@@ -49,11 +40,10 @@ def load_reference():
     record = next(SeqIO.parse(REF_PATH, "fasta"))
     return str(record.seq).upper(), None
 
-@st.cache_data(ttl=3600)
 def fetch_locations():
     """Fetch available wastewater locations from LAPIS."""
     try:
-        lapis = WiseLoculusLapis(get_wiseloculus_url())
+        lapis = get_lapis_client()
         locations = lapis.fetch_locations()
         return sorted(locations), None
     except Exception as e:
@@ -94,7 +84,7 @@ def build_genspectrum_urls(start, end, reference, location=None):
     region = reference[start - 1:end]
     positions = list(range(start, end + 1))
     base = "https://genspectrum.org/swiss-wastewater/covid?"
-    if location and location != "All sites":
+    if location:
         from urllib.parse import quote_plus
         base += f"locationName={quote_plus(location)}&"
     base += "analysisMode=manual&sequenceType=nucleotide&mutations="
@@ -105,12 +95,11 @@ def build_genspectrum_urls(start, end, reference, location=None):
 def process_time_series(df, results):
     """
     Process raw mutation DataFrame into monthly proportions per position.
-    Returns dict: {position: {primer_name: str, piece_type: str, monthly: {month: {mut: frac}}}}
+    Returns dict: {position: {name, piece_type, monthly: {month: {mut: frac}}}}
     """
     if df.empty:
         return {}
 
-    # add month column
     df = df.copy()
     df["month"] = df["date"].dt.to_period("M").astype(str)
 
@@ -125,15 +114,24 @@ def process_time_series(df, results):
         piece_type = get_piece_type(name)
 
         # filter to positions in this primer/probe region
-        region_df = df[
-            df["pos"].apply(lambda x: start <= int(''.join(filter(str.isdigit, str(x)))) <= end)
-        ]
+        def in_range(pos_str):
+            try:
+                pos_num = int(''.join(filter(str.isdigit, str(pos_str))))
+                return start <= pos_num <= end
+            except Exception:
+                return False
+
+        region_df = df[df["pos"].apply(in_range)]
 
         if region_df.empty:
             continue
 
         for pos_mut in region_df["pos"].unique():
-            pos_num = int(''.join(filter(str.isdigit, str(pos_mut))))
+            try:
+                pos_num = int(''.join(filter(str.isdigit, str(pos_mut))))
+            except Exception:
+                continue
+
             if pos_num not in position_data:
                 position_data[pos_num] = {
                     "name": name,
@@ -141,7 +139,6 @@ def process_time_series(df, results):
                     "monthly": {}
                 }
 
-            # group by month
             pos_df = region_df[region_df["pos"] == pos_mut]
             for month, group in pos_df.groupby("month"):
                 avg_frac = group["frac"].mean()
@@ -156,7 +153,6 @@ def build_html_heatmap(position_data):
     if not position_data:
         return "<p>No mutations found in primer-probe regions.</p>"
 
-    # collect all months with data
     all_months = sorted(set(
         m for info in position_data.values()
         for m in info["monthly"].keys()
@@ -259,7 +255,6 @@ def build_html_heatmap(position_data):
 
 def build_summary_table(position_data, threshold):
     """Build summary table — one row per primer/probe piece."""
-    # group by primer/probe name
     primer_summary = {}
     for pos, info in position_data.items():
         name = info["name"]
@@ -270,7 +265,6 @@ def build_summary_table(position_data, threshold):
                 "worst_mutation": None,
                 "worst_proportion": 0.0,
             }
-        # find worst recent proportion across all months
         for month, muts in info["monthly"].items():
             for mut, frac in muts.items():
                 if frac > primer_summary[name]["worst_proportion"]:
@@ -295,7 +289,6 @@ def build_summary_table(position_data, threshold):
             "Status": status,
         })
 
-    # add clean primers not in position_data
     return pd.DataFrame(rows)
 
 # ── Main app function ──────────────────────────────────────────────────────────
@@ -322,22 +315,22 @@ def app():
         st.error(f"Could not load locations from LAPIS: {loc_error}")
         locations = []
 
-    # ── Filters — inline on page (not sidebar) ─────────────────────────────────
+    # ── Filters — inline on page ───────────────────────────────────────────────
     col1, col2, col3 = st.columns([2, 1, 1])
 
     with col1:
-        selected_locations = st.multiselect(
-            "Wastewater sites",
+        selected_location = st.selectbox(
+            "Wastewater site",
             options=locations,
-            default=locations[:1] if locations else [],
-            key="ppc_locations",
-            help="Select one or more wastewater treatment plants"
+            index=0,
+            key="ppc_location",
+            help="Select a wastewater treatment plant"
         )
 
     with col2:
         date_from = st.date_input(
             "From",
-            value=date.today() - timedelta(days=180),
+            value=date.today() - timedelta(days=210),
             key="ppc_date_from",
         )
 
@@ -362,8 +355,8 @@ def app():
         st.info("👆 Upload a FASTA file to get started.")
         return
 
-    if not selected_locations:
-        st.warning("Please select at least one wastewater site.")
+    if not selected_location:
+        st.warning("Please select a wastewater site.")
         return
 
     # ── Parse FASTA ────────────────────────────────────────────────────────────
@@ -402,10 +395,7 @@ def app():
                 })
                 continue
 
-        link_a, link_b = build_genspectrum_urls(
-            start, end, reference,
-            location=selected_locations[0] if len(selected_locations) == 1 else None
-        )
+        link_a, link_b = build_genspectrum_urls(start, end, reference, location=selected_location)
         results.append({
             "Name": clean_name, "Start": start, "End": end,
             "Strand": strand, "Method": method,
@@ -436,34 +426,28 @@ def app():
         datetime.combine(date_to, datetime.max.time()),
     )
 
-    all_dfs = []
-    lapis = WiseLoculusLapis(get_wiseloculus_url())
+    lapis = get_lapis_client()
 
     with st.spinner("Fetching mutation data from LAPIS..."):
-        for location in selected_locations:
-            try:
-                df = asyncio.run(
-                    lapis.get_mutations_at_positions(
-                        locationName=location,
-                        date_range=date_range,
-                        positions=all_positions,
-                    )
+        try:
+            df = asyncio.run(
+                lapis.get_mutations_at_positions(
+                    locationName=selected_location,
+                    date_range=date_range,
+                    positions=all_positions,
                 )
-                if not df.empty:
-                    df["location"] = location
-                    all_dfs.append(df)
-            except Exception as e:
-                st.error(f"Error fetching data for {location}: {e}")
-                logger.error(f"LAPIS error for {location}: {e}")
+            )
+        except Exception as e:
+            st.error(f"Error fetching data from LAPIS: {e}")
+            logger.error(f"LAPIS error: {e}")
+            return
 
-    if not all_dfs:
-        st.warning("No mutation data found for the selected sites and date range.")
+    if df.empty:
+        st.warning("No mutation data found for the selected site and date range.")
         return
 
-    combined_df = pd.concat(all_dfs, ignore_index=True)
-
     # ── Process time series ────────────────────────────────────────────────────
-    position_data = process_time_series(combined_df, found)
+    position_data = process_time_series(df, found)
 
     if not position_data:
         st.success("✅ No mutations found in primer-probe regions for the selected period.")
@@ -490,10 +474,6 @@ def app():
 
     # ── GenSpectrum links ──────────────────────────────────────────────────────
     st.subheader("GenSpectrum links")
-
-    if len(selected_locations) > 1:
-        st.info("Links below use the first selected location for GenSpectrum filtering.")
-
     for r in found:
         with st.expander(f"🧬 {r['Name']} — positions {r['Start']}–{r['End']} ({r['Strand']} strand)"):
             col1, col2 = st.columns(2)
