@@ -8,7 +8,6 @@ in Swiss wastewater data, using real sampling dates only.
 import asyncio
 import io
 import logging
-import os
 import re
 from datetime import date, datetime, timedelta
 
@@ -22,23 +21,12 @@ from utils.config import get_wiseloculus_url
 
 logger = logging.getLogger(__name__)
 
-# ── Reference genome path ──────────────────────────────────────────────────────
-REF_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "NC_045512.2.fasta")
-
 # ── Cached LAPIS client ────────────────────────────────────────────────────────
 @st.cache_resource
 def get_lapis_client():
     return WiseLoculusLapis(get_wiseloculus_url())
 
 # ── Helper functions ───────────────────────────────────────────────────────────
-
-@st.cache_data(ttl=3600)
-def load_reference():
-    """Load Wuhan reference genome NC_045512.2."""
-    if not os.path.exists(REF_PATH):
-        return None, f"Reference file not found at: {REF_PATH}"
-    record = next(SeqIO.parse(REF_PATH, "fasta"))
-    return str(record.seq).upper(), None
 
 def fetch_locations():
     """Fetch available wastewater locations from LAPIS."""
@@ -93,10 +81,7 @@ def build_genspectrum_urls(start, end, reference, location=None):
     return link_a, link_b
 
 def process_time_series(df, results):
-    """
-    Process raw mutation DataFrame into monthly proportions per position.
-    Returns dict: {position: {name, piece_type, monthly: {month: {mut: frac}}}}
-    """
+    """Process raw mutation DataFrame into monthly proportions per position."""
     if df.empty:
         return {}
 
@@ -113,7 +98,6 @@ def process_time_series(df, results):
         end = r["End"]
         piece_type = get_piece_type(name)
 
-        # filter to positions in this primer/probe region
         def in_range(pos_str):
             try:
                 pos_num = int(''.join(filter(str.isdigit, str(pos_str))))
@@ -122,7 +106,6 @@ def process_time_series(df, results):
                 return False
 
         region_df = df[df["pos"].apply(in_range)]
-
         if region_df.empty:
             continue
 
@@ -297,17 +280,11 @@ def app():
     st.title("🔬 Primer & Probe Checker")
     st.markdown(
         """
-        Upload a FASTA file containing primer and probe sequences.
+        Upload a reference genome and a primer/probe FASTA file.
         The app checks whether binding sites have mutations in Swiss wastewater data.
         """
     )
     st.divider()
-
-    # ── Load reference ─────────────────────────────────────────────────────────
-    reference, ref_error = load_reference()
-    if ref_error:
-        st.error(f"Could not load reference genome: {ref_error}")
-        return
 
     # ── Fetch locations ────────────────────────────────────────────────────────
     locations, loc_error = fetch_locations()
@@ -343,30 +320,47 @@ def app():
 
     st.divider()
 
-    # ── File upload ────────────────────────────────────────────────────────────
-    uploaded_file = st.file_uploader(
-        "Upload primer/probe FASTA file",
-        type=["fasta", "fa"],
-        help="e.g. CDC N1/N2 diagnostic primers, or ARTIC amplicon primers",
-        key="ppc_fasta_upload",
-    )
+    # ── File uploads ───────────────────────────────────────────────────────────
+    col_ref, col_primer = st.columns(2)
 
-    if uploaded_file is None:
-        st.info("👆 Upload a FASTA file to get started.")
+    with col_ref:
+        ref_file = st.file_uploader(
+            "Reference genome (FASTA)",
+            type=["fasta", "fa"],
+            help="e.g. Wuhan reference NC_045512.2",
+            key="ppc_ref_upload",
+        )
+
+    with col_primer:
+        primer_file = st.file_uploader(
+            "Primer/probe FASTA",
+            type=["fasta", "fa"],
+            help="e.g. CDC N1/N2 diagnostic primers, or ARTIC amplicon primers",
+            key="ppc_fasta_upload",
+        )
+
+    if ref_file is None or primer_file is None:
+        st.info("👆 Upload both a reference genome and a primer/probe FASTA file to get started.")
         return
 
-    if not selected_location:
-        st.warning("Please select a wastewater site.")
+    # ── Parse reference ────────────────────────────────────────────────────────
+    try:
+        ref_content = ref_file.read().decode("utf-8")
+        ref_record = next(SeqIO.parse(io.StringIO(ref_content), "fasta"))
+        reference = str(ref_record.seq).upper()
+        st.caption(f"Reference: {ref_record.id} ({len(reference):,} bp)")
+    except Exception as e:
+        st.error(f"Could not parse reference genome: {e}")
         return
 
-    # ── Parse FASTA ────────────────────────────────────────────────────────────
-    raw_content = uploaded_file.read().decode("utf-8")
+    # ── Parse primers ──────────────────────────────────────────────────────────
+    raw_content = primer_file.read().decode("utf-8")
     sequences = {}
     for record in SeqIO.parse(io.StringIO(raw_content), "fasta"):
         sequences[record.id] = str(record.seq).upper()
 
     if not sequences:
-        st.error("No sequences found in the FASTA file. Please check the format.")
+        st.error("No sequences found in the primer FASTA file. Please check the format.")
         return
 
     with st.expander(f"Show parsed sequences ({len(sequences)} found)"):
@@ -407,7 +401,7 @@ def app():
 
     if not_found:
         st.warning(
-            f"{len(not_found)} sequence(s) not found on Wuhan reference "
+            f"{len(not_found)} sequence(s) not found on reference "
             "(likely designed for a newer variant genome)."
         )
 
