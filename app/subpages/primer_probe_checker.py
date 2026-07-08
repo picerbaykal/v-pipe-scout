@@ -411,6 +411,8 @@ def build_summary_table(position_data, found, threshold):
             "piece_type": piece_type,
             "worst_mutation": None,
             "worst_proportion": 0.0,
+            "worst_coverage": 0,
+
         }
 
     # update with actual mutation data
@@ -424,6 +426,7 @@ def build_summary_table(position_data, found, threshold):
                 if frac > primer_summary[name]["worst_proportion"]:
                     primer_summary[name]["worst_proportion"] = frac
                     primer_summary[name]["worst_mutation"] = mut
+                    primer_summary[name]["worst_coverage"] = data["coverage"]
 
     rows = []
     for name, summary in primer_summary.items():
@@ -440,6 +443,7 @@ def build_summary_table(position_data, found, threshold):
             "Type": summary["piece_type"],
             "Worst mutation": worst_mutation or "none",
             "Recent proportion": f"{worst_proportion:.1%}" if worst_proportion > 0 else "0.0%",
+            "Coverage": f"{summary['worst_coverage']:,}" if summary['worst_coverage'] > 0 else "—",
             "Status": status,
         })
 
