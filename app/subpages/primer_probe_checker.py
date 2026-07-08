@@ -438,12 +438,22 @@ def build_summary_table(position_data, found, threshold):
             status = "⚠️ Warning"
         else:
             status = "✅ Good"
+
+        # determine coverage display
+        cov = summary['worst_coverage']
+        if cov == 0:
+            coverage_display = "N/A"
+        elif cov < 1000:
+            coverage_display = f"⚠️ {cov:,} reads"
+        else:
+            coverage_display = f"{cov:,} reads"
+            
         rows.append({
             "Primer/Probe": name,
             "Type": summary["piece_type"],
             "Worst mutation": worst_mutation or "none",
             "Recent proportion": f"{worst_proportion:.1%}" if worst_proportion > 0 else "0.0%",
-            "Coverage": f"{summary['worst_coverage']:,}" if summary['worst_coverage'] > 0 else "—",
+            "Coverage": f"{summary['worst_coverage']:,}" if summary['worst_coverage'] > 0 else "N/A",
             "Status": status,
         })
 
