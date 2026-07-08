@@ -55,6 +55,53 @@ def search_reference(primer_seq, ref_seq):
         return pos + 1, pos + seq_len, "-"
     return None
 
+from Bio import Align
+
+def align_primer_to_reference(primer_seq, reference, min_identity=0.80):
+    """
+    Fallback alignment when exact string search fails.
+    Uses Biopython PairwiseAligner (local alignment).
+    Returns (start, end, strand, identity) or None if below threshold.
+    """
+    aligner = Align.PairwiseAligner()
+    aligner.mode = 'local'
+    aligner.match_score = 2
+    aligner.mismatch_score = -1
+    aligner.open_gap_score = -5
+    aligner.extend_gap_score = -0.5
+
+    # try forward strand
+    alignments = aligner.align(reference, primer_seq)
+    if alignments:
+        best = alignments[0]
+        ref_start = best.aligned[0][0][0]
+        ref_end = best.aligned[0][-1][-1]
+        matches = sum(
+            reference[ref_start + i] == primer_seq[i]
+            for i in range(len(primer_seq))
+            if ref_start + i < len(reference)
+        )
+        identity = matches / len(primer_seq)
+        if identity >= min_identity:
+            return ref_start + 1, ref_start + len(primer_seq), "+", identity
+
+    # try reverse complement
+    rev_comp = str(Seq(primer_seq).reverse_complement())
+    alignments = aligner.align(reference, rev_comp)
+    if alignments:
+        best = alignments[0]
+        ref_start = best.aligned[0][0][0]
+        matches = sum(
+            reference[ref_start + i] == rev_comp[i]
+            for i in range(len(rev_comp))
+            if ref_start + i < len(reference)
+        )
+        identity = matches / len(rev_comp)
+        if identity >= min_identity:
+            return ref_start + 1, ref_start + len(primer_seq), "-", identity
+
+    return None
+
 def build_genspectrum_urls(start, end, reference, location=None):
     region = reference[start - 1:end]
     positions = list(range(start, end + 1))
@@ -519,12 +566,18 @@ def app():
                 start, end, strand = found_pos
                 method = "string search"
             else:
-                results.append({
-                    "Name": clean_name, "Start": None, "End": None,
-                    "Strand": None, "Method": "not found",
-                    "Link A": None, "Link B": None,
-                })
-                continue
+                # fallback to alignment
+                aligned = align_primer_to_reference(seq, reference)
+                if aligned:
+                    start, end, strand, identity = aligned
+                    method = f"alignment ({identity:.0%} identity)"
+                else:
+                    results.append({
+                        "Name": clean_name, "Start": None, "End": None,
+                        "Strand": None, "Method": "not found",
+                        "Link A": None, "Link B": None,
+                    })
+                    continue
 
         link_a, link_b = build_genspectrum_urls(
             start, end, reference, location=location_filter
@@ -538,11 +591,15 @@ def app():
     not_found = [r for r in results if r["Start"] is None]
     found = [r for r in results if r["Start"] is not None]
 
+    if found:
+        with st.expander(f"Positions found ({len(found)} sequences)"):
+            for r in found:
+                st.text(f"{r['Name']} — {r['Start']}–{r['End']} ({r['Strand']}) — {r['Method']}")
+
     if not_found:
-        st.warning(
-            f"{len(not_found)} sequence(s) not found on reference "
-            "(likely designed for a newer variant genome)."
-        )
+        with st.expander(f"⚠️ Not found on reference ({len(not_found)} sequences)"):
+            for r in not_found:
+                st.text(f"{r['Name']} — not found (likely designed for a newer variant genome)")
 
     if not found:
         st.error("No sequences could be mapped to the reference genome.")
