@@ -453,7 +453,7 @@ def build_summary_table(position_data, found, threshold):
             "Type": summary["piece_type"],
             "Worst mutation": worst_mutation or "none",
             "Recent proportion": f"{worst_proportion:.1%}" if worst_proportion > 0 else "0.0%",
-            "Coverage": f"{summary['worst_coverage']:,}" if summary['worst_coverage'] > 0 else "N/A",
+            "Coverage": coverage_display,
             "Status": status,
         })
 
