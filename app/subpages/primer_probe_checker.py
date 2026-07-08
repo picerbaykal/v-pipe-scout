@@ -318,7 +318,7 @@ def build_html_heatmap(position_data):
 
             if mut_values:
                 tooltip_rows = ""
-                for mut, val in sorted(mut_values, key=lambda x: -x[1]):
+                for mut, val, cov in sorted(mut_values, key=lambda x: -x[1]):
                     ref = str(mut)[0]
                     alt = str(mut)[-1]
                     tooltip_rows += f'<div class="tt-row"><span>{ref}→{alt}</span><span style="font-weight:500;">{val:.1%}</span></div>'
