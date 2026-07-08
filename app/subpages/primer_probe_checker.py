@@ -179,9 +179,17 @@ def fetch_time_series(mutations_tuple, location, date_from_str, date_to_str):
                     for j, label in enumerate(date_labels):
                         cell = data["data"][i][j]
                         if cell["coverage"] > 0:
-                            result[mut][label] = cell["count"] / cell["coverage"]
+                            result[mut][label] = {
+                                "proportion": cell["count"] / cell["coverage"],
+                                "coverage": cell["coverage"],
+                                "count": cell["count"],
+                            }
                         else:
-                            result[mut][label] = 0.0
+                            result[mut][label] = {
+                                "proportion": 0.0,
+                                "coverage": 0,
+                                "count": 0,
+                            }
                 return result
 
     try:
@@ -217,11 +225,16 @@ def process_time_series(time_series, results):
                         "piece_type": piece_type,
                         "monthly": {}
                     }
-                for month, frac in proportions.items():
+                for month, data in proportions.items():
+                    frac = data["proportion"]
+                    coverage = data["coverage"]
                     if frac > 0:
                         if month not in position_data[pos_num]["monthly"]:
                             position_data[pos_num]["monthly"][month] = {}
-                        position_data[pos_num]["monthly"][month][mut] = frac
+                        position_data[pos_num]["monthly"][month][mut] = {
+                            "proportion": frac,
+                            "coverage": coverage,
+                        }
 
     return position_data
 
@@ -294,8 +307,12 @@ def build_html_heatmap(position_data):
         html += f'<tr><td class="pos-label">{piece_badge(piece_type)} <span style="color:#333;margin-left:6px;">{pos} ({name})</span></td>'
 
         for month in all_months:
-            mut_values = list(monthly.get(month, {}).items())
-            total = min(sum(v for _, v in mut_values), 1.0) if mut_values else 0.0
+            mut_values = [
+                (mut, d["proportion"], d["coverage"])
+                for mut, d in monthly.get(month, {}).items()
+            ]
+            total = min(sum(p for _, p, _ in mut_values), 1.0)
+            min_coverage = min((c for _, _, c in mut_values), default=0)
             style = cell_color(total)
             cell_text = "—" if total <= 0 else f"{total:.0%}"
 
@@ -311,8 +328,9 @@ def build_html_heatmap(position_data):
 <div class="tt-date">{month} — total: {total:.1%}</div>
 <div class="tt-div"></div>
 {tooltip_rows}
-<div class="tt-div"></div>
 <div class="tt-ref"><span>reference remaining</span><span>{ref_remaining:.1%}</span></div>
+<div class="tt-div"></div>
+<div class="tt-ref"><span>coverage</span><span>{min_coverage:,} reads</span></div>
 </div>"""
             else:
                 tooltip_html = ""
@@ -354,7 +372,8 @@ def build_summary_table(position_data, found, threshold):
         if name not in primer_summary:
             continue
         for month, muts in info["monthly"].items():
-            for mut, frac in muts.items():
+            for mut, data in muts.items():
+                frac = data["proportion"]
                 if frac > primer_summary[name]["worst_proportion"]:
                     primer_summary[name]["worst_proportion"] = frac
                     primer_summary[name]["worst_mutation"] = mut
