@@ -203,6 +203,7 @@ class WiseLoculusLapis(Lapis):
             "locationName": locationName,
             "samplingDateFrom": date_str,
             "samplingDateTo": date_str,
+            "minProportion": 0.001,  # lower from 5% default to 0.1%
             "limit": 50000,
         }
         try:
@@ -368,6 +369,7 @@ class WiseLoculusLapis(Lapis):
             variants: List[str],
             pango_loader,
             cowwid_variants=None, #fallback for reconstructed nodes
+            reference_positions: set = None,
     ) -> pd.DataFrame:
         """
         Build a tallymut-compatible DataFrame from LAPIS mutation counts,
@@ -394,15 +396,20 @@ class WiseLoculusLapis(Lapis):
         """
         # Collect all unique positions from selected variants' signatures
         positions: set = set()
-        for variant in variants:
-            if variant in pango_loader._reconstructed_signatures and cowwid_variants and variant in cowwid_variants:
-                signature = cowwid_variants[variant]
-            else:
-                signature = pango_loader.get_signature(variant)
-            for mut in signature:
-                m = re.match(r"^(\d+)", mut)
-                if m:
-                    positions.add(int(m.group(1)))
+        # Use reference_positions if provided (all cowwid positions)
+        # otherwise fall back to selected variants only
+        if reference_positions:
+            positions = reference_positions
+        else:
+            for variant in variants:
+                if variant in pango_loader._reconstructed_signatures and cowwid_variants and variant in cowwid_variants:
+                    signature = cowwid_variants[variant]
+                else:
+                    signature = pango_loader.get_signature(variant)
+                for mut in signature:
+                    m = re.match(r"^(\d+)", mut)
+                    if m:
+                        positions.add(int(m.group(1)))
 
         if not positions:
             logging.warning(

@@ -28,6 +28,7 @@ from typing import Dict, List
 
 import pandas as pd
 import yaml
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -158,6 +159,16 @@ def run_deconv_lapis(
     # Load cowwid signatures as fallback for reconstructed centroid nodes
     cowwid_variants = _COWWID_VARIANTS
 
+    # Collect all positions from all cowwid variants as reference set
+    # This ensures undetermined signal captures non-selected circulating variants
+    all_cowwid_positions: set = set()
+    for sig in cowwid_variants.values():
+        for mut in sig:
+            m = re.match(r"^(\d+)", mut)
+            if m:
+                all_cowwid_positions.add(int(m.group(1)))
+    logger.info(f"Reference positions from all cowwid variants: {len(all_cowwid_positions)}")
+
     try:
         df_tally = asyncio.run(
             client.get_tallymut(
@@ -166,7 +177,7 @@ def run_deconv_lapis(
                 variants=variants,
                 pango_loader=pango_loader,
                 cowwid_variants=cowwid_variants,
-
+                reference_positions=all_cowwid_positions,
             )
         )
     except Exception as e:
