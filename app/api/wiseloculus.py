@@ -203,9 +203,10 @@ class WiseLoculusLapis(Lapis):
             "locationName": locationName,
             "samplingDateFrom": date_str,
             "samplingDateTo": date_str,
-            "minProportion": 0.001,  # lower from 5% default to 0.1%
+            "minProportion": 0.01,
             "limit": 50000,
         }
+
         try:
             async with session.get(
                     f'{self.server_ip}/sample/nucleotideMutations',
@@ -1103,78 +1104,4 @@ class WiseLoculusLapis(Lapis):
                 details=str(e)
             )
 
-    async def _fetch_mutation_counts_for_date(
-            self,
-            session: aiohttp.ClientSession,
-            locationName: str,
-            date_str: str,
-            positions: set,
-    ) -> List[dict]:
-        """
-        Fetch mutation counts for a single sampling date via
-        /sample/nucleotideMutations, for specific positions only.
-
-        Targeted fetch — only asks LAPIS for positions in the selected
-        variants' signatures. No noise filtering needed since we're
-        asking for specific known positions, not everything circulating.
-
-        Args:
-            session: Shared aiohttp session — reused across all dates
-                so connection pooling limits apply correctly.
-            locationName: Location name e.g. "Lugano (TI)"
-            date_str: ISO date string e.g. "2026-01-20"
-            positions: Set of integer positions to fetch, derived from
-                the selected variants' pango signatures.
-
-        Returns:
-            List of dicts with keys: date, pos, cov, var
-        """
-        params = {
-            "locationName": locationName,
-            "samplingDateFrom": date_str,
-            "samplingDateTo": date_str,
-            "limit": 50000,
-        }
-        try:
-            async with session.get(
-                    f'{self.server_ip}/sample/nucleotideMutations',
-                    params=params,
-                    headers={'accept': 'application/json'}
-            ) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    raise APIError(
-                        f"nucleotideMutations failed for {date_str}: "
-                        f"status {response.status}",
-                        status_code=response.status,
-                        details=error_text,
-                        payload=params
-                    )
-                data = await response.json()
-        except APIError:
-            raise
-        except Exception as e:
-            raise APIError(
-                f"Error fetching mutations for {date_str}: {str(e)}",
-                details=str(e)
-            )
-
-        rows = []
-        for entry in data.get("data", []):
-            pos = lapis_mutation_to_pos(entry.get("mutation", ""))
-            if not pos:
-                continue
-            # Keep only positions in our target set
-            m = re.match(r"^(\d+)", pos)
-            if not m or int(m.group(1)) not in positions:
-                continue
-            coverage = entry.get("coverage", 0)
-            if coverage == 0:
-                continue
-            rows.append({
-                "date": date_str,
-                "pos": pos,
-                "cov": int(coverage),
-                "var": int(entry.get("count", 0)),
-            })
-        return rows
+    

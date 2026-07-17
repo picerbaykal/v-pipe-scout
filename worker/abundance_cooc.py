@@ -211,6 +211,7 @@ def run_deconv_lapis(
 
         # Write tallymut TSV - already in the shape, no gawk/xsv needed
         tallymut_fp = tmpdir_path / "tallymut.tsv"
+        df_tally["pos"] = df_tally["pos"].str.rstrip("ACGT-")
         df_tally.to_csv(tallymut_fp, sep="\t", index=False)
 
         # Write variants_config.yaml
@@ -219,10 +220,6 @@ def run_deconv_lapis(
         with open(variants_config_fp, "w") as f:
             yaml.dump({
                 "variants_pangolin": {v: v for v in variants},
-                "var_dates": {
-                    v: [[start_date.strftime("%Y-%m-%d"), None]]
-                    for v in variants
-                },
             }, f)
 
         # Write deconv_config.yaml
