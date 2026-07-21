@@ -32,8 +32,8 @@ def compute_jaccard_matrix(
             if i == j:
                 matrix[i][j] = 1.0
                 continue
-            s1 = pango_loader.get_signature(v1)
-            s2 = pango_loader.get_signature(v2)
+            s1 = {m for m in pango_loader.get_signature(v1) if not m.endswith('-')}
+            s2 = {m for m in pango_loader.get_signature(v2) if not m.endswith('-')}
             if not s1 or not s2:
                 matrix[i][j] = 0.0
                 continue

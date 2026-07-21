@@ -275,8 +275,5 @@ def run_deconv_lapis(
         with open(output_json_fp, "r") as f:
             deconvolved_data = json.load(f)
 
-        #DEBUG
-        import shutil
-        shutil.copy(output_json_fp, "/tmp/abundance_cooc_deconvolved.json")
 
     return deconvolved_data
