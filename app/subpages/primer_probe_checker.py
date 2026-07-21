@@ -55,6 +55,19 @@ def search_reference(primer_seq, ref_seq):
         return pos + 1, pos + seq_len, "-"
     return None
 
+def get_primer_letters(primer_seq, start, strand):
+    """
+    Map each genome position to the letter the primer expects there.
+    For reverse strand primers, reverse complement first.
+    Returns dict: {genome_position: letter}
+    """
+    if strand == "-":
+        primer_seq = str(Seq(primer_seq).reverse_complement())
+    return {
+        start + i: primer_seq[i]
+        for i in range(len(primer_seq))
+    }
+
 from Bio import Align
 
 def align_primer_to_reference(primer_seq, reference, min_identity=0.80):
@@ -285,6 +298,44 @@ def process_time_series(time_series, results):
 
     return position_data
 
+
+def get_dominant_letters(time_series, reference, results):
+    """
+    For each position with a mutation, determine the dominant letter
+    in the most recent month.
+    Returns dict: {genome_position: dominant_letter}
+    """
+    dominant = {}
+
+    for mut, proportions in time_series.items():
+        # extract position and letters from mutation string e.g. C28311T
+        try:
+            pos = int(re.search(r'\d+', mut).group())
+            ref_letter = mut[0]  # C in C28311T
+            alt_letter = mut[-1]  # T in C28311T
+        except Exception:
+            continue
+
+        # get most recent non-zero proportion
+        recent_frac = 0.0
+        for month in sorted(proportions.keys(), reverse=True):
+            val = proportions[month]
+            if isinstance(val, dict):
+                frac = val.get("proportion", 0.0)
+            else:
+                frac = val
+            if frac > 0:
+                recent_frac = frac
+                break
+
+        # dominant letter = whichever is more common
+        if recent_frac > 0.5:
+            dominant[pos] = alt_letter  # mutation is dominant
+        else:
+            dominant[pos] = ref_letter  # reference is dominant
+
+    return dominant
+
 # ── Heatmap ────────────────────────────────────────────────────────────────────
 
 def build_html_heatmap(position_data):
@@ -398,48 +449,69 @@ def build_html_heatmap(position_data):
 
 # ── Summary table ──────────────────────────────────────────────────────────────
 
-def build_summary_table(position_data, found, threshold):
-    """Build summary table — one row per primer/probe piece including clean ones."""
-    # initialise all primers — including clean ones with no mutations
+def build_summary_table(position_data, found, threshold, dominant_letters):
+    """Build summary table with primer vs circulating virus comparison."""
     primer_summary = {}
     for r in found:
         if r["Start"] is None:
             continue
         name = r["Name"]
         piece_type = get_piece_type(name)
+        primer_letters = r.get("PrimerLetters", {})
+
         primer_summary[name] = {
             "piece_type": piece_type,
             "worst_mutation": None,
             "worst_proportion": 0.0,
             "worst_coverage": 0,
-
+            "primer_match": True,  # assume match until proven otherwise
+            "mismatch_positions": [],
         }
 
-    # update with actual mutation data
+        # check each position in this primer/probe against dominant circulating letter
+        for pos, primer_letter in primer_letters.items():
+            dominant = dominant_letters.get(pos)
+            if dominant and dominant != primer_letter:
+                primer_summary[name]["primer_match"] = False
+                primer_summary[name]["mismatch_positions"].append(
+                    f"{pos}({primer_letter}→{dominant})"
+                )
+
+    # update with mutation data
     for pos, info in position_data.items():
         name = info["name"]
         if name not in primer_summary:
             continue
         for month, muts in info["monthly"].items():
             for mut, data in muts.items():
-                frac = data["proportion"]
+                frac = data["proportion"] if isinstance(data, dict) else data
+                cov = data.get("coverage", 0) if isinstance(data, dict) else 0
                 if frac > primer_summary[name]["worst_proportion"]:
                     primer_summary[name]["worst_proportion"] = frac
                     primer_summary[name]["worst_mutation"] = mut
-                    primer_summary[name]["worst_coverage"] = data["coverage"]
+                    primer_summary[name]["worst_coverage"] = cov
 
     rows = []
     for name, summary in primer_summary.items():
         worst_proportion = summary["worst_proportion"]
         worst_mutation = summary["worst_mutation"]
-        if worst_proportion >= 0.5:
-            status = "🚨 Critical"
-        elif worst_proportion >= threshold:
-            status = "⚠️ Warning"
-        else:
-            status = "✅ Good"
 
-        # determine coverage display
+        # status based on primer-virus match
+        if not summary["primer_match"]:
+            mismatches = ", ".join(summary["mismatch_positions"])
+            primer_status = f"❌ Mismatch at: {mismatches}"
+        else:
+            primer_status = "✅ Matches circulating virus"
+
+        # mutation status
+        if worst_proportion >= 0.5:
+            mut_status = "🚨 Critical"
+        elif worst_proportion >= threshold:
+            mut_status = "⚠️ Warning"
+        else:
+            mut_status = "✅ Good"
+
+        # coverage display
         cov = summary['worst_coverage']
         if cov == 0:
             coverage_display = "N/A"
@@ -447,17 +519,19 @@ def build_summary_table(position_data, found, threshold):
             coverage_display = f"⚠️ {cov:,} reads"
         else:
             coverage_display = f"{cov:,} reads"
-            
+
         rows.append({
             "Primer/Probe": name,
             "Type": summary["piece_type"],
             "Worst mutation": worst_mutation or "none",
             "Recent proportion": f"{worst_proportion:.1%}" if worst_proportion > 0 else "0.0%",
             "Coverage": coverage_display,
-            "Status": status,
+            "Primer vs virus": primer_status,
+            "Mutation status": mut_status,
         })
 
     return pd.DataFrame(rows)
+
 
 # ── Main app function ──────────────────────────────────────────────────────────
 
@@ -589,6 +663,7 @@ def app():
                     results.append({
                         "Name": clean_name, "Start": None, "End": None,
                         "Strand": None, "Method": "not found",
+                        "PrimerLetters": get_primer_letters(seq, start, strand),
                         "Link A": None, "Link B": None,
                     })
                     continue
@@ -599,6 +674,7 @@ def app():
         results.append({
             "Name": clean_name, "Start": start, "End": end,
             "Strand": strand, "Method": method,
+            "PrimerLetters": get_primer_letters(seq, start, strand),
             "Link A": link_a, "Link B": link_b,
         })
 
@@ -653,6 +729,7 @@ def app():
 
     # ── Process data ───────────────────────────────────────────────────────────
     position_data = process_time_series(time_series, found)
+    dominant_letters = get_dominant_letters(time_series, reference, found)
 
     if not position_data:
         st.success("✅ No mutations found in primer-probe regions for the selected period.")
@@ -675,7 +752,7 @@ def app():
     )
     st.caption("Controls when a mutation is flagged as Warning or Critical in the table below.")
 
-    summary_df = build_summary_table(position_data, found, threshold)
+    summary_df = build_summary_table(position_data, found, threshold, dominant_letters)
     st.dataframe(summary_df, use_container_width=True, hide_index=True)
 
     # ── GenSpectrum links ──────────────────────────────────────────────────────
