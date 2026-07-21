@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 def get_piece_type(name):
     clean = name.split("::")[0].upper()
-    if clean.endswith("-P") or clean.endswith("_P"):
+    if "-P-" in clean or "-P_" in clean or clean.endswith("-P") or clean.endswith("_P"):
         return "probe"
     elif clean.endswith("-F") or clean.endswith("_F") or "_LEFT" in clean:
         return "forward"
