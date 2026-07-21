@@ -336,43 +336,125 @@ def get_dominant_letters(time_series, reference, results):
 
     return dominant
 
-# ── Heatmap ────────────────────────────────────────────────────────────────────
 
-def build_html_heatmap(position_data, dominant_letters, results):
-    if not position_data:
-        return "<p>No mutations found in primer-probe regions.</p>"
+def build_primer_heatmap_data(time_series, results, dominant_letters):
+    """
+    Build heatmap data grouped by primer/probe piece.
+    Returns dict: {primer_name: {month: {status, text, proportion}}}
 
-    # build primer letters lookup: {pos: {primer_name: letter}}
-    primer_letters_by_pos = {}
+    status: 'clean' | 'match' | 'mismatch'
+    text: '—' | 'T=T ✓' | 'T≠C 88%'
+    proportion: float 0-1 (for mismatch color intensity)
+    """
+    heatmap_data = {}
+
     for r in results:
         if r["Start"] is None:
             continue
-        for pos, letter in r.get("PrimerLetters", {}).items():
-            if pos not in primer_letters_by_pos:
-                primer_letters_by_pos[pos] = {}
-            primer_letters_by_pos[pos][r["Name"]] = letter
+        name = r["Name"]
+        piece_type = get_piece_type(name)
+        primer_letters = r.get("PrimerLetters", {})
 
-    all_months = sorted(set(
-        m for info in position_data.values()
-        for m in info["monthly"].keys()
-    ))
+        # collect all months from time_series
+        all_months = set()
+        for mut, proportions in time_series.items():
+            all_months.update(proportions.keys())
+        all_months = sorted(all_months)
+
+        heatmap_data[name] = {
+            "piece_type": piece_type,
+            "months": {}
+        }
+
+        for month in all_months:
+            # find worst mismatch in this primer for this month
+            worst_proportion = 0.0
+            worst_text = None
+            is_match = False
+            has_any_mutation = False
+
+            for pos, primer_letter in primer_letters.items():
+                # find mutations at this position for this month
+                for mut, proportions in time_series.items():
+                    try:
+                        mut_pos = int(re.search(r'\d+', mut).group())
+                    except Exception:
+                        continue
+                    if mut_pos != pos:
+                        continue
+
+                    val = proportions.get(month, {})
+                    frac = val.get("proportion", 0.0) if isinstance(val, dict) else val
+                    if frac <= 0:
+                        continue
+
+                    has_any_mutation = True
+                    dominant = dominant_letters.get(pos)
+                    ref_letter = mut[0]
+                    alt_letter = mut[-1]
+
+                    if dominant and primer_letter == dominant:
+                        # primer matches dominant circulating letter
+                        is_match = True
+                        if frac > worst_proportion:
+                            worst_proportion = frac
+                            worst_text = f"{primer_letter}={dominant} ✓"
+                    else:
+                        # primer mismatches dominant circulating letter
+                        if frac > worst_proportion:
+                            worst_proportion = frac
+                            worst_text = f"{primer_letter}≠{alt_letter} {frac:.0%}"
+
+            if not has_any_mutation:
+                heatmap_data[name]["months"][month] = {
+                    "status": "clean",
+                    "text": "—",
+                    "proportion": 0.0
+                }
+            elif is_match and worst_text and "✓" in worst_text:
+                heatmap_data[name]["months"][month] = {
+                    "status": "match",
+                    "text": worst_text,
+                    "proportion": worst_proportion
+                }
+            else:
+                heatmap_data[name]["months"][month] = {
+                    "status": "mismatch",
+                    "text": worst_text or "≠",
+                    "proportion": worst_proportion
+                }
+
+    return heatmap_data
+
+# ── Heatmap ────────────────────────────────────────────────────────────────────
+def build_html_heatmap(heatmap_data):
+    """
+    Build HTML heatmap — rows = primer/probe pieces, columns = months.
+    Color encodes mismatch severity. Green = primer matches virus. White = no mutation.
+    """
+    if not heatmap_data:
+        return "<p>No data available.</p>"
+
+    # collect all months that have any data
+    all_months = set()
+    for name, info in heatmap_data.items():
+        for month, cell in info["months"].items():
+            if cell["status"] != "clean":
+                all_months.add(month)
+    all_months = sorted(all_months)
 
     if not all_months:
-        return "<p>No data available for the selected period.</p>"
+        return "<p>No mutations found in primer-probe regions.</p>"
 
-    def cell_color(total, pos, name, coverage=0, min_coverage=1000):
-        if total <= 0:
-            return "background:#ffffff; color:#999;"
-        if coverage < min_coverage:
-            return "background:#e9ecef; color:#6c757d;"
-        primer_letter = primer_letters_by_pos.get(pos, {}).get(name)
-        dominant = dominant_letters.get(pos)
-        if primer_letter and dominant and primer_letter == dominant:
-            return "background:#d4edda; color:#155724;"
-        elif total < 0.5:
-            return "background:#fac775; color:#412402;"
+    def mismatch_color(proportion):
+        if proportion < 0.1:
+            return "background:#fff8f0;color:#bf6000;"
+        elif proportion < 0.5:
+            return "background:#fac775;color:#412402;"
+        elif proportion < 0.8:
+            return "background:#d85a30;color:#ffffff;"
         else:
-            return "background:#a32d2d; color:#ffffff;"
+            return "background:#a32d2d;color:#ffffff;"
 
     def piece_badge(piece_type):
         if piece_type == "probe":
@@ -385,81 +467,74 @@ def build_html_heatmap(position_data, dominant_letters, results):
 
     html = """
 <style>
-.pp-table{border-collapse:collapse;font-size:13px;font-family:sans-serif;}
-.pp-table th{text-align:center;padding:8px 10px;color:#666;font-weight:400;border-bottom:1px solid #e5e5e5;white-space:nowrap;}
-.pp-table th.pos-col{text-align:left;width:auto;}
-.pp-table td{padding:4px 6px;border-bottom:1px solid #f0f0f0;}
-.pp-table td.pos-label{padding:6px 10px;white-space:nowrap;padding-right:24px;}
-.pp-cell{border-radius:4px;height:32px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:500;cursor:default;position:relative;min-width:60px;}
-.pp-cell .tooltip{display:none;position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);background:#fff;border:1px solid #ddd;border-radius:6px;padding:10px 14px;min-width:200px;z-index:100;box-shadow:0 4px 12px rgba(0,0,0,0.1);text-align:left;pointer-events:none;}
+.pp-table{border-collapse:collapse;font-size:13px;font-family:sans-serif;width:100%;}
+.pp-table th{text-align:center;padding:8px 8px;color:#666;font-weight:400;border-bottom:1px solid #e5e5e5;white-space:nowrap;}
+.pp-table th.name-col{text-align:left;width:auto;}
+.pp-table td{padding:3px 5px;border-bottom:1px solid #f0f0f0;}
+.pp-table td.name-col{padding:4px 16px 4px 0;white-space:nowrap;}
+.pp-cell{border-radius:4px;height:32px;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:500;min-width:52px;cursor:default;position:relative;}
+.pp-cell .tooltip{display:none;position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);background:#fff;border:1px solid #ddd;border-radius:6px;padding:10px 14px;min-width:180px;z-index:100;box-shadow:0 4px 12px rgba(0,0,0,0.1);text-align:left;pointer-events:none;}
 .pp-cell:hover .tooltip{display:block;}
 .pp-cell .tt-title{font-size:12px;font-weight:500;color:#333;margin-bottom:4px;}
-.pp-cell .tt-date{font-size:11px;color:#888;margin-bottom:8px;}
-.pp-cell .tt-row{display:flex;justify-content:space-between;font-size:12px;color:#333;margin-bottom:3px;}
-.pp-cell .tt-div{border-top:1px solid #eee;margin:6px 0;}
-.pp-cell .tt-ref{font-size:11px;color:#999;display:flex;justify-content:space-between;}
-.pp-legend{display:flex;gap:16px;margin-top:12px;flex-wrap:wrap;align-items:center;}
+.pp-cell .tt-row{font-size:12px;color:#555;margin-bottom:2px;}
+.pp-legend{display:flex;gap:16px;margin-bottom:12px;flex-wrap:wrap;align-items:center;}
 .pp-legend-item{display:flex;align-items:center;gap:6px;font-size:12px;color:#666;}
 </style>
+
+<div class="pp-legend">
+  <div class="pp-legend-item"><span style="background:#fff;border:0.5px solid #ddd;width:16px;height:16px;display:inline-block;border-radius:3px;"></span> No mutation</div>
+  <div class="pp-legend-item"><span style="background:#d4edda;width:16px;height:16px;display:inline-block;border-radius:3px;"></span> Primer matches virus</div>
+  <div class="pp-legend-item"><span style="width:48px;height:16px;display:inline-block;border-radius:3px;background:linear-gradient(to right,#fff8f0,#a32d2d);"></span> Mismatch (low → high %)</div>
+</div>
+
+<div style="display:flex;gap:16px;align-items:flex-start;">
+<div style="flex:1;overflow-x:auto;">
 <table class="pp-table">
-<thead><tr><th class="pos-col">Position</th>
+<thead><tr><th class="name-col">Primer/Probe</th>
 """
+
     for m in all_months:
         html += f"<th>{m}</th>"
     html += "</tr></thead><tbody>"
 
-    for pos in sorted(position_data.keys()):
-        info = position_data[pos]
-        name = info["name"]
+    for name, info in heatmap_data.items():
         piece_type = info["piece_type"]
-        monthly = info["monthly"]
+        months = info["months"]
 
-        html += f'<tr><td class="pos-label">{piece_badge(piece_type)} <span style="color:#333;margin-left:6px;">{pos} ({name})</span></td>'
+        html += f'<tr><td class="name-col">{piece_badge(piece_type)} <span style="color:#333;margin-left:6px;">{name}</span></td>'
 
         for month in all_months:
-            mut_values = list(monthly.get(month, {}).items())
-            # mut_values is [(mut, {proportion: x, coverage: y}), ...]
-            total = min(sum(d["proportion"] if isinstance(d, dict) else d
-                            for _, d in mut_values), 1.0) if mut_values else 0.0
-            max_cov = max((d.get("coverage", 0) if isinstance(d, dict) else 0
-                           for _, d in mut_values), default=0) if mut_values else 0
-            style = cell_color(total, pos, name, max_cov)
+            cell = months.get(month, {"status": "clean", "text": "—", "proportion": 0.0})
+            status = cell["status"]
+            text = cell["text"]
+            proportion = cell["proportion"]
 
-            if mut_values:
-                tooltip_rows = ""
-                for mut, d in sorted(mut_values,
-                                     key=lambda x: -(x[1]["proportion"] if isinstance(x[1], dict) else x[1])):
-                    val = d["proportion"] if isinstance(d, dict) else d
-                    cov = d.get("coverage", 0) if isinstance(d, dict) else 0
-                    ref = str(mut)[0]
-                    alt = str(mut)[-1]
-                    tooltip_rows += f'<div class="tt-row"><span>{ref}→{alt}</span><span style="font-weight:500;">{val:.1%}</span></div>'
-                ref_remaining = max(0, 1.0 - total)
-                tooltip_html = f"""<div class="tooltip">
-            <div class="tt-title">{pos} — {name} ({piece_type})</div>
-            <div class="tt-date">{month} — total: {total:.1%}</div>
-            <div class="tt-div"></div>
-            {tooltip_rows}
-            <div class="tt-ref"><span>reference remaining</span><span>{ref_remaining:.1%}</span></div>
-            <div class="tt-div"></div>
-            <div class="tt-ref"><span>coverage</span><span>{max_cov:,} reads</span></div>
-            </div>"""
+            if status == "clean":
+                style = "background:#ffffff;color:#999;border:0.5px solid #eee;"
+                tooltip_html = f'<div class="tooltip"><div class="tt-title">{name}</div><div class="tt-row">{month}: no mutations detected</div></div>'
+            elif status == "match":
+                style = "background:#d4edda;color:#155724;"
+                tooltip_html = f'<div class="tooltip"><div class="tt-title">{name}</div><div class="tt-row">{month}: {text}</div><div class="tt-row" style="color:#888;font-size:11px;">Primer matches circulating virus</div></div>'
             else:
-                tooltip_html = ""
+                style = mismatch_color(proportion)
+                tooltip_html = f'<div class="tooltip"><div class="tt-title">{name}</div><div class="tt-row">{month}: {text}</div><div class="tt-row" style="color:#888;font-size:11px;">Primer mismatches circulating virus</div></div>'
 
-            html += f'<td><div class="pp-cell" style="{style}">{cell_text}{tooltip_html}</div></td>'
+            html += f'<td><div class="pp-cell" style="{style}">{text}{tooltip_html}</div></td>'
 
         html += "</tr>"
 
-    html += """</tbody></table>
-<div class="pp-legend">
-  <span style="font-size:12px;color:#888;">Cell meaning:</span>
-  <div class="pp-legend-item"><span style="background:#ffffff;width:16px;height:16px;display:inline-block;border-radius:3px;border:1px solid #eee;"></span> No mutation</div>
-  <div class="pp-legend-item"><span style="background:#d4edda;width:16px;height:16px;display:inline-block;border-radius:3px;"></span> Mutation — primer matches ✅</div>
-  <div class="pp-legend-item"><span style="background:#fac775;width:16px;height:16px;display:inline-block;border-radius:3px;"></span> Mismatch &lt;50%</div>
-  <div class="pp-legend-item"><span style="background:#a32d2d;width:16px;height:16px;display:inline-block;border-radius:3px;"></span> Mismatch &gt;50%</div>
-  <div class="pp-legend-item"><span style="background:#e9ecef;width:16px;height:16px;display:inline-block;border-radius:3px;"></span> Low coverage — unreliable</div>
+    html += "</tbody></table></div>"
+
+    # color scale bar
+    html += """
+<div style="display:flex;flex-direction:column;align-items:center;gap:4px;padding-top:44px;">
+  <span style="font-size:11px;color:#888;">100%</span>
+  <div style="width:14px;height:160px;border-radius:8px;background:linear-gradient(to bottom,#a32d2d,#d85a30,#fac775,#fff8f0,#ffffff);border:0.5px solid #ddd;"></div>
+  <span style="font-size:11px;color:#888;">0%</span>
+  <span style="font-size:10px;color:#aaa;text-align:center;margin-top:4px;max-width:44px;">mismatch %</span>
+</div>
 </div>"""
+
     return html
 
 # ── Summary table ──────────────────────────────────────────────────────────────
@@ -751,9 +826,10 @@ def app():
         return
 
     # ── Heatmap ────────────────────────────────────────────────────────────────
+    heatmap_data = build_primer_heatmap_data(time_series, found, dominant_letters)
     st.subheader("Mutation prevalence over time")
     st.caption(f"Site: {selected_location} | {date_from_str} to {date_to_str}")
-    html = build_html_heatmap(position_data, dominant_letters, found)
+    html = build_html_heatmap(heatmap_data)
     st.html(html)
 
     # ── Summary table ──────────────────────────────────────────────────────────
