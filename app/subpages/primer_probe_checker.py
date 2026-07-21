@@ -338,9 +338,19 @@ def get_dominant_letters(time_series, reference, results):
 
 # ── Heatmap ────────────────────────────────────────────────────────────────────
 
-def build_html_heatmap(position_data):
+def build_html_heatmap(position_data, dominant_letters, results):
     if not position_data:
         return "<p>No mutations found in primer-probe regions.</p>"
+
+    # build primer letters lookup: {pos: {primer_name: letter}}
+    primer_letters_by_pos = {}
+    for r in results:
+        if r["Start"] is None:
+            continue
+        for pos, letter in r.get("PrimerLetters", {}).items():
+            if pos not in primer_letters_by_pos:
+                primer_letters_by_pos[pos] = {}
+            primer_letters_by_pos[pos][r["Name"]] = letter
 
     all_months = sorted(set(
         m for info in position_data.values()
@@ -350,15 +360,17 @@ def build_html_heatmap(position_data):
     if not all_months:
         return "<p>No data available for the selected period.</p>"
 
-    def cell_color(proportion):
-        if proportion <= 0:
+    def cell_color(total, pos, name, coverage=0, min_coverage=1000):
+        if total <= 0:
             return "background:#ffffff; color:#999;"
-        elif proportion < 0.1:
-            return "background:#fff8f0; color:#bf6000;"
-        elif proportion < 0.5:
+        if coverage < min_coverage:
+            return "background:#e9ecef; color:#6c757d;"
+        primer_letter = primer_letters_by_pos.get(pos, {}).get(name)
+        dominant = dominant_letters.get(pos)
+        if primer_letter and dominant and primer_letter == dominant:
+            return "background:#d4edda; color:#155724;"
+        elif total < 0.5:
             return "background:#fac775; color:#412402;"
-        elif proportion < 0.8:
-            return "background:#d85a30; color:#ffffff;"
         else:
             return "background:#a32d2d; color:#ffffff;"
 
@@ -405,14 +417,10 @@ def build_html_heatmap(position_data):
         html += f'<tr><td class="pos-label">{piece_badge(piece_type)} <span style="color:#333;margin-left:6px;">{pos} ({name})</span></td>'
 
         for month in all_months:
-            mut_values = [
-                (mut, d["proportion"], d["coverage"])
-                for mut, d in monthly.get(month, {}).items()
-            ]
-            total = min(sum(p for _, p, _ in mut_values), 1.0)
-            min_coverage = min((c for _, _, c in mut_values), default=0)
-            style = cell_color(total)
-            cell_text = "—" if total <= 0 else f"{total:.0%}"
+            mut_values = list(monthly.get(month, {}).items())
+            total = min(sum(p for _, p, _ in mut_values), 1.0) if mut_values else 0.0
+            max_cov = max((c for _, _, c in mut_values), default=0) if mut_values else 0
+            style = cell_color(total, pos, name, max_cov)
 
             if mut_values:
                 tooltip_rows = ""
@@ -439,11 +447,12 @@ def build_html_heatmap(position_data):
 
     html += """</tbody></table>
 <div class="pp-legend">
-  <span style="font-size:12px;color:#888;">Mutation prevalence:</span>
-  <div class="pp-legend-item"><span style="background:#fff8f0;width:16px;height:16px;display:inline-block;border-radius:3px;border:1px solid #eee;"></span> &lt;10%</div>
-  <div class="pp-legend-item"><span style="background:#fac775;width:16px;height:16px;display:inline-block;border-radius:3px;"></span> 10–50%</div>
-  <div class="pp-legend-item"><span style="background:#d85a30;width:16px;height:16px;display:inline-block;border-radius:3px;"></span> 50–80%</div>
-  <div class="pp-legend-item"><span style="background:#a32d2d;width:16px;height:16px;display:inline-block;border-radius:3px;"></span> &gt;80%</div>
+  <span style="font-size:12px;color:#888;">Cell meaning:</span>
+  <div class="pp-legend-item"><span style="background:#ffffff;width:16px;height:16px;display:inline-block;border-radius:3px;border:1px solid #eee;"></span> No mutation</div>
+  <div class="pp-legend-item"><span style="background:#d4edda;width:16px;height:16px;display:inline-block;border-radius:3px;"></span> Mutation — primer matches ✅</div>
+  <div class="pp-legend-item"><span style="background:#fac775;width:16px;height:16px;display:inline-block;border-radius:3px;"></span> Mismatch &lt;50%</div>
+  <div class="pp-legend-item"><span style="background:#a32d2d;width:16px;height:16px;display:inline-block;border-radius:3px;"></span> Mismatch &gt;50%</div>
+  <div class="pp-legend-item"><span style="background:#e9ecef;width:16px;height:16px;display:inline-block;border-radius:3px;"></span> Low coverage — unreliable</div>
 </div>"""
     return html
 
