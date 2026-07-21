@@ -747,7 +747,7 @@ def app():
     # ── Heatmap ────────────────────────────────────────────────────────────────
     st.subheader("Mutation prevalence over time")
     st.caption(f"Site: {selected_location} | {date_from_str} to {date_to_str}")
-    html = build_html_heatmap(position_data)
+    html = build_html_heatmap(position_data, dominant_letters, found)
     st.html(html)
 
     # ── Summary table ──────────────────────────────────────────────────────────
