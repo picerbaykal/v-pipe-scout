@@ -348,6 +348,10 @@ def devconvolve(
             with open(output_json_fp, "r") as f:
                 deconvolved_data = json.loads(f.read())
 
+            # DEBUG
+            import shutil
+            shutil.copy(output_json_fp, "/tmp/abundance_deconvolved.json")
+
             # Write back with proper indentation
             with open(output_json_fp, "w") as f:
                 json.dump(deconvolved_data, f, indent=4)
