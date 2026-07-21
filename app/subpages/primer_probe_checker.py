@@ -418,26 +418,32 @@ def build_html_heatmap(position_data, dominant_letters, results):
 
         for month in all_months:
             mut_values = list(monthly.get(month, {}).items())
-            total = min(sum(p for _, p, _ in mut_values), 1.0) if mut_values else 0.0
-            max_cov = max((c for _, _, c in mut_values), default=0) if mut_values else 0
+            # mut_values is [(mut, {proportion: x, coverage: y}), ...]
+            total = min(sum(d["proportion"] if isinstance(d, dict) else d
+                            for _, d in mut_values), 1.0) if mut_values else 0.0
+            max_cov = max((d.get("coverage", 0) if isinstance(d, dict) else 0
+                           for _, d in mut_values), default=0) if mut_values else 0
             style = cell_color(total, pos, name, max_cov)
 
             if mut_values:
                 tooltip_rows = ""
-                for mut, val, cov in sorted(mut_values, key=lambda x: -x[1]):
+                for mut, d in sorted(mut_values,
+                                     key=lambda x: -(x[1]["proportion"] if isinstance(x[1], dict) else x[1])):
+                    val = d["proportion"] if isinstance(d, dict) else d
+                    cov = d.get("coverage", 0) if isinstance(d, dict) else 0
                     ref = str(mut)[0]
                     alt = str(mut)[-1]
                     tooltip_rows += f'<div class="tt-row"><span>{ref}→{alt}</span><span style="font-weight:500;">{val:.1%}</span></div>'
                 ref_remaining = max(0, 1.0 - total)
                 tooltip_html = f"""<div class="tooltip">
-<div class="tt-title">{pos} — {name} ({piece_type})</div>
-<div class="tt-date">{month} — total: {total:.1%}</div>
-<div class="tt-div"></div>
-{tooltip_rows}
-<div class="tt-ref"><span>reference remaining</span><span>{ref_remaining:.1%}</span></div>
-<div class="tt-div"></div>
-<div class="tt-ref"><span>coverage</span><span>{min_coverage:,} reads</span></div>
-</div>"""
+            <div class="tt-title">{pos} — {name} ({piece_type})</div>
+            <div class="tt-date">{month} — total: {total:.1%}</div>
+            <div class="tt-div"></div>
+            {tooltip_rows}
+            <div class="tt-ref"><span>reference remaining</span><span>{ref_remaining:.1%}</span></div>
+            <div class="tt-div"></div>
+            <div class="tt-ref"><span>coverage</span><span>{max_cov:,} reads</span></div>
+            </div>"""
             else:
                 tooltip_html = ""
 
