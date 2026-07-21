@@ -448,7 +448,6 @@ def build_html_heatmap(position_data):
     return html
 
 # ── Summary table ──────────────────────────────────────────────────────────────
-
 def build_summary_table(position_data, found, threshold, dominant_letters):
     """Build summary table with primer vs circulating virus comparison."""
     primer_summary = {}
@@ -496,18 +495,19 @@ def build_summary_table(position_data, found, threshold, dominant_letters):
         worst_proportion = summary["worst_proportion"]
         worst_mutation = summary["worst_mutation"]
 
-        # status based on primer-virus match
+        # primer vs virus status
         if not summary["primer_match"]:
             mismatches = ", ".join(summary["mismatch_positions"])
-            primer_status = f"❌ Mismatch at: {mismatches}"
+            primer_vs_virus = f"❌ Mismatch at: {mismatches}"
         else:
-            primer_status = "✅ Matches circulating virus"
+            primer_vs_virus = "✅ Matches circulating virus"
 
-        # mutation status
-        if worst_proportion >= 0.5:
-            mut_status = "🚨 Critical"
-        elif worst_proportion >= threshold:
-            mut_status = "⚠️ Warning"
+        # mutation status — based on primer match, not just proportion vs Wuhan
+        if not summary["primer_match"]:
+            if worst_proportion >= 0.5:
+                mut_status = "🚨 Critical"
+            else:
+                mut_status = "⚠️ Warning"
         else:
             mut_status = "✅ Good"
 
@@ -526,8 +526,8 @@ def build_summary_table(position_data, found, threshold, dominant_letters):
             "Worst mutation": worst_mutation or "none",
             "Recent proportion": f"{worst_proportion:.1%}" if worst_proportion > 0 else "0.0%",
             "Coverage": coverage_display,
-            "Primer vs virus": primer_status,
-            "Mutation status": mut_status,
+            "Primer vs virus": primer_vs_virus,
+            "Status": mut_status,
         })
 
     return pd.DataFrame(rows)
