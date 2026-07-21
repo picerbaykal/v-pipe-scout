@@ -13,3 +13,5 @@ deployment.log
 data/known_variants/*.yaml.envrc
 .idea/
 .envrc
+worker/data/
+worker/data/
