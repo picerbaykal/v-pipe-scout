@@ -267,7 +267,10 @@ def app():
             st.rerun()
 
         # ── Results ───────────────────────────────────────────────────────────
-        from components.multi_location_results import render_location_results_tabs
+        from components.multi_location_results import (
+            render_single_location_result,
+            render_location_progress,
+        )
 
         location_tasks = st.session_state.get("acooc_location_tasks", {})
         location_results = st.session_state.get("location_results", {})
@@ -297,12 +300,51 @@ def app():
                 from streamlit_autorefresh import st_autorefresh
                 st_autorefresh(interval=2000, key="acooc_autorefresh")
 
-            render_location_results_tabs(
-                location_tasks=location_tasks,
-                location_results=st.session_state.location_results,
-                celery_app=celery_app,
-                redis_client=redis_client,
-            )
+                # ── Custom tab rendering with cooc/scanner placeholders ──────
+            location_names = list(location_tasks.keys())
+            tabs = st.tabs([f"📍 {loc}" for loc in location_names])
+
+            for location, tab in zip(location_names, tabs):
+                with tab:
+                    task_id = location_tasks[location]
+
+                    # 1. Cooc panel completeness (placeholder)
+                    st.markdown("#### Panel completeness (co-occurrence)")
+                    st.info(
+                        "Awaiting enhanced `/aggregated` endpoint on WASAP LAPIS. "
+                        "Once deployed, this section will show read-level co-occurrence "
+                        "and highlight positions where the current panel misses circulating signal."
+                    )
+
+                    # 2. Deconvolution (real result)
+                    st.markdown("#### Variant deconvolution")
+                    if location in st.session_state.location_results:
+                        render_single_location_result(
+                            location, st.session_state.location_results[location]
+                        )
+                    else:
+                        render_location_progress(
+                            location, task_id, celery_app, redis_client
+                        )
+
+                    # 3. Scanner (placeholder button)
+                    st.markdown("#### Scanner")
+                    scan_col1, scan_col2 = st.columns([1, 5])
+                    with scan_col1:
+                        scan_clicked = st.button(
+                            "▶ Run scanner",
+                            key=f"acooc_scan_{location}",
+                        )
+                    with scan_col2:
+                        if scan_clicked:
+                            st.warning(
+                                "Scanner requires the enhanced `/aggregated` endpoint, "
+                                "not yet deployed on WASAP LAPIS."
+                            )
+                        else:
+                            st.caption(
+                                "Detects mutation combinations not explained by the selected panel."
+                            )
 
         # ── Signature similarity ──────────────────────────────────────────────
         if len(all_selected_variants) >= 2:
