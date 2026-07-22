@@ -48,6 +48,17 @@ def get_piece_type(name):
         return "reverse"
     return "unknown"
 
+def get_3prime_positions(start, end, strand, n_bases=5):
+    """
+    Return genome positions corresponding to the 3' end of a primer.
+    For forward primers (+): 3' end = last n_bases (highest positions)
+    For reverse primers (-): 3' end = first n_bases (lowest positions)
+    """
+    if strand == "+":
+        return set(range(end - n_bases + 1, end + 1))
+    else:
+        return set(range(start, start + n_bases))
+
 def extract_positions_from_header(header):
     match = re.search(r"NC_045512\.2:(\d+)-(\d+)", header.strip())
     if match:
@@ -565,6 +576,9 @@ def build_summary_table(position_data, found, threshold, dominant_letters):
             "worst_coverage": 0,
             "primer_match": True,  # assume match until proven otherwise
             "mismatch_positions": [],
+            "monthly_proportions": {},
+            "three_prime_positions": set(),
+            "three_prime_mismatch": False,
         }
 
         # check each position in this primer/probe against dominant circulating letter
@@ -575,6 +589,9 @@ def build_summary_table(position_data, found, threshold, dominant_letters):
                 primer_summary[name]["mismatch_positions"].append(
                     f"{pos}({primer_letter}→{dominant})"
                 )
+                # check if mismatch is at 3' end
+                if pos in primer_summary[name]["three_prime_positions"]:
+                    primer_summary[name]["three_prime_mismatch"] = True
 
     # update with mutation data
     for pos, info in position_data.items():
@@ -602,14 +619,14 @@ def build_summary_table(position_data, found, threshold, dominant_letters):
         else:
             primer_vs_virus = "✅ Matches circulating virus"
 
-        # mutation status — based on primer match, not just proportion vs Wuhan
+        # status
         if not summary["primer_match"]:
             if worst_proportion >= 0.5:
-                mut_status = "🚨 Critical"
+                status = '<span style="background:#fcebeb;color:#a32d2d;font-size:11px;padding:2px 8px;border-radius:4px;">🚨 Critical</span>'
             else:
-                mut_status = "⚠️ Warning"
+                status = '<span style="background:#faeeda;color:#854f0b;font-size:11px;padding:2px 8px;border-radius:4px;">⚠️ Warning</span>'
         else:
-            mut_status = "✅ Good"
+            status = '<span style="background:#eaf3de;color:#3b6d11;font-size:11px;padding:2px 8px;border-radius:4px;">✅ Good</span>'
 
         # coverage display
         cov = summary['worst_coverage']
@@ -673,6 +690,7 @@ def build_summary_html(position_data, found, time_series, dominant_letters):
         name = r["Name"]
         start = r["Start"]
         end = r["End"]
+        primer_summary[name]["three_prime_positions"] = get_3prime_positions(start, end, strand)
 
         for mut, proportions in time_series.items():
             try:
@@ -840,10 +858,12 @@ def build_summary_html(position_data, found, time_series, dominant_letters):
         worst_mutation = summary["worst_mutation"]
         monthly = summary["monthly_proportions"]
 
-        # primer vs virus
         if not summary["primer_match"]:
             mismatches = ", ".join(summary["mismatch_positions"])
-            primer_vs = f'<span style="color:#a32d2d;">❌ Mismatch at: {mismatches}</span>'
+            three_prime_flag = ""
+            if summary.get("three_prime_mismatch"):
+                three_prime_flag = ' <span style="background:#fcebeb;color:#a32d2d;font-size:10px;padding:1px 6px;border-radius:3px;font-weight:500;">3′ end ⚠️</span>'
+            primer_vs = f'<span style="color:#a32d2d;">❌ Mismatch at: {mismatches}</span>{three_prime_flag}'
         else:
             primer_vs = '<span style="color:#3b6d11;">✅ Matches circulating virus</span>'
 
