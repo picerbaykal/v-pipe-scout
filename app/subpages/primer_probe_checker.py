@@ -752,15 +752,19 @@ def build_summary_html(position_data, found, threshold, time_series, dominant_le
         values = [monthly_proportions[m] for m in months]
         n = len(values)
 
-        w, h = 200, 70
-        pad = 12
+        w = 200
+        pad_top = 16
+        pad_bottom = 12
+        pad_x = 12
+        chart_h = 80
 
         if n == 1:
-            xs = [w // 2]
-            ys = [h // 2]
+            xs = [pad_x, w - pad_x]
+            y = pad_top + (1 - values[0]) * (chart_h - pad_top - pad_bottom)
+            ys = [y, y]
         else:
-            xs = [pad + (i / (n - 1)) * (w - 2 * pad) for i in range(n)]
-            ys = [h - pad - v * (h - 2 * pad) for v in values]
+            xs = [pad_x + (i / (n - 1)) * (w - 2 * pad_x) for i in range(n)]
+            ys = [pad_top + (1 - v) * (chart_h - pad_top - pad_bottom) for v in values]
 
         points = " ".join(f"{x:.1f},{y:.1f}" for x, y in zip(xs, ys))
         color = "#a32d2d" if values[-1] > 0.5 else "#d85a30" if values[-1] > 0.1 else "#639922"
@@ -770,27 +774,31 @@ def build_summary_html(position_data, found, threshold, time_series, dominant_le
             for x, y in zip(xs, ys)
         )
 
+        mid_y = (pad_top + chart_h - pad_bottom) / 2
+
         labels = "".join(
-            f'<text x="{x:.1f}" y="{h + 14}" text-anchor="middle" font-size="9" fill="#999">{m[5:]}</text>'
-            f'<text x="{x:.1f}" y="{h + 24}" text-anchor="middle" font-size="9" fill="#666">{v:.0%}</text>'
+            f'<text x="{x:.1f}" y="{chart_h + 12}" text-anchor="middle" font-size="9" fill="#999">{m[5:]}</text>'
+            f'<text x="{x:.1f}" y="{chart_h + 22}" text-anchor="middle" font-size="9" fill="#666">{v:.0%}</text>'
             for x, m, v in zip(xs, months, values)
         )
 
-        return f'''<div class="sparkpop">
-<p style="font-size:11px;font-weight:500;color:#333;margin:0 0 6px;">{name} — trend</p>
-<svg width="{w}" height="{h + 28}" viewBox="0 0 {w} {h + 28}">
-  <line x1="0" y1="{h - pad}" x2="{w}" y2="{h - pad}" stroke="#eee" stroke-width="0.5"/>
-  <line x1="0" y1="{h/2:.0f}" x2="{w}" y2="{h/2:.0f}" stroke="#eee" stroke-width="0.5" stroke-dasharray="3,3"/>
-  <line x1="0" y1="{pad}" x2="{w}" y2="{pad}" stroke="#eee" stroke-width="0.5"/>
-  <polyline points="{points}" fill="none" stroke="{color}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-  {dots}
-  {labels}
-  <text x="0" y="{pad + 3}" font-size="8" fill="#bbb">100%</text>
-  <text x="0" y="{h/2 + 3:.0f}" font-size="8" fill="#bbb">50%</text>
-  <text x="0" y="{h - pad + 3}" font-size="8" fill="#bbb">0%</text>
-</svg>
-</div>'''
+        total_h = chart_h + 28
 
+        return f'''<div class="sparkpop">
+    <p style="font-size:11px;font-weight:500;color:#333;margin:0 0 6px;">{name} — trend</p>
+    <svg width="{w}" height="{total_h}" viewBox="0 0 {w} {total_h}">
+      <line x1="0" y1="{pad_top}" x2="{w}" y2="{pad_top}" stroke="#eee" stroke-width="0.5"/>
+      <line x1="0" y1="{mid_y:.1f}" x2="{w}" y2="{mid_y:.1f}" stroke="#eee" stroke-width="0.5" stroke-dasharray="3,3"/>
+      <line x1="0" y1="{chart_h - pad_bottom}" x2="{w}" y2="{chart_h - pad_bottom}" stroke="#eee" stroke-width="0.5"/>
+      <text x="2" y="{pad_top + 3}" font-size="8" fill="#bbb">100%</text>
+      <text x="2" y="{mid_y + 3:.1f}" font-size="8" fill="#bbb">50%</text>
+      <text x="2" y="{chart_h - pad_bottom + 3}" font-size="8" fill="#bbb">0%</text>
+      <polyline points="{points}" fill="none" stroke="{color}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+      {dots}
+      {labels}
+    </svg>
+    </div>'''
+    
     # ── build HTML ─────────────────────────────────────────────────────────────
 
     html = """
@@ -1095,12 +1103,6 @@ def app():
     st.caption("Controls when a mutation is flagged as Warning or Critical in the table below.")
 
     first_mut = list(time_series.keys())[0] if time_series else None
-    if first_mut:
-        st.write("first mutation data:", list(time_series[first_mut].items())[:2])
-
-    st.write("found regions:")
-    for r in found:
-        st.write(f"{r['Name']}: {r['Start']}-{r['End']}")
 
     summary_html = build_summary_html(
         position_data, found, threshold, time_series, dominant_letters
