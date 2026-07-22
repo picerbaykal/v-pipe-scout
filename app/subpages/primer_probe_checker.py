@@ -529,6 +529,10 @@ def build_html_heatmap(heatmap_data):
         piece_type = info["piece_type"]
         months = info["months"]
 
+        # skip rows where all cells are clean
+        if all(cell["status"] == "clean" for cell in months.values()):
+            continue
+
         html += f'<tr><td class="name-col">{piece_badge(piece_type)} <span style="color:#333;margin-left:6px;">{name}</span></td>'
 
         for month in all_months:
