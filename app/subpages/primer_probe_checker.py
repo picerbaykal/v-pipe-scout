@@ -23,6 +23,7 @@ from Bio.Seq import Seq
 from dateutil.relativedelta import relativedelta
 
 from utils.config import get_wiseloculus_url
+import streamlit.components.v1 as components
 
 logger = logging.getLogger(__name__)
 
@@ -656,19 +657,43 @@ def build_summary_html(position_data, found, threshold, time_series, dominant_le
                     f"{pos}({primer_letter}→{dominant})"
                 )
 
-    # update with mutation data
-    for pos, info in position_data.items():
-        name = info["name"]
-        if name not in primer_summary:
+    # update with mutation data — scan time_series for mutations in each primer region
+    for r in found:
+        if r["Start"] is None:
             continue
-        for month, muts in info["monthly"].items():
-            for mut, data in muts.items():
-                frac = data["proportion"] if isinstance(data, dict) else data
-                cov = data.get("coverage", 0) if isinstance(data, dict) else 0
-                if frac > primer_summary[name]["worst_proportion"]:
-                    primer_summary[name]["worst_proportion"] = frac
-                    primer_summary[name]["worst_mutation"] = mut
-                    primer_summary[name]["worst_coverage"] = cov
+        name = r["Name"]
+        start = r["Start"]
+        end = r["End"]
+
+        for mut, proportions in time_series.items():
+            try:
+                pos = int(re.search(r'\d+', mut).group())
+            except Exception:
+                continue
+
+            if not (start <= pos <= end):
+                continue
+
+            # find most recent non-zero proportion
+            for month in sorted(proportions.keys(), reverse=True):
+                val = proportions[month]
+                frac = val.get("proportion", 0.0) if isinstance(val, dict) else val
+                if frac > 0:
+                    if frac > primer_summary[name]["worst_proportion"]:
+                        primer_summary[name]["worst_proportion"] = frac
+                        primer_summary[name]["worst_mutation"] = mut
+                        cov = val.get("coverage", 0) if isinstance(val, dict) else 0
+                        primer_summary[name]["worst_coverage"] = cov
+                    break
+
+    # build monthly proportions for sparkline
+    for name, summary in primer_summary.items():
+        worst_mut = summary["worst_mutation"]
+        if worst_mut and worst_mut in time_series:
+            for month, data in time_series[worst_mut].items():
+                frac = data.get("proportion", 0.0) if isinstance(data, dict) else data
+                if frac > 0:
+                    primer_summary[name]["monthly_proportions"][month] = frac
 
     # build monthly proportions for sparkline — use worst mutation time series
     for name, summary in primer_summary.items():
@@ -1069,10 +1094,18 @@ def app():
     )
     st.caption("Controls when a mutation is flagged as Warning or Critical in the table below.")
 
+    first_mut = list(time_series.keys())[0] if time_series else None
+    if first_mut:
+        st.write("first mutation data:", list(time_series[first_mut].items())[:2])
+
+    st.write("found regions:")
+    for r in found:
+        st.write(f"{r['Name']}: {r['Start']}-{r['End']}")
+
     summary_html = build_summary_html(
         position_data, found, threshold, time_series, dominant_letters
     )
-    st.html(summary_html)
+    components.html(summary_html, height=400, scrolling=True)
 
     # ── GenSpectrum links ──────────────────────────────────────────────────────
     st.subheader("GenSpectrum links")
