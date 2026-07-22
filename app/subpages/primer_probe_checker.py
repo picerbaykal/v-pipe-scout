@@ -29,6 +29,14 @@ logger = logging.getLogger(__name__)
 
 # ── Helper functions ───────────────────────────────────────────────────────────
 
+@st.cache_data
+def load_reference():
+    ref_path = os.path.join(os.path.dirname(__file__), "..", "data", "NC_045512.2.fasta")
+    if not os.path.exists(ref_path):
+        return None, f"Reference not found at {ref_path}"
+    record = next(SeqIO.parse(ref_path, "fasta"))
+    return str(record.seq).upper(), None
+
 def get_piece_type(name):
     clean = name.split("::")[0].upper()
     if "-P-" in clean or "-P_" in clean or clean.endswith("-P") or clean.endswith("_P"):
@@ -888,7 +896,7 @@ def app():
     st.title("🔬 Primer & Probe Checker")
     st.markdown(
         """
-        Upload a reference genome and primer/probe sequences.
+        Upload primer/probe sequences.
         The app checks whether binding sites have mutations in Swiss wastewater data.
         """
     )
@@ -931,38 +939,15 @@ def app():
 
     st.divider()
 
-    # ── Step 1: Reference genome ───────────────────────────────────────────────
-    st.subheader("Step 1 — Upload reference genome")
-    ref_file = st.file_uploader(
-        "Reference genome (FASTA)",
-        type=["fasta", "fa"],
-        help="e.g. Wuhan reference NC_045512.2 (29,903 bp)",
-        key="ppc_ref_upload",
-    )
-
-    if ref_file is None:
-        st.info("👆 Upload a reference genome to get started.")
+    # ── Load reference ─────────────────────────────────────────────────────────
+    reference, ref_error = load_reference()
+    if ref_error:
+        st.error(ref_error)
         return
+    st.caption("Reference: NC_045512.2 (Wuhan, 29,903 bp) — loaded automatically")
 
-    try:
-        ref_content = ref_file.read().decode("utf-8")
-        ref_record = next(SeqIO.parse(io.StringIO(ref_content), "fasta"))
-        reference = str(ref_record.seq).upper()
-    except Exception as e:
-        st.error(f"Could not parse file: {e}")
-        return
-
-    if len(reference) < 1000:
-        st.error(
-            f"This file looks like a primer file ({len(reference):,} bp), not a reference genome. "
-            "Please upload a full genome reference like NC_045512.2 (29,903 bp)."
-        )
-        return
-
-    st.success(f"✅ Reference genome accepted: {ref_record.id} ({len(reference):,} bp)")
-
-    # ── Step 2: Primer/probe FASTA ─────────────────────────────────────────────
-    st.subheader("Step 2 — Upload primer/probe FASTA")
+    # ── Primer/probe FASTA ─────────────────────────────────────────────
+    st.subheader("Upload primer/probe FASTA")
     primer_file = st.file_uploader(
         "Primer/probe FASTA",
         type=["fasta", "fa"],
