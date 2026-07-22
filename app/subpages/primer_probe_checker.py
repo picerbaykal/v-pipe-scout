@@ -622,6 +622,232 @@ def build_summary_table(position_data, found, threshold, dominant_letters):
 
     return pd.DataFrame(rows)
 
+def build_summary_html(position_data, found, threshold, time_series, dominant_letters):
+    """
+    Build custom HTML summary table with sparkline trend charts on hover.
+    One row per primer/probe piece.
+    """
+
+    # ── build primer summary data ─────────────────────────────────────────────
+    primer_summary = {}
+    for r in found:
+        if r["Start"] is None:
+            continue
+        name = r["Name"]
+        piece_type = get_piece_type(name)
+        primer_letters = r.get("PrimerLetters", {})
+
+        primer_summary[name] = {
+            "piece_type": piece_type,
+            "worst_mutation": None,
+            "worst_proportion": 0.0,
+            "worst_coverage": 0,
+            "primer_match": True,
+            "mismatch_positions": [],
+            "monthly_proportions": {},  # {month: proportion} for sparkline
+        }
+
+        # check primer vs dominant circulating letter
+        for pos, primer_letter in primer_letters.items():
+            dominant = dominant_letters.get(pos)
+            if dominant and dominant != primer_letter:
+                primer_summary[name]["primer_match"] = False
+                primer_summary[name]["mismatch_positions"].append(
+                    f"{pos}({primer_letter}→{dominant})"
+                )
+
+    # update with mutation data
+    for pos, info in position_data.items():
+        name = info["name"]
+        if name not in primer_summary:
+            continue
+        for month, muts in info["monthly"].items():
+            for mut, data in muts.items():
+                frac = data["proportion"] if isinstance(data, dict) else data
+                cov = data.get("coverage", 0) if isinstance(data, dict) else 0
+                if frac > primer_summary[name]["worst_proportion"]:
+                    primer_summary[name]["worst_proportion"] = frac
+                    primer_summary[name]["worst_mutation"] = mut
+                    primer_summary[name]["worst_coverage"] = cov
+
+    # build monthly proportions for sparkline — use worst mutation time series
+    for name, summary in primer_summary.items():
+        worst_mut = summary["worst_mutation"]
+        if worst_mut and worst_mut in time_series:
+            for month, data in time_series[worst_mut].items():
+                frac = data["proportion"] if isinstance(data, dict) else data
+                if frac > 0:
+                    primer_summary[name]["monthly_proportions"][month] = frac
+
+    # ── helper functions ───────────────────────────────────────────────────────
+
+    def piece_badge(piece_type):
+        if piece_type == "probe":
+            return '<span style="background:#faeeda;color:#854f0b;font-size:11px;padding:2px 7px;border-radius:4px;font-weight:500;">probe</span>'
+        elif piece_type == "forward":
+            return '<span style="background:#e6f1fb;color:#185fa5;font-size:11px;padding:2px 7px;border-radius:4px;font-weight:500;">forward</span>'
+        elif piece_type == "reverse":
+            return '<span style="background:#e1f5ee;color:#0f6e56;font-size:11px;padding:2px 7px;border-radius:4px;font-weight:500;">reverse</span>'
+        return ""
+
+    def build_sparkline(monthly_proportions, width=60, height=24):
+        """Build a small inline SVG sparkline."""
+        if not monthly_proportions:
+            return '<svg width="60" height="24" viewBox="0 0 60 24"><line x1="5" y1="12" x2="55" y2="12" stroke="#ddd" stroke-width="1" stroke-dasharray="3,3"/></svg>'
+
+        months = sorted(monthly_proportions.keys())
+        values = [monthly_proportions[m] for m in months]
+        n = len(values)
+
+        if n == 1:
+            y = height - values[0] * height
+            return f'<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}"><circle cx="{width//2}" cy="{y:.1f}" r="3" fill="#a32d2d"/></svg>'
+
+        # scale x and y
+        xs = [5 + (i / (n - 1)) * (width - 10) for i in range(n)]
+        ys = [height - 4 - v * (height - 8) for v in values]
+
+        points = " ".join(f"{x:.1f},{y:.1f}" for x, y in zip(xs, ys))
+        last_x, last_y = xs[-1], ys[-1]
+
+        # color based on last value
+        color = "#a32d2d" if values[-1] > 0.5 else "#d85a30" if values[-1] > 0.1 else "#639922"
+
+        return f'''<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}">
+<polyline points="{points}" fill="none" stroke="{color}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="{last_x:.1f}" cy="{last_y:.1f}" r="2.5" fill="{color}"/>
+</svg>'''
+
+    def build_popover(name, monthly_proportions):
+        """Build hover popover with full trend chart."""
+        if not monthly_proportions:
+            return ""
+
+        months = sorted(monthly_proportions.keys())
+        values = [monthly_proportions[m] for m in months]
+        n = len(values)
+
+        w, h = 200, 70
+        pad = 12
+
+        if n == 1:
+            xs = [w // 2]
+            ys = [h // 2]
+        else:
+            xs = [pad + (i / (n - 1)) * (w - 2 * pad) for i in range(n)]
+            ys = [h - pad - v * (h - 2 * pad) for v in values]
+
+        points = " ".join(f"{x:.1f},{y:.1f}" for x, y in zip(xs, ys))
+        color = "#a32d2d" if values[-1] > 0.5 else "#d85a30" if values[-1] > 0.1 else "#639922"
+
+        dots = "".join(
+            f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3" fill="{color}"/>'
+            for x, y in zip(xs, ys)
+        )
+
+        labels = "".join(
+            f'<text x="{x:.1f}" y="{h + 14}" text-anchor="middle" font-size="9" fill="#999">{m[5:]}</text>'
+            f'<text x="{x:.1f}" y="{h + 24}" text-anchor="middle" font-size="9" fill="#666">{v:.0%}</text>'
+            for x, m, v in zip(xs, months, values)
+        )
+
+        return f'''<div class="sparkpop">
+<p style="font-size:11px;font-weight:500;color:#333;margin:0 0 6px;">{name} — trend</p>
+<svg width="{w}" height="{h + 28}" viewBox="0 0 {w} {h + 28}">
+  <line x1="0" y1="{h - pad}" x2="{w}" y2="{h - pad}" stroke="#eee" stroke-width="0.5"/>
+  <line x1="0" y1="{h/2:.0f}" x2="{w}" y2="{h/2:.0f}" stroke="#eee" stroke-width="0.5" stroke-dasharray="3,3"/>
+  <line x1="0" y1="{pad}" x2="{w}" y2="{pad}" stroke="#eee" stroke-width="0.5"/>
+  <polyline points="{points}" fill="none" stroke="{color}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+  {dots}
+  {labels}
+  <text x="0" y="{pad + 3}" font-size="8" fill="#bbb">100%</text>
+  <text x="0" y="{h/2 + 3:.0f}" font-size="8" fill="#bbb">50%</text>
+  <text x="0" y="{h - pad + 3}" font-size="8" fill="#bbb">0%</text>
+</svg>
+</div>'''
+
+    # ── build HTML ─────────────────────────────────────────────────────────────
+
+    html = """
+<style>
+.sum-table{border-collapse:collapse;font-size:13px;font-family:sans-serif;width:100%;}
+.sum-table th{text-align:left;padding:8px 12px 8px 0;color:#666;font-weight:400;border-bottom:1px solid #e5e5e5;white-space:nowrap;}
+.sum-table td{padding:6px 12px 6px 0;border-bottom:1px solid #f0f0f0;vertical-align:middle;}
+.spark-wrap{position:relative;display:inline-block;cursor:default;}
+.sparkpop{display:none;position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);background:#fff;border:1px solid #ddd;border-radius:8px;padding:10px 12px;z-index:100;box-shadow:0 4px 12px rgba(0,0,0,0.1);pointer-events:none;white-space:nowrap;}
+.spark-wrap:hover .sparkpop{display:block;}
+</style>
+<table class="sum-table">
+<thead>
+<tr>
+  <th>Primer/Probe</th>
+  <th>Type</th>
+  <th>Worst mutation</th>
+  <th>Recent %</th>
+  <th>Coverage</th>
+  <th>Primer vs virus</th>
+  <th>Trend</th>
+  <th>Status</th>
+</tr>
+</thead>
+<tbody>
+"""
+
+    for name, summary in primer_summary.items():
+        worst_proportion = summary["worst_proportion"]
+        worst_mutation = summary["worst_mutation"]
+        monthly = summary["monthly_proportions"]
+
+        # primer vs virus
+        if not summary["primer_match"]:
+            mismatches = ", ".join(summary["mismatch_positions"])
+            primer_vs = f'<span style="color:#a32d2d;">❌ Mismatch at: {mismatches}</span>'
+        else:
+            primer_vs = '<span style="color:#3b6d11;">✅ Matches circulating virus</span>'
+
+        # status
+        if not summary["primer_match"]:
+            if worst_proportion >= 0.5:
+                status = '<span style="background:#fcebeb;color:#a32d2d;font-size:11px;padding:2px 8px;border-radius:4px;">🚨 Critical</span>'
+            else:
+                status = '<span style="background:#faeeda;color:#854f0b;font-size:11px;padding:2px 8px;border-radius:4px;">⚠️ Warning</span>'
+        else:
+            status = '<span style="background:#eaf3de;color:#3b6d11;font-size:11px;padding:2px 8px;border-radius:4px;">✅ Good</span>'
+
+        # coverage
+        cov = summary["worst_coverage"]
+        if cov == 0:
+            cov_display = '<span style="color:#999;">N/A</span>'
+        elif cov < 1000:
+            cov_display = f'<span style="color:#854f0b;">⚠️ {cov:,}</span>'
+        else:
+            cov_display = f'{cov:,}'
+
+        # sparkline + popover
+        sparkline = build_sparkline(monthly)
+        popover = build_popover(name, monthly)
+
+        if monthly:
+            trend_cell = f'<div class="spark-wrap">{sparkline}{popover}</div>'
+        else:
+            trend_cell = '<span style="color:#ccc;">—</span>'
+
+        html += f"""<tr>
+  <td>{piece_badge(summary["piece_type"])} <span style="margin-left:6px;color:#333;">{name}</span></td>
+  <td style="color:#666;">{summary["piece_type"]}</td>
+  <td style="color:#333;">{worst_mutation or "none"}</td>
+  <td style="color:#333;">{"—" if worst_proportion == 0 else f"{worst_proportion:.1%}"}</td>
+  <td style="color:#333;">{cov_display}</td>
+  <td>{primer_vs}</td>
+  <td>{trend_cell}</td>
+  <td>{status}</td>
+</tr>
+"""
+
+    html += "</tbody></table>"
+    return html
+
+
 
 # ── Main app function ──────────────────────────────────────────────────────────
 
@@ -843,8 +1069,10 @@ def app():
     )
     st.caption("Controls when a mutation is flagged as Warning or Critical in the table below.")
 
-    summary_df = build_summary_table(position_data, found, threshold, dominant_letters)
-    st.dataframe(summary_df, use_container_width=True, hide_index=True)
+    summary_html = build_summary_html(
+        position_data, found, threshold, time_series, dominant_letters
+    )
+    st.html(summary_html)
 
     # ── GenSpectrum links ──────────────────────────────────────────────────────
     st.subheader("GenSpectrum links")
