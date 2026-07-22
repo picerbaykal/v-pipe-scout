@@ -623,7 +623,7 @@ def build_summary_table(position_data, found, threshold, dominant_letters):
 
     return pd.DataFrame(rows)
 
-def build_summary_html(position_data, found, threshold, time_series, dominant_letters):
+def build_summary_html(position_data, found, time_series, dominant_letters):
     """
     Build custom HTML summary table with sparkline trend charts on hover.
     One row per primer/probe piece.
