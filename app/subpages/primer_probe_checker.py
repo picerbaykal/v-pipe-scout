@@ -688,9 +688,12 @@ def build_summary_html(position_data, found, time_series, dominant_letters):
         if r["Start"] is None:
             continue
         name = r["Name"]
+        strand = r["Strand"]
         start = r["Start"]
         end = r["End"]
-        primer_summary[name]["three_prime_positions"] = get_3prime_positions(start, end, strand)
+        primer_summary[name]["three_prime_positions"] = get_3prime_positions(
+            start, end, strand
+        )
 
         for mut, proportions in time_series.items():
             try:
