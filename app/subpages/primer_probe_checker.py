@@ -663,6 +663,9 @@ def build_summary_html(position_data, found, time_series, dominant_letters):
         name = r["Name"]
         piece_type = get_piece_type(name)
         primer_letters = r.get("PrimerLetters", {})
+        strand = r["Strand"]
+        start = r["Start"]
+        end = r["End"]
 
         primer_summary[name] = {
             "piece_type": piece_type,
@@ -671,7 +674,9 @@ def build_summary_html(position_data, found, time_series, dominant_letters):
             "worst_coverage": 0,
             "primer_match": True,
             "mismatch_positions": [],
-            "monthly_proportions": {},  # {month: proportion} for sparkline
+            "monthly_proportions": {},
+            "three_prime_positions": get_3prime_positions(start, end, strand),  # ← here
+            "three_prime_mismatch": False,
         }
 
         # check primer vs dominant circulating letter
@@ -682,12 +687,18 @@ def build_summary_html(position_data, found, time_series, dominant_letters):
                 primer_summary[name]["mismatch_positions"].append(
                     f"{pos}({primer_letter}→{dominant})"
                 )
+                # check if mismatch is at 3' end
+                if pos in primer_summary[name]["three_prime_positions"]:
+                    primer_summary[name]["three_prime_mismatch"] = True
+
 
     # update with mutation data — scan time_series for mutations in each primer region
     for r in found:
         if r["Start"] is None:
             continue
         name = r["Name"]
+        piece_type = get_piece_type(name)
+        primer_letters = r.get("PrimerLetters", {})
         strand = r["Strand"]
         start = r["Start"]
         end = r["End"]
