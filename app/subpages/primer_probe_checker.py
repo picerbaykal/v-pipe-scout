@@ -1093,21 +1093,14 @@ def app():
 
     # ── Summary table ──────────────────────────────────────────────────────────
     st.subheader("Summary")
-    threshold = st.slider(
-        "Warning threshold",
-        min_value=0.01, max_value=1.0, value=0.10, step=0.01,
-        format="%.2f",
-        key="ppc_threshold",
-        help="Proportion above which a mutation is flagged as Warning or Critical"
-    )
-    st.caption("Controls when a mutation is flagged as Warning or Critical in the table below.")
 
     first_mut = list(time_series.keys())[0] if time_series else None
 
-    summary_html = build_summary_html(
-        position_data, found, threshold, time_series, dominant_letters
-    )
-    components.html(summary_html, height=400, scrolling=True)
+    with st.expander("Summary", expanded=True):
+        summary_html = build_summary_html(
+            position_data, found, time_series, dominant_letters
+        )
+        components.html(summary_html, height=400, scrolling=True)
 
     # ── GenSpectrum links ──────────────────────────────────────────────────────
     st.subheader("GenSpectrum links")
