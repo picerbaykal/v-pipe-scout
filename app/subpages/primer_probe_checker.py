@@ -798,7 +798,7 @@ def build_summary_html(position_data, found, threshold, time_series, dominant_le
       {labels}
     </svg>
     </div>'''
-    
+
     # ── build HTML ─────────────────────────────────────────────────────────────
 
     html = """
@@ -807,7 +807,7 @@ def build_summary_html(position_data, found, threshold, time_series, dominant_le
 .sum-table th{text-align:left;padding:8px 12px 8px 0;color:#666;font-weight:400;border-bottom:1px solid #e5e5e5;white-space:nowrap;}
 .sum-table td{padding:6px 12px 6px 0;border-bottom:1px solid #f0f0f0;vertical-align:middle;}
 .spark-wrap{position:relative;display:inline-block;cursor:default;}
-.sparkpop{display:none;position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);background:#fff;border:1px solid #ddd;border-radius:8px;padding:10px 12px;z-index:100;box-shadow:0 4px 12px rgba(0,0,0,0.1);pointer-events:none;white-space:nowrap;}
+.sparkpop{display:none;position:absolute;top:calc(100% + 8px);left:50%;transform:translateX(-50%);background:#fff;border:1px solid #ddd;border-radius:8px;padding:10px 12px;z-index:100;box-shadow:0 4px 12px rgba(0,0,0,0.1);pointer-events:none;white-space:nowrap;}
 .spark-wrap:hover .sparkpop{display:block;}
 </style>
 <table class="sum-table">
