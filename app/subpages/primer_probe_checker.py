@@ -62,7 +62,14 @@ def get_3prime_positions(start, end, strand, n_bases=5):
 def extract_positions_from_header(header):
     match = re.search(r"NC_045512\.2:(\d+)-(\d+)", header.strip())
     if match:
-        return int(match.group(1)), int(match.group(2)), "+"
+        start = int(match.group(1))
+        end = int(match.group(2))
+        # detect strand from primer name
+        if "_RIGHT" in header.upper():
+            strand = "-"
+        else:
+            strand = "+"
+        return start, end, strand
     return None
 
 def search_reference(primer_seq, ref_seq):
@@ -580,6 +587,7 @@ def build_summary_table(position_data, found, threshold, dominant_letters):
             "three_prime_positions": set(),
             "three_prime_mismatch": False,
         }
+
 
         # check each position in this primer/probe against dominant circulating letter
         for pos, primer_letter in primer_letters.items():
