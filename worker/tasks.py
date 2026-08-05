@@ -274,3 +274,54 @@ def run_deconvolve_lapis(self, location: str, start_date: str, end_date: str,
             "status": f"Error: {str(e)}"
         }), ex=3600)
         raise
+
+
+@app.task(bind=True)
+def run_cooc_completeness_lapis(self, location: str, start_date: str, end_date: str,
+                                variants: list):
+    """
+    Celery task for LAPIS-sourced panel completeness (cooc).
+    Used by the Abundance & Co-occurrence tab.
+
+    Args:
+        location: Location name e.g. "Lugano (TI)"
+        start_date, end_date: ISO date strings
+        variants: List of pango lineage names in the panel
+    """
+    from datetime import datetime
+    from cooc import run_cooc_panel_completeness
+
+    task_id = self.request.id
+    progress_key = f"task_progress:{task_id}"
+
+    try:
+        redis_client.set(progress_key, json.dumps({
+            "current": 1, "total": 4,
+            "status": f"Preparing panel positions for {location}..."
+        }), ex=3600)
+
+        result = run_cooc_panel_completeness(
+            location=location,
+            start_date=datetime.fromisoformat(start_date),
+            end_date=datetime.fromisoformat(end_date),
+            variants=variants,
+            progress_callback=lambda step, msg: redis_client.set(
+                progress_key,
+                json.dumps({"current": step, "total": 4, "status": msg}),
+                ex=3600,
+            ),
+        )
+
+        redis_client.set(progress_key, json.dumps({
+            "current": 4, "total": 4,
+            "status": "Panel completeness computed."
+        }), ex=3600)
+
+        return result
+
+    except Exception as e:
+        redis_client.set(progress_key, json.dumps({
+            "current": 0, "total": 4,
+            "status": f"Error: {str(e)}"
+        }), ex=3600)
+        raise

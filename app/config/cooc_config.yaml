@@ -1,0 +1,100 @@
+# ─────────────────────────────────────────────────────────────────────────
+# Co-occurrence analysis config
+#
+# Tunable parameters for the cooc pipeline (panel completeness + scanner).
+# All values here are defaults that can be overridden by the UI or a
+# per-deployment override file.
+#
+# When adjusting a value, please leave a comment explaining WHY. This file
+# is our audit trail of empirical tuning decisions.
+# ─────────────────────────────────────────────────────────────────────────
+
+
+# ── Query construction ──────────────────────────────────────────────────
+
+query:
+  # Maximum genomic distance between positions that we group into one
+  # LAPIS /aggregated call.
+  #
+  # Rationale (empirical, 2026-08-05):
+  #   samtools showed WASAP reads are 250bp (some 219bp).
+  #   Empirical test on sample A2_15_2025_11_19:
+  #     50bp  apart → 137,209 reads have both positions called
+  #     100bp apart → 137,112 reads
+  #     200bp apart → 137,112 reads  ✅
+  #     250bp apart → 0 reads         ❌ sharp cutoff
+  #     300bp apart → 0 reads
+  #   Positions further apart than a single read length cannot co-occur.
+  #   200bp leaves safety margin below the 250bp read length.
+  #
+  # Tuning:
+  #   - Lower (e.g. 150) → more queries, safer, some real cooc missed
+  #   - Higher (e.g. 230) → fewer queries, risk of N-dominated combinations
+  max_position_distance_bp: 200
+
+  # Maximum positions per single LAPIS query.
+  #
+  # Rationale: the response size grows as 6^N (bases per position,
+  # including N and deletion). Beyond ~10 positions the response gets
+  # unwieldy AND response times climb.
+  # Empirically not yet tested — start conservative, adjust as we go.
+  max_positions_per_query: 10
+
+  # LAPIS row limit per query. Combinations with count=0 aren't returned,
+  # so this is a safety cap not an expected limit for our queries.
+  lapis_limit: 100000
+
+
+# ── Filtering ────────────────────────────────────────────────────────────
+
+filter:
+  # Skip pattern rows where ANY queried position was uncovered (N).
+  # If true, we only count reads that observed EVERY position in the batch.
+  # This matches the manual scan's semantics (only positions in a read's
+  # covered_set contribute to its pattern).
+  require_all_positions_covered: true
+
+  # Whether to include deletions ("-") as valid observed bases.
+  # If false, reads with "-" at any position are treated as uncovered.
+  # We already skip deletions in signature building (matching LolliPop's
+  # remove_deletions=True), so keeping consistent here.
+  include_deletion_states: false
+
+
+# ── Panel completeness math ─────────────────────────────────────────────
+
+panel_completeness:
+  # Minimum read count for a pattern to be counted at all.
+  # Below this, treat as noise/singleton.
+  # (The manual scan does not filter singletons; setting to 1 preserves that.)
+  min_pattern_count: 1
+
+  # Whether to conflate alleles at the same position when computing
+  # confirmed_present / confirmed_absent, matching the manual scan's
+  # `pos in mutated_set` logic (ignores which specific alt base).
+  # If false, "241T" and "241A" are treated as distinct signals.
+  conflate_alleles: true
+
+
+# ── Scanner (future) ────────────────────────────────────────────────────
+
+scanner:
+  # Placeholder for scanner-specific tunables (thresholds for "emerging
+  # variant" detection, minimum frequency to raise an alert, etc.).
+  # Fill in when scanner logic is implemented.
+  enabled: false
+
+
+# ── Data source ─────────────────────────────────────────────────────────
+
+data:
+  # Path to the BED file describing amplicon inserts.
+  # Relative to the app root (`/app/data/`).
+  amplicon_bed: SARS-CoV-2.insert.bed
+
+  # Which primer scheme this BED corresponds to.
+  # Currently a placeholder — the WASAP data submission team should
+  # confirm which scheme(s) are actually used. If mixed schemes exist
+  # in the dataset, per-sample scheme metadata from LAPIS would be needed
+  # to filter queries correctly.
+  primer_scheme: unknown_placeholder

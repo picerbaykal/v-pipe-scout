@@ -438,7 +438,142 @@ class WiseLoculusLapis(Lapis):
             f"{df['date'].nunique() if not df.empty else 0} dates"
         )
         return df
-    
+
+    # ── Co-occurrence fetching ─────────────────────────────────────────────
+
+    async def _fetch_cooccurrence_for_date(
+            self,
+            session: aiohttp.ClientSession,
+            locationName: str,
+            date_str: str,
+            positions: List[int],
+    ) -> List[dict]:
+        """
+        Fetch read-level co-occurrence at target positions for a single date.
+
+        Positions should be pre-batched to fit within read length (via
+        split_positions_by_distance) — otherwise combinations will be
+        dominated by rows with N at some position.
+
+        Args:
+            session: Shared aiohttp session for connection pooling.
+            locationName: e.g. "Lugano (TI)"
+            date_str: ISO date string, e.g. "2025-11-09"
+            positions: List of positions to query together (typically 2-10,
+                       all within max_position_distance_bp).
+
+        Returns:
+            List of dicts, one per unique base combination:
+                {"date": date_str, "[241]": "T", "[297]": "G", "count": 15000}
+        """
+        fields = [f"[{p}]" for p in positions]
+        params = {
+            "locationName": locationName,
+            "samplingDateFrom": date_str,
+            "samplingDateTo": date_str,
+            "fields": ",".join(fields),
+        }
+        try:
+            async with session.get(
+                    f"{self.server_ip}/sample/aggregated",
+                    params=params,
+                    headers={"accept": "application/json"},
+            ) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    raise APIError(
+                        f"cooccurrence failed for {date_str} @ positions={positions}: "
+                        f"status {response.status}",
+                        status_code=response.status,
+                        details=error_text,
+                        payload=params,
+                    )
+                data = await response.json()
+        except APIError:
+            raise
+        except Exception as e:
+            raise APIError(
+                f"Error fetching cooccurrence for {date_str}: {e}",
+                details=str(e),
+            )
+
+        rows = []
+        for entry in data.get("data", []):
+            row = {"date": date_str, "count": int(entry.get("count", 0))}
+            for p in positions:
+                row[f"[{p}]"] = entry.get(f"[{p}]", "N")
+            rows.append(row)
+        return rows
+
+    async def get_cooccurrence(
+            self,
+            locationName: str,
+            date_range: Tuple[datetime, datetime],
+            positions: List[int],
+            dates: Optional[List[str]] = None,
+    ) -> pd.DataFrame:
+        """
+        Fetch read-level co-occurrence at target positions across all sampling
+        dates in the given range.
+
+        Runs one LAPIS query per sampling date, concurrently. Assumes positions
+        have already been batched to fit within read length — call
+        split_positions_by_distance first, then call this once per batch.
+
+        Args:
+            locationName: Location name (e.g. "Lugano (TI)")
+            date_range: (start, end) datetime tuple.
+            positions: List of positions in this batch (2-10 recommended,
+                       all within max_position_distance_bp).
+
+        Returns:
+            DataFrame with columns: date, count, [pos1], [pos2], ...
+            One row per (date, unique base combination).
+        """
+        if dates is None:
+            dates = await self._get_sampling_dates(locationName, date_range)
+        dates = await self._get_sampling_dates(locationName, date_range)
+        if not dates:
+            logging.warning(
+                f"No sampling dates for {locationName} "
+                f"{date_range[0].date()} → {date_range[1].date()}"
+            )
+            return pd.DataFrame()
+
+        connector = aiohttp.TCPConnector(
+            limit=MAX_CONCURRENT_CONNECTIONS,
+            limit_per_host=MAX_CONNECTIONS_PER_HOST,
+        )
+        timeout = aiohttp.ClientTimeout(total=120)
+
+        async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
+            tasks = [
+                self._fetch_cooccurrence_for_date(session, locationName, d, positions)
+                for d in dates
+            ]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        all_rows: List[dict] = []
+        failed = []
+        for d, res in zip(dates, results):
+            if isinstance(res, Exception):
+                logging.error(f"cooccurrence fetch failed for {d}: {res}")
+                failed.append(d)
+                continue
+            all_rows.extend(res)
+
+        if failed:
+            logging.warning(
+                f"cooccurrence failed for {len(failed)}/{len(dates)} dates: {failed[:5]}..."
+            )
+
+        logging.info(
+            f"Fetched cooccurrence: {len(all_rows)} rows across "
+            f"{len(dates) - len(failed)}/{len(dates)} dates | "
+            f"{locationName} | positions={positions}"
+        )
+        return pd.DataFrame(all_rows)
+
 
     async def get_date_range(self) -> Tuple[Optional[datetime], Optional[datetime]]:
         """

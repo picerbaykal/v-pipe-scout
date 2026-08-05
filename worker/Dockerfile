@@ -6,7 +6,9 @@ WORKDIR /app
 COPY environment.yml .
 
 # Create the conda environment from environment.yml
-RUN conda env create -f environment.yml
+RUN conda env create -f environment.yml && \
+    conda run -n v-pipe-scout-worker python -c "import aiohttp, requests" || \
+    (echo "Sanity check failed" && exit 1)
 
 # Copy all worker files (scripts, configs, and data)
 COPY . .
