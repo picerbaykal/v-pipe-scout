@@ -66,9 +66,11 @@ def row_to_confirmed_sets(
         if not tracked_alts:
             continue
         if base in tracked_alts:
-            # Mutation observed — mark all tracked alts at this position as present
-            for alt in tracked_alts:
-                confirmed_present.add(f"{pos}{alt}")
+            # Record only the base actually observed. A read is one molecule
+            # and carries one base per position — emitting every tracked alt
+            # would describe a read that cannot exist, and such patterns match
+            # no signature and inflate the unexplained fraction.
+            confirmed_present.add(f"{pos}{base}")
         else:
             # Reference observed — mark all tracked alts as absent
             for alt in tracked_alts:
@@ -81,30 +83,34 @@ def row_to_confirmed_sets(
 
 def classify_pattern(
     confirmed_present: Set[str],
+    confirmed_absent: Set[str],
     variant_signatures: Dict[str, Set[str]],
 ) -> str:
     """
     Classify a pattern by whether SOME panel variant explains it.
 
-    A variant "explains" a pattern if its signature contains every
-    mutation in confirmed_present. Singletons (patterns with <2
-    mutations) are treated as uninformative and returned as such —
-    the caller should filter them out earlier if desired.
+    A variant explains a pattern when both hold:
+      - every observed mutation is in its signature
+      - none of its signature mutations were observed to be absent
+
+    The second condition carries most of the discriminating power: a read
+    covering a position where the variant requires a mutation, and showing
+    reference there, is positive evidence against that variant.
 
     Args:
-        confirmed_present: Set of "{pos}{alt}" strings observed on this read.
-        variant_signatures: Dict of variant_name -> set of signature mutations.
+        confirmed_present: "{pos}{alt}" strings observed on this read.
+        confirmed_absent: "{pos}{alt}" strings looked for and not found.
+        variant_signatures: variant_name -> signature mutation set.
 
     Returns:
-        One of:
-        - "uninformative": pattern has 0 or 1 mutations (skip from stats)
-        - "matched": at least one variant's signature covers all mutations
-        - "unexplained": no variant covers all mutations (panel gap signal)
+        "uninformative" (fewer than 2 observed mutations),
+        "matched" (some variant explains it), or
+        "unexplained" (no variant does — the panel-gap signal).
     """
     if len(confirmed_present) < 2:
         return "uninformative"
     for sig in variant_signatures.values():
-        if confirmed_present.issubset(sig):
+        if confirmed_present.issubset(sig) and not (sig & confirmed_absent):
             return "matched"
     return "unexplained"
 
@@ -148,7 +154,7 @@ def annotate_cooc_dataframe(
             if any(row.get(f"[{p}]", "N") in uncovered_bases for p in positions):
                 continue
         cp, ca = row_to_confirmed_sets(row, positions, amp_dict, include_dels)
-        classification = classify_pattern(cp, variant_signatures)
+        classification = classify_pattern(cp, ca, variant_signatures)
         annotated_rows.append({
             "date": row["date"],
             "count": row["count"],

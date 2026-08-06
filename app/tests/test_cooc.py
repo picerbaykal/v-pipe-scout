@@ -57,13 +57,12 @@ class TestRowToConfirmedSets:
         assert cp == {"241T"}
         assert ca == {"297G"}
 
-    def test_allele_conflation(self):
-        """Multiple tracked alts at same position → all added when any observed."""
-        row = {"[241]": "A"}  # A is one of the tracked alts
+    def test_records_only_observed_base(self):
+        """Only the base actually seen is recorded, not every tracked alt."""
+        row = {"[241]": "A"}
         amp_dict = {241: ["A", "T"]}
         cp, ca = row_to_confirmed_sets(row, [241], amp_dict)
-        # Since A is tracked, both 241A and 241T go to confirmed_present
-        assert cp == {"241A", "241T"}
+        assert cp == {"241A"}
         assert ca == set()
 
     def test_position_not_in_amp_dict(self):
@@ -80,16 +79,16 @@ class TestClassifyPattern:
 
     def test_uninformative_empty(self):
         """Empty confirmed_present → uninformative."""
-        assert classify_pattern(set(), {"V": {"241T"}}) == "uninformative"
+        assert classify_pattern(set(), set(), {"V": {"241T"}}) == "uninformative"
 
     def test_uninformative_singleton(self):
         """Single mutation → uninformative (filtered as noise)."""
-        assert classify_pattern({"241T"}, {"V": {"241T", "297G"}}) == "uninformative"
+        assert classify_pattern({"241T"}, set(), {"V": {"241T", "297G"}}) == "uninformative"
 
     def test_matched_by_one_variant(self):
         """Pattern's mutations all in one variant's signature → matched."""
         sigs = {"KP.2": {"241T", "297G", "500C"}}
-        assert classify_pattern({"241T", "297G"}, sigs) == "matched"
+        assert classify_pattern({"241T", "297G"}, set(), sigs) == "matched"
 
     def test_matched_by_multiple_variants(self):
         """Pattern explained by more than one variant → still matched."""
@@ -97,7 +96,7 @@ class TestClassifyPattern:
             "KP.2": {"241T", "297G"},
             "NB.1.8.1": {"241T", "297G", "500C"},
         }
-        assert classify_pattern({"241T", "297G"}, sigs) == "matched"
+        assert classify_pattern({"241T", "297G"}, set(), sigs) == "matched"
 
     def test_unexplained(self):
         """No variant covers all mutations → unexplained."""
@@ -105,8 +104,12 @@ class TestClassifyPattern:
             "KP.2": {"241T", "297G"},
             "NB.1.8.1": {"500C", "700A"},
         }
-        # 241T is in KP.2, 500C is in NB.1.8.1, but no single variant has both
-        assert classify_pattern({"241T", "500C"}, sigs) == "unexplained"
+        assert classify_pattern({"241T", "500C"}, set(), sigs) == "unexplained"
+
+    def test_absent_contradicts_variant(self):
+        """A variant is rejected when its signature mutation was looked for and not found."""
+        sigs = {"KP.2": {"241T", "297G", "8393C"}}
+        assert classify_pattern({"241T", "297G"}, {"8393C"}, sigs) == "unexplained"
 
 
 class TestAnnotateCoocDataframe:
