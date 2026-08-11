@@ -122,4 +122,6 @@ scope:
   # matched/unexplained decision, so they are pure cost.
   discriminating_positions_only: false
 
+  use_tracked_variants: true
+
 
