@@ -104,7 +104,7 @@ class WiseLoculusLapis(Lapis):
         pattern = r'(!\s*)?\b([A-Za-z0-9]+:)?(?:[A-Z])?(\d+)[A-Z\-\.](?!of)'
         
         def replace_match(match):
-            gene_prefix = match.group(2) or ""
+            gene_prefix = match.group(2) or "main:"
             position = match.group(3)
             return f"!{gene_prefix}{position}N"
             
