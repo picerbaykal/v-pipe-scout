@@ -37,10 +37,10 @@ class TestGroupPositionsByAmplicon:
         ]
         positions = {150, 350, 500}
         grouped = group_positions_by_amplicon(positions, amplicons)
-        # 150 → amp1 only; 350 → both (overlap); 500 → amp2 only
+        # 150 → amp1 only; 350 → amp1 only (overlap, assigned to first); 500 → amp2 only
         assert 150 in grouped["amp1"]
         assert 350 in grouped["amp1"]
-        assert 350 in grouped["amp2"]
+        assert 350 not in grouped.get("amp2", [])
         assert 500 in grouped["amp2"]
 
     def test_uncovered_positions_excluded(self):

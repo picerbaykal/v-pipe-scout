@@ -67,11 +67,13 @@ def group_positions_by_amplicon(
     """
     grouped: dict = {name: [] for name, _, _ in amplicons}
     uncovered = set(positions)
+    assigned = set()  # track positions already assigned to an amplicon
     for name, start, end in amplicons:
         for pos in positions:
-            if start <= pos <= end:
+            if start <= pos <= end and pos not in assigned:
                 grouped[name].append(pos)
                 uncovered.discard(pos)
+                assigned.add(pos)
     if uncovered:
         logger.warning(
             f"{len(uncovered)} positions not covered by any amplicon: {sorted(uncovered)[:10]}..."
