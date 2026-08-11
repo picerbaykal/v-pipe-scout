@@ -233,7 +233,16 @@ class WiseLoculusLapis(Lapis):
 
         rows = []
         for entry in data.get("data", []):
-            pos = lapis_mutation_to_pos(entry.get("mutation", ""))
+            # API returns either a 'mutation' field ("C241T") or separate fields
+            mutation_str = entry.get("mutation") or ""
+            if not mutation_str:
+                # reconstruct from separate fields
+                mfrom = entry.get("mutationFrom", "")
+                mto = entry.get("mutationTo", "")
+                position = entry.get("position")
+                if position and mto:
+                    mutation_str = f"{mfrom}{position}{mto}"
+            pos = lapis_mutation_to_pos(mutation_str)
             if not pos:
                 continue
             m = re.match(r"^(\d+)", pos)
