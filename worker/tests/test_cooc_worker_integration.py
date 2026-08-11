@@ -25,8 +25,8 @@ def test_run_cooc_panel_completeness_end_to_end():
 
     result = run_cooc_panel_completeness(
         location="Lugano (TI)",
-        start_date=datetime(2025, 11, 6),
-        end_date=datetime(2025, 11, 20),
+        start_date=datetime(2026, 3, 9),
+        end_date=datetime(2026, 4, 22),
         variants=["KP.2", "NB.1.8.1", "XFG"],
     )
 

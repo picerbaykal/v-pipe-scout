@@ -144,14 +144,16 @@ def annotate_cooc_dataframe(
     if df.empty:
         return df.copy()
 
-    require_covered = get_cooc_setting("filter.require_all_positions_covered", True)
+    require_covered = get_cooc_setting("filter.require_all_positions_covered", False)
     include_dels = get_cooc_setting("filter.include_deletion_states", False)
     uncovered_bases = {"N"} if include_dels else {"N", "-"}
 
     annotated_rows = []
+    dropped = 0
     for row in df.to_dict("records"):
         if require_covered:
             if any(row.get(f"[{p}]", "N") in uncovered_bases for p in positions):
+                dropped += 1
                 continue
         cp, ca = row_to_confirmed_sets(row, positions, amp_dict, include_dels)
         classification = classify_pattern(cp, ca, variant_signatures)
@@ -162,6 +164,12 @@ def annotate_cooc_dataframe(
             "confirmed_absent": sorted(ca),
             "classification": classification,
         })
+
+    if dropped:
+        logger.info(
+            f"coverage filter dropped {dropped}/{len(df)} rows "
+            f"({dropped / len(df):.1%}) for positions {positions}"
+        )
 
     return pd.DataFrame(annotated_rows)
 

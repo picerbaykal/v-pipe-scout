@@ -24,7 +24,7 @@ def test_get_cooccurrence_returns_data():
         client = WiseLoculusLapis(get_wiseloculus_url())
         return await client.get_cooccurrence(
             locationName="Lugano (TI)",
-            date_range=(datetime(2025, 11, 6), datetime(2025, 11, 20)),
+            date_range=(datetime(2026, 3, 9), datetime(2026, 4, 22)),
             positions=[8350, 8380],
         )
 

@@ -52,7 +52,7 @@ filter:
   # If true, we only count reads that observed EVERY position in the batch.
   # This matches the manual scan's semantics (only positions in a read's
   # covered_set contribute to its pattern).
-  require_all_positions_covered: true
+  require_all_positions_covered: false
 
   # Whether to include deletions ("-") as valid observed bases.
   # If false, reads with "-" at any position are treated as uncovered.
@@ -98,3 +98,28 @@ data:
   # in the dataset, per-sample scheme metadata from LAPIS would be needed
   # to filter queries correctly.
   primer_scheme: unknown_placeholder
+
+# ── Scope (temporary, while positional queries are slow) ────────────────
+#
+# Positional aggregation currently costs ~25s fixed + ~5s per position,
+# independent of how narrowly the query is filtered (measured 2026-08-05:
+# 3 positions over 800k reads and over 800M reads both took ~14.7s).
+# A full six-month, per-date, all-positions run is ~90 min per location,
+# so the UI runs a reduced scope until that improves upstream
+# (GenSpectrum/LAPIS#1765 is still open).
+#
+scope:
+  # How many weeks back from the end of the selected range to compute.
+  # null = the whole selected range.
+  weeks: 8
+
+  # Aggregate reads per ISO week rather than per sampling date.
+  # Roughly halves the query count and smooths sparse dates.
+  weekly_buckets: true
+
+  # Query only positions where the panel variants disagree. Positions where
+  # every panel variant carries the same mutation cannot change the
+  # matched/unexplained decision, so they are pure cost.
+  discriminating_positions_only: true
+
+
