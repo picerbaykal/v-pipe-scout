@@ -165,8 +165,9 @@ def run_cooc_panel_completeness(
 
     _progress(2, "Grouping positions by amplicon + read-length distance")
     amplicons = load_amplicons(Path(bed_path))
+    # new — one batch per amplicon, all positions together
     amp_groups = group_positions_by_amplicon(positions, amplicons)
-    batches = split_positions_by_distance(amp_groups)
+    batches = list(amp_groups.items())  # (amplicon_name, positions) directly
     logger.info(
         f"[cooc][{location}] {len(batches)} query batches "
         f"(from {len(amp_groups)} amplicons)"

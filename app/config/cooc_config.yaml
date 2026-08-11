@@ -120,6 +120,6 @@ scope:
   # Query only positions where the panel variants disagree. Positions where
   # every panel variant carries the same mutation cannot change the
   # matched/unexplained decision, so they are pure cost.
-  discriminating_positions_only: true
+  discriminating_positions_only: false
 
 
