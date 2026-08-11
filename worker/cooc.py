@@ -15,13 +15,13 @@ Returns a dict shaped for JSON serialization back through Celery.
 import asyncio
 import logging
 import re
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 import pandas as pd
 
-import sys
 sys.path.insert(0, "/app_shared")
 
 from api.pango_loader import PangoLoader, get_pango_summary_path
@@ -107,6 +107,19 @@ def run_cooc_panel_completeness(
     if bed_path is None:
         bed_path = "/app_shared/data/SARS-CoV-2.insert.bed"
 
+    from utils.config import get_cooc_setting
+
+    scope_weeks = get_cooc_setting("scope.weeks", default=None)
+    if scope_weeks:
+        from datetime import timedelta
+        clamped = end_date - timedelta(weeks=int(scope_weeks))
+        if clamped > start_date:
+            logger.info(
+                f"[cooc][{location}] scope.weeks={scope_weeks} — "
+                f"clamping start {start_date.date()} → {clamped.date()}"
+            )
+            start_date = clamped
+
     def _progress(step: int, msg: str):
         if progress_callback:
             progress_callback(step, msg)
@@ -115,10 +128,35 @@ def run_cooc_panel_completeness(
     _progress(1, f"Building amp_dict + signatures for {len(variants)} variants")
     pango_loader = PangoLoader(get_pango_summary_path())
     cowwid_variants = _COWWID_VARIANTS
-    amp_dict = build_amp_dict_from_variants(variants, pango_loader, cowwid_variants)
+    reference_variants = get_cooc_setting("scope.reference_variants", default=None)
+    if reference_variants is None and get_cooc_setting("scope.use_tracked_variants", default=False):
+        reference_variants = sorted(cowwid_variants.keys())
+    amp_dict = build_amp_dict_from_variants(
+        reference_variants or variants, pango_loader, cowwid_variants
+    )
     variant_signatures = _build_variant_signatures(
         variants, pango_loader, cowwid_variants
     )
+    logger.info(
+        f"[cooc][{location}] amp_dict from "
+        f"{'reference list' if reference_variants else 'panel'}: "
+        f"{len(amp_dict)} positions"
+    )
+
+    if get_cooc_setting("scope.discriminating_positions_only", default=False):
+        sig_list = [s for s in variant_signatures.values() if s]
+        if len(sig_list) >= 2:
+            shared = set.intersection(*sig_list)
+            before = len(amp_dict)
+            amp_dict = {
+                pos: alts for pos, alts in amp_dict.items()
+                if not all(f"{pos}{a}" in shared for a in alts)
+            }
+            logger.info(
+                f"[cooc][{location}] discriminating filter: "
+                f"{before} → {len(amp_dict)} positions"
+            )
+
     positions = set(amp_dict.keys())
     logger.info(
         f"[cooc][{location}] Panel: {len(positions)} positions across "
@@ -143,7 +181,7 @@ def run_cooc_panel_completeness(
         if not dates:
             return []
 
-        sem = asyncio.Semaphore(8)  # cap concurrent batches
+        sem = asyncio.Semaphore(2)  # cap concurrent batches
 
         async def _one_batch(i, amp_name, batch_positions):
             async with sem:
@@ -159,6 +197,14 @@ def run_cooc_panel_completeness(
             annotated = annotate_cooc_dataframe(
                 df, batch_positions, amp_dict, variant_signatures
             )
+            if "classification" in annotated.columns:
+                logger.info(
+                    f"[cooc][{location}] batch {i} rows={annotated['classification'].value_counts().to_dict()} "
+                    f"reads={annotated.groupby('classification')['count'].sum().to_dict()}"
+                )
+            else:
+                logger.info(f"[cooc][{location}] batch {i} not annotated (early exit)")
+
             per_date = panel_completeness_by_date(annotated)
             return per_date if not per_date.empty else None
 

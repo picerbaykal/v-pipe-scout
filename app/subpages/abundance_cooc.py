@@ -62,10 +62,49 @@ def cached_get_variant_names() -> list:
     from api.signatures import get_variant_names
     return get_variant_names()
 
+def _render_completeness(result: dict) -> None:
+    """Plot per-date panel completeness with an informative-read count below."""
+    import pandas as pd
+    import plotly.graph_objects as go
+
+    if not result.get("dates"):
+        st.warning("No co-occurrence data for this location and range.")
+        return
+
+    df = pd.DataFrame({
+        "date": pd.to_datetime(result["dates"]),
+        "matched": result["matched_counts"],
+        "unexplained": result["unexplained_counts"],
+        "completeness": result["completeness"],
+    })
+    df["informative"] = df["matched"] + df["unexplained"]
+
+    fig = go.Figure(go.Scatter(
+        x=df["date"], y=df["completeness"],
+        mode="lines+markers",
+        marker=dict(size=[6 + min(8, n / 5000) for n in df["informative"]]),
+        line=dict(width=1.5),
+        customdata=df[["informative"]],
+        hovertemplate="%{x|%Y-%m-%d}<br>completeness %{y:.1%}"
+                      "<br>%{customdata[0]:,} informative reads<extra></extra>",
+    ))
+    fig.update_yaxes(range=[-0.05, 1.05], tickformat=".0%", title="completeness")
+    fig.update_layout(height=200, margin=dict(t=10, b=30, l=50, r=20),
+                      template="plotly_white")
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption(
+        f"Marker size scales with informative reads "
+        f"({df['informative'].min():,}–{df['informative'].max():,} across dates). "
+        "Sparse dates give unstable values."
+    )
+
+
 
 def app():
     st.session_state.setdefault("location_results", {})
     st.session_state.setdefault("acooc_location_tasks", {})
+    st.session_state.setdefault("acooc_cooc_tasks", {})  # add
+    st.session_state.setdefault("acooc_cooc_results", {})  # add
 
     # ── Header ───────────────────────────────────────────────────────────────
     st.title("Abundance & Co-occurrence")
@@ -247,6 +286,7 @@ def app():
             st.session_state["acooc_trigger_run"] = False
 
             location_tasks = {}
+            cooc_tasks = {}
             for loc in selected_locations:
                 task = celery_app.send_task(
                     "tasks.run_deconvolve_lapis",
@@ -260,10 +300,24 @@ def app():
                     }
                 )
                 location_tasks[loc] = task.id
+
+                cooc_task = celery_app.send_task(
+                    "tasks.run_cooc_completeness_lapis",
+                    kwargs={
+                        "location": loc,
+                        "start_date": start_date.isoformat(),
+                        "end_date": end_date.isoformat(),
+                        "variants": all_selected_variants,
+                    }
+                )
+
+                cooc_tasks[loc] = cooc_task.id
                 logger.info(f"Submitted task {task.id} for {loc}")
 
             st.session_state["acooc_location_tasks"] = location_tasks
             st.session_state["location_results"] = {}
+            st.session_state["acooc_cooc_tasks"] = cooc_tasks
+            st.session_state["acooc_cooc_results"] = {}
             st.rerun()
 
         # ── Results ───────────────────────────────────────────────────────────
@@ -281,9 +335,12 @@ def app():
             location_tasks = st.session_state.get("acooc_location_tasks", {})
 
             # Check task states
+            cooc_task_ids = list(st.session_state.get("acooc_cooc_tasks", {}).values())
+            all_task_ids = list(location_tasks.values()) + cooc_task_ids
+
             states = {
                 task_id: celery_app.AsyncResult(task_id).state
-                for task_id in location_tasks.values()
+                for task_id in all_task_ids
             }
 
             any_running = any(
@@ -291,10 +348,14 @@ def app():
                 for s in states.values()
             )
 
-            any_just_completed = any(
-                s == "SUCCESS"
-                for s in states.values()
-            ) and len(st.session_state.location_results) < len(location_tasks)
+            n_results = (
+                    len(st.session_state.location_results)
+                    + len(st.session_state.get("acooc_cooc_results", {}))
+            )
+            any_just_completed = (
+                    any(s == "SUCCESS" for s in states.values())
+                    and n_results < len(all_task_ids)
+            )
 
             if any_running or any_just_completed:
                 from streamlit_autorefresh import st_autorefresh
@@ -308,13 +369,25 @@ def app():
                 with tab:
                     task_id = location_tasks[location]
 
-                    # 1. Cooc panel completeness (placeholder)
+                    # 1. Cooc panel completeness
                     st.markdown("#### Panel completeness (co-occurrence)")
-                    st.info(
-                        "Awaiting enhanced `/aggregated` endpoint on WASAP LAPIS. "
-                        "Once deployed, this section will show read-level co-occurrence "
-                        "and highlight positions where the current panel misses circulating signal."
-                    )
+                    cooc_tasks = st.session_state.get("acooc_cooc_tasks", {})
+                    cooc_results = st.session_state.get("acooc_cooc_results", {})
+
+                    if location in cooc_results:
+                        _render_completeness(cooc_results[location])
+                    elif location in cooc_tasks:
+                        cooc_task = celery_app.AsyncResult(cooc_tasks[location])
+                        if cooc_task.ready():
+                            try:
+                                cooc_results[location] = cooc_task.get()
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Co-occurrence failed: {e}")
+                        else:
+                            st.info("Computing panel completeness…")
+                    else:
+                        st.caption("Run to compute panel completeness.")
 
                     # 2. Deconvolution (real result)
                     st.markdown("#### Variant deconvolution")
