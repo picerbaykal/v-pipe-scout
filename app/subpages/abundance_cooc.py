@@ -26,6 +26,8 @@ from utils.config import get_wiseloculus_url
 from components.abundance_cooc_tree import render_panel_tree
 from components.jaccard_heatmap import render_jaccard_heatmap
 
+from components.scanner_results import render_scanner_results
+
 # Initialize Celery
 celery_app = Celery(
     'tasks',
@@ -103,8 +105,10 @@ def _render_completeness(result: dict) -> None:
 def app():
     st.session_state.setdefault("location_results", {})
     st.session_state.setdefault("acooc_location_tasks", {})
-    st.session_state.setdefault("acooc_cooc_tasks", {})  # add
-    st.session_state.setdefault("acooc_cooc_results", {})  # add
+    st.session_state.setdefault("acooc_cooc_tasks", {})
+    st.session_state.setdefault("acooc_cooc_results", {})
+    st.session_state.setdefault("acooc_scanner_tasks", {})
+    st.session_state.setdefault("acooc_scanner_results", {})
 
     # ── Header ───────────────────────────────────────────────────────────────
     st.title("Abundance & Co-occurrence")
@@ -336,7 +340,8 @@ def app():
 
             # Check task states
             cooc_task_ids = list(st.session_state.get("acooc_cooc_tasks", {}).values())
-            all_task_ids = list(location_tasks.values()) + cooc_task_ids
+            scanner_task_ids = list(st.session_state.get("acooc_scanner_tasks", {}).values())
+            all_task_ids = list(location_tasks.values()) + cooc_task_ids + scanner_task_ids
 
             states = {
                 task_id: celery_app.AsyncResult(task_id).state
@@ -400,24 +405,66 @@ def app():
                             location, task_id, celery_app, redis_client
                         )
 
-                    # 3. Scanner (placeholder button)
+                    # 3. Scanner
                     st.markdown("#### Scanner")
-                    scan_col1, scan_col2 = st.columns([1, 5])
-                    with scan_col1:
-                        scan_clicked = st.button(
-                            "▶ Run scanner",
-                            key=f"acooc_scan_{location}",
-                        )
-                    with scan_col2:
-                        if scan_clicked:
-                            st.warning(
-                                "Scanner requires the enhanced `/aggregated` endpoint, "
-                                "not yet deployed on WASAP LAPIS."
+                    cooc_result = st.session_state.get("acooc_cooc_results", {}).get(location, {})
+                    scanner_results = st.session_state.get("acooc_scanner_results", {})
+                    scanner_tasks = st.session_state.get("acooc_scanner_tasks", {})
+
+                    if cooc_result and cooc_result.get("unexplained_patterns"):
+                        scan_col1, scan_col2 = st.columns([1, 5])
+                        with scan_col1:
+                            scan_clicked = st.button(
+                                "▶ Run scanner",
+                                key=f"acooc_scan_{location}",
                             )
-                        else:
+                        with scan_col2:
                             st.caption(
-                                "Detects mutation combinations not explained by the selected panel."
+                                f"{len(cooc_result['unexplained_patterns'])} unexplained patterns "
+                                f"ready to classify."
                             )
+                        if scan_clicked:
+                            task = celery_app.send_task(
+                                "tasks.run_cooc_scanner_lapis",
+                                kwargs={
+                                    "location": location,
+                                    "start_date": start_date.isoformat(),
+                                    "end_date": end_date.isoformat(),
+                                    "variants": all_selected_variants,
+                                    "unexplained_patterns": cooc_result["unexplained_patterns"],
+                                }
+                            )
+                            scanner_tasks[location] = task.id
+                            st.session_state["acooc_scanner_tasks"] = scanner_tasks
+                            st.rerun()
+
+                        # check if scanner task completed
+                        if location in scanner_tasks and location not in scanner_results:
+                            scanner_task = celery_app.AsyncResult(scanner_tasks[location])
+                            if scanner_task.ready():
+                                try:
+                                    scanner_results[location] = scanner_task.get()
+                                    st.session_state["acooc_scanner_results"] = scanner_results
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"Scanner failed: {e}")
+                            else:
+                                st.info("Scanner running…")
+
+                        if location in scanner_results:
+                            def _add_variant(v):
+                                current = st.session_state.get("acooc_variant_multiselect", [])
+                                if v not in current:
+                                    st.session_state["acooc_variant_multiselect"] = current + [v]
+                                st.rerun()
+
+                            render_scanner_results(
+                                scanner_results[location],
+                                selected_variants=all_selected_variants,
+                                on_add_variant=_add_variant,
+                            )
+                    else:
+                        st.caption("Run panel completeness first to enable the scanner.")
 
         # ── Signature similarity ──────────────────────────────────────────────
         if len(all_selected_variants) >= 2:

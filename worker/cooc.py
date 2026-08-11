@@ -59,7 +59,58 @@ def _load_cowwid_variants() -> dict:
         return {}
 
 
+# existing
 _COWWID_VARIANTS = _load_cowwid_variants()
+
+# add these two after
+def _load_all_lineage_signatures() -> dict:
+    """Load all pango lineage signatures at startup. Cached for scanner use."""
+    import re
+    try:
+        pl = PangoLoader(get_pango_summary_path())
+        raw = pl.get_raw_data()
+        result = {}
+        for lineage in raw:
+            try:
+                sig = {m for m in pl.get_signature(lineage)
+                       if re.match(r'^\d+[ACGT]$', m)}
+                if len(sig) >= 2:
+                    result[lineage] = sig
+            except Exception:
+                continue
+        logger.info(f"Loaded signatures for {len(result)} pango lineages")
+        return result
+    except Exception as e:
+        logger.warning(f"Could not load pango signatures: {e}")
+        return {}
+
+
+def _load_panel_parent_map() -> dict:
+    """Load pango parent map at startup. Cached for scanner use."""
+    try:
+        pl = PangoLoader(get_pango_summary_path())
+        return {lin: d.get("parent", "") for lin, d in pl.get_raw_data().items()}
+    except Exception as e:
+        logger.warning(f"Could not load parent map: {e}")
+        return {}
+
+
+_ALL_LINEAGE_SIGNATURES = None
+_PANEL_PARENT_MAP = None
+
+
+def get_all_lineage_signatures() -> dict:
+    global _ALL_LINEAGE_SIGNATURES
+    if _ALL_LINEAGE_SIGNATURES is None:
+        _ALL_LINEAGE_SIGNATURES = _load_all_lineage_signatures()
+    return _ALL_LINEAGE_SIGNATURES
+
+
+def get_panel_parent_map() -> dict:
+    global _PANEL_PARENT_MAP
+    if _PANEL_PARENT_MAP is None:
+        _PANEL_PARENT_MAP = _load_panel_parent_map()
+    return _PANEL_PARENT_MAP
 
 def _build_variant_signatures(
     variants: List[str],
@@ -207,7 +258,12 @@ def run_cooc_panel_completeness(
                 logger.info(f"[cooc][{location}] batch {i} not annotated (early exit)")
 
             per_date = panel_completeness_by_date(annotated)
-            return per_date if not per_date.empty else None
+            unexplained = annotated[annotated["classification"] == "unexplained"][
+                ["date", "count", "confirmed_present"]
+            ].copy() if "classification" in annotated.columns else pd.DataFrame()
+            if per_date.empty:
+                return None
+            return per_date, unexplained
 
         tasks = [
             _one_batch(i, amp, pos)
@@ -215,16 +271,20 @@ def run_cooc_panel_completeness(
         ]
         done = await asyncio.gather(*tasks, return_exceptions=True)
 
-        results = []
+        completeness_results = []
+        pattern_results = []
         for r in done:
             if isinstance(r, Exception):
                 logger.error(f"[cooc][{location}] batch failed: {r}")
                 continue
             if r is not None:
-                results.append(r)
-        return results
+                per_date, unexplained = r
+                completeness_results.append(per_date)
+                if not unexplained.empty:
+                    pattern_results.append(unexplained)
+        return completeness_results, pattern_results
 
-    per_batch_results = asyncio.run(_query_all_batches())
+    per_batch_results, pattern_results = asyncio.run(_query_all_batches())
 
     _progress(4, "Aggregating across batches")
     if not per_batch_results:
@@ -235,9 +295,23 @@ def run_cooc_panel_completeness(
             "matched_counts": [],
             "unexplained_counts": [],
             "completeness": [],
+            "unexplained_patterns": [],
         }
 
     combined = pd.concat(per_batch_results, ignore_index=True)
+
+    if pattern_results:
+        all_patterns = pd.concat(pattern_results, ignore_index=True)
+        all_patterns["pattern_key"] = all_patterns["confirmed_present"].apply(tuple)
+        unexplained_agg = (
+            all_patterns.groupby(["date", "pattern_key"])["count"]
+            .sum().reset_index()
+            .rename(columns={"pattern_key": "confirmed_present"})
+        )
+        unexplained_agg["confirmed_present"] = unexplained_agg["confirmed_present"].apply(list)
+    else:
+        unexplained_agg = pd.DataFrame(columns=["date", "count", "confirmed_present"])
+
     per_date = combined.groupby("date", as_index=False)[
         ["matched_count", "unexplained_count"]
     ].sum()
@@ -252,4 +326,5 @@ def run_cooc_panel_completeness(
         "matched_counts": per_date["matched_count"].astype(int).tolist(),
         "unexplained_counts": per_date["unexplained_count"].astype(int).tolist(),
         "completeness": per_date["completeness"].astype(float).tolist(),
+        "unexplained_patterns": unexplained_agg.to_dict("records"),
     }
