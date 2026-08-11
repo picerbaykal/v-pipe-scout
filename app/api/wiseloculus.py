@@ -532,7 +532,6 @@ class WiseLoculusLapis(Lapis):
         """
         if dates is None:
             dates = await self._get_sampling_dates(locationName, date_range)
-        dates = await self._get_sampling_dates(locationName, date_range)
         if not dates:
             logging.warning(
                 f"No sampling dates for {locationName} "
