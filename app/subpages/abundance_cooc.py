@@ -103,6 +103,13 @@ def _render_completeness(result: dict) -> None:
 
 
 def app():
+    # Apply any pending variant additions from the scanner BEFORE widgets render
+    _pending = st.session_state.pop("acooc_add_variant_pending", None)
+    if _pending:
+        current = st.session_state.get("acooc_variant_multiselect", [])
+        if _pending not in current:
+            st.session_state["acooc_variant_multiselect"] = current + [_pending]
+
     st.session_state.setdefault("location_results", {})
     st.session_state.setdefault("acooc_location_tasks", {})
     st.session_state.setdefault("acooc_cooc_tasks", {})
@@ -452,10 +459,9 @@ def app():
                                 st.info("Scanner running…")
 
                         if location in scanner_results:
+
                             def _add_variant(v):
-                                current = st.session_state.get("acooc_variant_multiselect", [])
-                                if v not in current:
-                                    st.session_state["acooc_variant_multiselect"] = current + [v]
+                                st.session_state["acooc_add_variant_pending"] = v
                                 st.rerun()
 
                             render_scanner_results(
@@ -463,8 +469,8 @@ def app():
                                 selected_variants=all_selected_variants,
                                 on_add_variant=_add_variant,
                             )
-                    else:
-                        st.caption("Run panel completeness first to enable the scanner.")
+                        else:
+                            st.caption("Run panel completeness first to enable the scanner.")
 
         # ── Signature similarity ──────────────────────────────────────────────
         if len(all_selected_variants) >= 2:
