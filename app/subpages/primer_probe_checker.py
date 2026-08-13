@@ -530,7 +530,7 @@ def build_html_heatmap(heatmap_data):
 .pp-table td{padding:3px 5px;border-bottom:1px solid #f0f0f0;}
 .pp-table td.name-col{padding:4px 16px 4px 0;white-space:nowrap;}
 .pp-cell{border-radius:4px;height:40px;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:500;min-width:80px;cursor:default;position:relative;}
-.pp-cell .tooltip{display:none;position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);background:#fff;border:1px solid #ddd;border-radius:6px;padding:10px 14px;min-width:180px;z-index:100;box-shadow:0 4px 12px rgba(0,0,0,0.1);text-align:left;pointer-events:none;}
+.pp-cell .tooltip{display:none;position:absolute;top:calc(100% + 8px);left:50%;transform:translateX(-50%);background:#fff;border:1px solid #ddd;border-radius:6px;padding:10px 14px;min-width:180px;z-index:100;box-shadow:0 4px 12px rgba(0,0,0,0.1);text-align:left;pointer-events:none;}
 .pp-cell:hover .tooltip{display:block;}
 .pp-cell .tt-title{font-size:12px;font-weight:500;color:#333;margin-bottom:4px;}
 .pp-cell .tt-row{font-size:12px;color:#555;margin-bottom:2px;}
@@ -554,6 +554,14 @@ def build_html_heatmap(heatmap_data):
         html += f"<th>{m}</th>"
     html += "</tr></thead><tbody>"
 
+    # count visible rows to decide tooltip direction
+    visible_names = [
+        nm for nm, inf in heatmap_data.items()
+        if not all(c["status"] == "clean" for c in inf["months"].values())
+    ]
+    total_visible = len(visible_names)
+
+    row_idx = -1
     for name, info in heatmap_data.items():
         piece_type = info["piece_type"]
         months = info["months"]
@@ -561,6 +569,11 @@ def build_html_heatmap(heatmap_data):
         # skip rows where all cells are clean
         if all(cell["status"] == "clean" for cell in months.values()):
             continue
+
+        row_idx += 1
+        # bottom half rows: tooltip appears ABOVE to stay in view
+        flip_up = row_idx >= total_visible / 2
+        tip_class = "tooltip tip-up" if flip_up else "tooltip tip-down"
 
         html += f'<tr><td class="name-col">{piece_badge(piece_type)} <span style="color:#333;margin-left:6px;">{name}</span></td>'
 
@@ -596,6 +609,7 @@ def build_html_heatmap(heatmap_data):
 </div>
 </div>"""
 
+    html += '<div style="height:140px;"></div>'
     return html
 
 def build_summary_html(position_data, found, time_series, dominant_letters):
@@ -1126,7 +1140,12 @@ def app():
     st.subheader("Mutation prevalence over time")
     st.caption(f"Site: {selected_location} | {date_from_str} to {date_to_str}")
     html = build_html_heatmap(heatmap_data)
-    st.html(html)
+    n_heatmap_rows = sum(
+        1 for info in heatmap_data.values()
+        if not all(cell["status"] == "clean" for cell in info["months"].values())
+    )
+    heatmap_height = 200 + n_heatmap_rows * 44 + 120
+    components.html(html, height=heatmap_height, scrolling=True)
 
     # ── Summary table ──────────────────────────────────────────────────────────
     st.subheader("Summary")
