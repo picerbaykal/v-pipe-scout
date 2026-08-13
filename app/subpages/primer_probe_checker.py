@@ -516,12 +516,12 @@ def build_html_heatmap(heatmap_data):
 
     html = """
 <style>
-.pp-table{border-collapse:collapse;font-size:13px;font-family:sans-serif;width:100%;}
-.pp-table th{text-align:center;padding:8px 8px;color:#666;font-weight:400;border-bottom:1px solid #e5e5e5;white-space:nowrap;}
+.pp-table{border-collapse:collapse;font-size:15px;font-family:sans-serif;width:100%;}
+.pp-table th{text-align:center;padding:10px 14px;color:#666;font-weight:400;border-bottom:1px solid #e5e5e5;white-space:nowrap;font-size:14px;}
 .pp-table th.name-col{text-align:left;width:auto;}
 .pp-table td{padding:3px 5px;border-bottom:1px solid #f0f0f0;}
 .pp-table td.name-col{padding:4px 16px 4px 0;white-space:nowrap;}
-.pp-cell{border-radius:4px;height:32px;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:500;min-width:52px;cursor:default;position:relative;}
+.pp-cell{border-radius:4px;height:40px;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:500;min-width:80px;cursor:default;position:relative;}
 .pp-cell .tooltip{display:none;position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);background:#fff;border:1px solid #ddd;border-radius:6px;padding:10px 14px;min-width:180px;z-index:100;box-shadow:0 4px 12px rgba(0,0,0,0.1);text-align:left;pointer-events:none;}
 .pp-cell:hover .tooltip{display:block;}
 .pp-cell .tt-title{font-size:12px;font-weight:500;color:#333;margin-bottom:4px;}
@@ -795,22 +795,26 @@ def build_summary_html(position_data, found, time_series, dominant_letters):
             tooltip_text = "No mutations detected"
             tooltip_detail = ""
         else:
-            dot_color = "#a32d2d"
             dot_left = int((index / length) * 100)
-            zone_html = (
-                '<div style="position:absolute;right:0;top:0;width:'
-                + str(three_prime_end_pct)
-                + '%;height:100%;background:#f7c1c1;border-radius:0 5px 5px 0;"></div>'
-            )
+            pct = index / length
+            if pct > 0.75:
+                dot_color = "#a32d2d"
+                pos_desc = "near 3\u2032 end \u2014 severe impact \u26a0\ufe0f"
+                zone_html = (
+                        '<div style="position:absolute;right:0;top:0;width:'
+                        + str(three_prime_end_pct)
+                        + '%;height:100%;background:#f7c1c1;border-radius:0 5px 5px 0;"></div>'
+                )
+            elif pct < 0.25:
+                dot_color = "#ba7517"
+                pos_desc = "near 5\u2032 end \u2014 minor impact"
+                zone_html = ""
+            else:
+                dot_color = "#d85a30"
+                pos_desc = "middle of primer \u2014 moderate impact"
+                zone_html = ""
             label = str(index) + "/" + str(length)
             label_color = "#555"
-            pct = index / length
-            if pct < 0.25:
-                pos_desc = "near 5\u2032 end \u2014 minor impact"
-            elif pct > 0.75:
-                pos_desc = "near 3\u2032 end \u2014 severe impact \u26a0\ufe0f"
-            else:
-                pos_desc = "middle of primer \u2014 moderate impact"
             tooltip_text = ", ".join(mismatch_positions)
             tooltip_detail = "Position " + str(index) + "/" + str(length) + " \u2014 " + pos_desc
 
@@ -849,9 +853,9 @@ def build_summary_html(position_data, found, time_series, dominant_letters):
 
     html = """
 <style>
-.sum-table{border-collapse:collapse;font-size:13px;font-family:sans-serif;width:100%;}
-.sum-table th{text-align:left;padding:8px 12px 8px 0;color:#666;font-weight:400;border-bottom:1px solid #e5e5e5;white-space:nowrap;}
-.sum-table td{padding:6px 12px 6px 0;border-bottom:1px solid #f0f0f0;vertical-align:middle;}
+.sum-table{border-collapse:collapse;font-size:15px;font-family:sans-serif;width:100%;}
+.sum-table th{text-align:left;padding:12px 20px 12px 0;color:#666;font-weight:400;border-bottom:1px solid #e5e5e5;white-space:nowrap;font-size:14px;}
+.sum-table td{padding:12px 20px 12px 0;border-bottom:1px solid #f0f0f0;vertical-align:middle;}
 .spark-wrap{position:relative;display:inline-block;cursor:default;}
 .sparkpop{display:none;position:absolute;top:calc(100% + 8px);left:50%;transform:translateX(-50%);background:#fff;border:1px solid #ddd;border-radius:8px;padding:10px 12px;z-index:100;box-shadow:0 4px 12px rgba(0,0,0,0.1);pointer-events:none;white-space:nowrap;}
 .spark-wrap:hover .sparkpop{display:block;}
@@ -1110,7 +1114,7 @@ def app():
         # height scales with row count; extra padding so hover popovers
         # on the last rows aren't clipped by the iframe boundary
         n_rows = len([r for r in found if r["Start"] is not None])
-        table_height = 120 + n_rows * 42 + 160
+        table_height = 120 + n_rows * 56 + 160
         components.html(summary_html, height=table_height, scrolling=True)
 
     # ── GenSpectrum links ──────────────────────────────────────────────────────
