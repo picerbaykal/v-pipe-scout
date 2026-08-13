@@ -1000,16 +1000,17 @@ def build_summary_html(position_data, found, time_series, dominant_letters):
 
     proportion_display = "—" if worst_proportion == 0 else f"{worst_proportion:.1%}"
     
-    html += f"""<tr>
-      <td>{piece_badge(summary["piece_type"])} <span style="margin-left:6px;color:#333;">{name}</span></td>
-      <td style="color:#666;">{summary["piece_type"]}</td>
-      <td style="color:#333;">{worst_mutation or "none"}</td>
-      <td style="color:#333;">{proportion_display}</td>
-      <td style="color:#333;">{cov_display}</td>
-      <td>{build_position_bar(summary, name)}</td>
-      <td>{trend_cell}</td>
-    </tr>
-    """
+    html += (
+            "<tr>"
+            f"<td>{piece_badge(summary['piece_type'])} <span style='margin-left:6px;color:#333;'>{name}</span></td>"
+            f"<td style='color:#666;'>{summary['piece_type']}</td>"
+            f"<td style='color:#333;'>{worst_mutation or 'none'}</td>"
+            f"<td style='color:#333;'>{proportion_display}</td>"
+            f"<td style='color:#333;'>{cov_display}</td>"
+            f"<td>{build_position_bar(summary, name)}</td>"
+            f"<td>{trend_cell}</td>"
+            "</tr>"
+        )
 
     html += "</tbody></table>"
     return html
