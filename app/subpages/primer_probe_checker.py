@@ -59,6 +59,20 @@ def get_3prime_positions(start, end, strand, n_bases=5):
     else:
         return set(range(start, start + n_bases))
 
+def get_mismatch_position_index(genome_pos, start, end, strand):
+    """
+    Calculate 1-based position index of a mismatch within the primer sequence.
+    For forward primers: index from 5' end (left to right)
+    For reverse primers: index from 5' end (right to left on genome)
+    Returns (index, length) e.g. (11, 20)
+    """
+    length = end - start + 1
+    if strand == "+":
+        index = genome_pos - start + 1
+    else:
+        index = end - genome_pos + 1
+    return index, length
+
 def extract_positions_from_header(header):
     match = re.search(r"NC_045512\.2:(\d+)-(\d+)", header.strip())
     if match:
@@ -693,6 +707,8 @@ def build_summary_html(position_data, found, time_series, dominant_letters):
             "worst_coverage": 0,
             "primer_match": True,
             "mismatch_positions": [],
+            "mismatch_index": None,
+            "primer_length": end - start + 1,
             "monthly_proportions": {},
             "three_prime_positions": get_3prime_positions(start, end, strand),  # ← here
             "three_prime_mismatch": False,
@@ -706,7 +722,9 @@ def build_summary_html(position_data, found, time_series, dominant_letters):
                 primer_summary[name]["mismatch_positions"].append(
                     f"{pos}({primer_letter}→{dominant})"
                 )
-                # check if mismatch is at 3' end
+                if primer_summary[name]["mismatch_index"] is None:
+                    idx, length = get_mismatch_position_index(pos, start, end, strand)
+                    primer_summary[name]["mismatch_index"] = idx
                 if pos in primer_summary[name]["three_prime_positions"]:
                     primer_summary[name]["three_prime_mismatch"] = True
 
@@ -850,6 +868,72 @@ def build_summary_html(position_data, found, time_series, dominant_letters):
     </svg>
     </div>'''
 
+
+    def build_position_bar(summary, name):
+        """Build mini position bar showing mismatch location within primer."""
+        length = summary.get("primer_length", 20)
+        index = summary.get("mismatch_index")
+        primer_match = summary.get("primer_match", True)
+        mismatch_positions = summary.get("mismatch_positions", [])
+        three_prime_end_pct = 25  # last 25% = 3' end zone
+
+        if index is None:
+            # clean primer — green dot in middle
+            dot_color = "#639922"
+            dot_left = 50
+            zone_html = ""
+            label = "✓"
+            label_color = "#3b6d11"
+            tooltip_text = "No mutations detected at this position"
+            tooltip_detail = ""
+        else:
+            # mismatch — red dot at calculated position
+            dot_color = "#a32d2d"
+            dot_left = int((index / length) * 100)
+            zone_html = f'<div style="position:absolute;right:0;top:0;width:{three_prime_end_pct}%;height:100%;background:#f7c1c1;border-radius:0 4px 4px 0;"></div>'
+            label = f"{index}/{length}"
+            label_color = "var(--text-secondary)"
+
+            # position description
+            pct = index / length
+            if pct < 0.25:
+                pos_desc = "near 5′ end — minor impact"
+            elif pct > 0.75:
+                pos_desc = "near 3′ end — severe impact ⚠️"
+            else:
+                pos_desc = "middle of primer — moderate impact"
+
+            mut_str = ", ".join(mismatch_positions)
+            tooltip_text = f"{mut_str}"
+            tooltip_detail = f"Position {index}/{length} — {pos_desc}"
+
+        # unique id for tooltip
+        import random
+        uid = f"pb_{abs(hash(summary.get('piece_type', '') + str(index)))}"
+
+        bar_html = f'''
+    <div style="position:relative;display:inline-block;" 
+         onmouseenter="document.getElementById('{uid}').style.display='block'" 
+         onmouseleave="document.getElementById('{uid}').style.display='none'">
+      <div style="display:flex;align-items:center;gap:6px;cursor:default;">
+        <div style="position:relative;width:72px;height:8px;background:var(--surface-1);border-radius:4px;border:0.5px solid var(--border);">
+          {zone_html}
+          <div style="position:absolute;left:{dot_left}%;top:50%;transform:translate(-50%,-50%);width:9px;height:9px;background:{dot_color};border-radius:50%;border:1.5px solid white;"></div>
+        </div>
+        <span style="font-size:11px;color:{label_color};">{label}</span>
+      </div>
+      <div id="{uid}" style="display:none;position:absolute;top:calc(100% + 6px);left:0;background:var(--surface-2);border:0.5px solid var(--border);border-radius:var(--radius);padding:10px 12px;min-width:190px;z-index:100;box-shadow:0 4px 12px rgba(0,0,0,0.08);white-space:nowrap;">
+        <p style="font-size:11px;font-weight:500;color:var(--text-primary);margin:0 0 6px;">{tooltip_text}</p>
+        <div style="position:relative;width:100%;height:8px;background:var(--surface-1);border-radius:4px;border:0.5px solid var(--border);margin-bottom:4px;">
+          {zone_html}
+          <div style="position:absolute;left:{dot_left}%;top:50%;transform:translate(-50%,-50%);width:9px;height:9px;background:{dot_color};border-radius:50%;border:1.5px solid white;"></div>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text-muted);margin-bottom:6px;"><span>5′</span><span>3′</span></div>
+        <p style="font-size:11px;color:var(--text-secondary);margin:0;">{tooltip_detail}</p>
+      </div>
+    </div>'''
+        return bar_html
+
     # ── build HTML ─────────────────────────────────────────────────────────────
 
     html = """
@@ -869,13 +953,9 @@ def build_summary_html(position_data, found, time_series, dominant_letters):
   <th>Worst mutation</th>
   <th>Recent %</th>
   <th>Coverage</th>
-  <th>Primer vs virus</th>
+  <th>Position</th>
   <th>Trend</th>
-  <th>Status</th>
 </tr>
-</thead>
-<tbody>
-"""
 
     for name, summary in primer_summary.items():
         worst_proportion = summary["worst_proportion"]
@@ -918,17 +998,18 @@ def build_summary_html(position_data, found, time_series, dominant_letters):
         else:
             trend_cell = '<span style="color:#ccc;">—</span>'
 
-        html += f"""<tr>
-  <td>{piece_badge(summary["piece_type"])} <span style="margin-left:6px;color:#333;">{name}</span></td>
-  <td style="color:#666;">{summary["piece_type"]}</td>
-  <td style="color:#333;">{worst_mutation or "none"}</td>
-  <td style="color:#333;">{"—" if worst_proportion == 0 else f"{worst_proportion:.1%}"}</td>
-  <td style="color:#333;">{cov_display}</td>
-  <td>{primer_vs}</td>
-  <td>{trend_cell}</td>
-  <td>{status}</td>
-</tr>
-"""
+    proportion_display = "—" if worst_proportion == 0 else f"{worst_proportion:.1%}"
+    
+    html += f"""<tr>
+      <td>{piece_badge(summary["piece_type"])} <span style="margin-left:6px;color:#333;">{name}</span></td>
+      <td style="color:#666;">{summary["piece_type"]}</td>
+      <td style="color:#333;">{worst_mutation or "none"}</td>
+      <td style="color:#333;">{proportion_display}</td>
+      <td style="color:#333;">{cov_display}</td>
+      <td>{build_position_bar(summary, name)}</td>
+      <td>{trend_cell}</td>
+    </tr>
+    """
 
     html += "</tbody></table>"
     return html
