@@ -590,98 +590,6 @@ def build_html_heatmap(heatmap_data):
 
     return html
 
-# ── Summary table ──────────────────────────────────────────────────────────────
-def build_summary_table(position_data, found, threshold, dominant_letters):
-    """Build summary table with primer vs circulating virus comparison."""
-    primer_summary = {}
-    for r in found:
-        if r["Start"] is None:
-            continue
-        name = r["Name"]
-        piece_type = get_piece_type(name)
-        primer_letters = r.get("PrimerLetters", {})
-
-        primer_summary[name] = {
-            "piece_type": piece_type,
-            "worst_mutation": None,
-            "worst_proportion": 0.0,
-            "worst_coverage": 0,
-            "primer_match": True,  # assume match until proven otherwise
-            "mismatch_positions": [],
-            "monthly_proportions": {},
-            "three_prime_positions": set(),
-            "three_prime_mismatch": False,
-        }
-
-
-        # check each position in this primer/probe against dominant circulating letter
-        for pos, primer_letter in primer_letters.items():
-            dominant = dominant_letters.get(pos)
-            if dominant and dominant != primer_letter:
-                primer_summary[name]["primer_match"] = False
-                primer_summary[name]["mismatch_positions"].append(
-                    f"{pos}({primer_letter}→{dominant})"
-                )
-                # check if mismatch is at 3' end
-                if pos in primer_summary[name]["three_prime_positions"]:
-                    primer_summary[name]["three_prime_mismatch"] = True
-
-    # update with mutation data
-    for pos, info in position_data.items():
-        name = info["name"]
-        if name not in primer_summary:
-            continue
-        for month, muts in info["monthly"].items():
-            for mut, data in muts.items():
-                frac = data["proportion"] if isinstance(data, dict) else data
-                cov = data.get("coverage", 0) if isinstance(data, dict) else 0
-                if frac > primer_summary[name]["worst_proportion"]:
-                    primer_summary[name]["worst_proportion"] = frac
-                    primer_summary[name]["worst_mutation"] = mut
-                    primer_summary[name]["worst_coverage"] = cov
-
-    rows = []
-    for name, summary in primer_summary.items():
-        worst_proportion = summary["worst_proportion"]
-        worst_mutation = summary["worst_mutation"]
-
-        # primer vs virus status
-        if not summary["primer_match"]:
-            mismatches = ", ".join(summary["mismatch_positions"])
-            primer_vs_virus = f"❌ Mismatch at: {mismatches}"
-        else:
-            primer_vs_virus = "✅ Matches circulating virus"
-
-        # status
-        if not summary["primer_match"]:
-            if worst_proportion >= 0.5:
-                status = '<span style="background:#fcebeb;color:#a32d2d;font-size:11px;padding:2px 8px;border-radius:4px;">🚨 Critical</span>'
-            else:
-                status = '<span style="background:#faeeda;color:#854f0b;font-size:11px;padding:2px 8px;border-radius:4px;">⚠️ Warning</span>'
-        else:
-            status = '<span style="background:#eaf3de;color:#3b6d11;font-size:11px;padding:2px 8px;border-radius:4px;">✅ Good</span>'
-
-        # coverage display
-        cov = summary['worst_coverage']
-        if cov == 0:
-            coverage_display = "N/A"
-        elif cov < 1000:
-            coverage_display = f"⚠️ {cov:,} reads"
-        else:
-            coverage_display = f"{cov:,} reads"
-
-        rows.append({
-            "Primer/Probe": name,
-            "Type": summary["piece_type"],
-            "Worst mutation": worst_mutation or "none",
-            "Recent proportion": f"{worst_proportion:.1%}" if worst_proportion > 0 else "0.0%",
-            "Coverage": coverage_display,
-            "Primer vs virus": primer_vs_virus,
-            "Status": mut_status,
-        })
-
-    return pd.DataFrame(rows)
-
 def build_summary_html(position_data, found, time_series, dominant_letters):
     """
     Build custom HTML summary table with sparkline trend charts on hover.
@@ -956,29 +864,14 @@ def build_summary_html(position_data, found, time_series, dominant_letters):
   <th>Position</th>
   <th>Trend</th>
 </tr>
+</thead>
+<tbody>
+"""
 
     for name, summary in primer_summary.items():
         worst_proportion = summary["worst_proportion"]
         worst_mutation = summary["worst_mutation"]
         monthly = summary["monthly_proportions"]
-
-        if not summary["primer_match"]:
-            mismatches = ", ".join(summary["mismatch_positions"])
-            three_prime_flag = ""
-            if summary.get("three_prime_mismatch"):
-                three_prime_flag = ' <span style="background:#fcebeb;color:#a32d2d;font-size:10px;padding:1px 6px;border-radius:3px;font-weight:500;">3′ end ⚠️</span>'
-            primer_vs = f'<span style="color:#a32d2d;">❌ Mismatch at: {mismatches}</span>{three_prime_flag}'
-        else:
-            primer_vs = '<span style="color:#3b6d11;">✅ Matches circulating virus</span>'
-
-        # status
-        if not summary["primer_match"]:
-            if worst_proportion >= 0.5:
-                status = '<span style="background:#fcebeb;color:#a32d2d;font-size:11px;padding:2px 8px;border-radius:4px;">🚨 Critical</span>'
-            else:
-                status = '<span style="background:#faeeda;color:#854f0b;font-size:11px;padding:2px 8px;border-radius:4px;">⚠️ Warning</span>'
-        else:
-            status = '<span style="background:#eaf3de;color:#3b6d11;font-size:11px;padding:2px 8px;border-radius:4px;">✅ Good</span>'
 
         # coverage
         cov = summary["worst_coverage"]
@@ -998,9 +891,9 @@ def build_summary_html(position_data, found, time_series, dominant_letters):
         else:
             trend_cell = '<span style="color:#ccc;">—</span>'
 
-    proportion_display = "—" if worst_proportion == 0 else f"{worst_proportion:.1%}"
-    
-    html += (
+        proportion_display = "—" if worst_proportion == 0 else f"{worst_proportion:.1%}"
+
+        html += (
             "<tr>"
             f"<td>{piece_badge(summary['piece_type'])} <span style='margin-left:6px;color:#333;'>{name}</span></td>"
             f"<td style='color:#666;'>{summary['piece_type']}</td>"
@@ -1020,8 +913,6 @@ def build_summary_html(position_data, found, time_series, dominant_letters):
 # ── Main app function ──────────────────────────────────────────────────────────
 
 def app():
-    # TEMP
-    fetch_time_series.clear()
 
     st.title("🔬 Primer & Probe Checker")
     st.markdown(
