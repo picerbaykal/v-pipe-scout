@@ -73,6 +73,14 @@ def get_mismatch_position_index(genome_pos, start, end, strand):
         index = end - genome_pos + 1
     return index, length
 
+def calculate_gc_content(primer_seq):
+    """GC content as a fraction (0-1)."""
+    seq = primer_seq.upper()
+    if not seq:
+        return 0.0
+    gc = sum(1 for base in seq if base in "GC")
+    return gc / len(seq)
+
 def extract_positions_from_header(header):
     match = re.search(r"NC_045512\.2:(\d+)-(\d+)", header.strip())
     if match:
@@ -608,6 +616,8 @@ def build_summary_html(position_data, found, time_series, dominant_letters):
         start = r["Start"]
         end = r["End"]
 
+        gc_content = calculate_gc_content("".join(primer_letters.values()))
+
         primer_summary[name] = {
             "piece_type": piece_type,
             "worst_mutation": None,
@@ -618,8 +628,9 @@ def build_summary_html(position_data, found, time_series, dominant_letters):
             "mismatch_index": None,
             "primer_length": end - start + 1,
             "monthly_proportions": {},
-            "three_prime_positions": get_3prime_positions(start, end, strand),  # ← here
+            "three_prime_positions": get_3prime_positions(start, end, strand),
             "three_prime_mismatch": False,
+            "gc_content": gc_content,
         }
 
         # check primer vs dominant circulating letter
@@ -868,6 +879,7 @@ def build_summary_html(position_data, found, time_series, dominant_letters):
   <th>Worst mutation</th>
   <th>Recent %</th>
   <th>Coverage</th>
+  <th>GC%</th>
   <th>Position</th>
   <th>Trend</th>
 </tr>
@@ -900,6 +912,17 @@ def build_summary_html(position_data, found, time_series, dominant_letters):
 
         proportion_display = "—" if worst_proportion == 0 else f"{worst_proportion:.1%}"
 
+        gc = summary.get("gc_content", 0)
+        gc_pct = f"{gc:.0%}"
+        # color hint: 40-60% ideal (green), 30-40/60-70 acceptable (amber), else red
+        if 0.40 <= gc <= 0.60:
+            gc_color = "#3b6d11"
+        elif 0.30 <= gc < 0.40 or 0.60 < gc <= 0.70:
+            gc_color = "#ba7517"
+        else:
+            gc_color = "#a32d2d"
+        gc_display = f'<span style="color:{gc_color};">{gc_pct}</span>'
+
         html += (
             "<tr>"
             f"<td>{piece_badge(summary['piece_type'])} <span style='margin-left:6px;color:#333;'>{name}</span></td>"
@@ -907,6 +930,7 @@ def build_summary_html(position_data, found, time_series, dominant_letters):
             f"<td style='color:#333;'>{worst_mutation or 'none'}</td>"
             f"<td style='color:#333;'>{proportion_display}</td>"
             f"<td style='color:#333;'>{cov_display}</td>"
+            f"<td>{gc_display}</td>"
             f"<td>{build_position_bar(summary, name)}</td>"
             f"<td>{trend_cell}</td>"
             "</tr>"
