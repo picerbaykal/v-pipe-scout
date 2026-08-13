@@ -198,6 +198,8 @@ def fetch_primer_mutations(location, positions_tuple):
     Step 1: fetch which mutations exist at primer/probe positions.
     location=None means all sites.
     """
+    import logging
+    logger = logging.getLogger(__name__)
     async def _fetch():
         params = {"limit": 100000}
         if location:
@@ -213,7 +215,7 @@ def fetch_primer_mutations(location, positions_tuple):
                 data = await response.json()
                 positions = set(positions_tuple)
                 return [
-                    entry["mutation"]
+                    f"{entry['mutationFrom']}{entry['position']}{entry['mutationTo']}"
                     for entry in data.get("data", [])
                     if entry.get("position") in positions
                 ]
@@ -739,15 +741,6 @@ def build_summary_html(position_data, found, time_series, dominant_letters):
                         primer_summary[name]["worst_coverage"] = cov
                     break
 
-    # build monthly proportions for sparkline
-    for name, summary in primer_summary.items():
-        worst_mut = summary["worst_mutation"]
-        if worst_mut and worst_mut in time_series:
-            for month, data in time_series[worst_mut].items():
-                frac = data.get("proportion", 0.0) if isinstance(data, dict) else data
-                if frac > 0:
-                    primer_summary[name]["monthly_proportions"][month] = frac
-
     # build monthly proportions for sparkline — use worst mutation time series
     for name, summary in primer_summary.items():
         worst_mut = summary["worst_mutation"]
@@ -940,6 +933,9 @@ def build_summary_html(position_data, found, time_series, dominant_letters):
 # ── Main app function ──────────────────────────────────────────────────────────
 
 def app():
+    # TEMP
+    fetch_time_series.clear()
+
     st.title("🔬 Primer & Probe Checker")
     st.markdown(
         """
@@ -1044,7 +1040,7 @@ def app():
                     results.append({
                         "Name": clean_name, "Start": None, "End": None,
                         "Strand": None, "Method": "not found",
-                        "PrimerLetters": get_primer_letters(seq, start, strand),
+                        "PrimerLetters": {},  # ← empty dict, no position found
                         "Link A": None, "Link B": None,
                     })
                     continue
