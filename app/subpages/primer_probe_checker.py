@@ -260,7 +260,6 @@ def fetch_time_series(mutations_tuple, location, date_from_str, date_to_str):
                 headers={"content-type": "application/json"}
             ) as response:
                 if response.status != 200:
-                    logger.error(f"nucleotideMutationsOverTime failed: {response.status}")
                     return {}
                 data = (await response.json())["data"]
                 mutations = data["mutations"]
@@ -269,7 +268,7 @@ def fetch_time_series(mutations_tuple, location, date_from_str, date_to_str):
                 for i, mut in enumerate(mutations):
                     # strip main: prefix from mutation key
                     clean_mut = mut.replace("main:", "")
-                    result[mut] = {}
+                    result[clean_mut] = {}
                     for j, label in enumerate(date_labels):
                         cell = data["data"][i][j]
                         if cell["coverage"] > 0:
@@ -289,7 +288,9 @@ def fetch_time_series(mutations_tuple, location, date_from_str, date_to_str):
     try:
         return asyncio.run(_fetch())
     except Exception as e:
-        logger.error(f"fetch_time_series error: {e}")
+        st.error(f"fetch_time_series exception: {e}")
+        import traceback
+        st.code(traceback.format_exc())
         return {}
 
 # ── Data processing ────────────────────────────────────────────────────────────
@@ -1094,12 +1095,6 @@ def app():
         return
 
     st.caption(f"Found {len(mutations_list)} mutations at primer-probe positions")
-
-    # DEBUG
-    st.write("mutations_list:", mutations_list)
-    st.write("date_from_str:", date_from_str)
-    st.write("date_to_str:", date_to_str)
-    st.write("location_filter:", location_filter)
 
     # ── Step 2: fetch time series ──────────────────────────────────────────────
     with st.spinner("Fetching time series data..."):
