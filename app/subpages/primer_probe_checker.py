@@ -243,6 +243,8 @@ def fetch_time_series(mutations_tuple, location, date_from_str, date_to_str):
     if location:
         filters["locationName"] = location
 
+    # add main: prefix to mutations
+    mutations_with_prefix = [f"main:{m}" for m in mutations_list]
     async def _fetch():
         async with aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=120)
@@ -252,7 +254,7 @@ def fetch_time_series(mutations_tuple, location, date_from_str, date_to_str):
                 json={
                     "filters": filters,
                     "dateRanges": date_ranges,
-                    "includeMutations": mutations_list,
+                    "includeMutations": mutations_with_prefix,
                     "dateField": "samplingDate"
                 },
                 headers={"content-type": "application/json"}
@@ -265,17 +267,19 @@ def fetch_time_series(mutations_tuple, location, date_from_str, date_to_str):
                 date_labels = [r["dateFrom"][:7] for r in data["dateRanges"]]
                 result = {}
                 for i, mut in enumerate(mutations):
+                    # strip main: prefix from mutation key
+                    clean_mut = mut.replace("main:", "")
                     result[mut] = {}
                     for j, label in enumerate(date_labels):
                         cell = data["data"][i][j]
                         if cell["coverage"] > 0:
-                            result[mut][label] = {
+                            result[clean_mut][label] = {
                                 "proportion": cell["count"] / cell["coverage"],
                                 "coverage": cell["coverage"],
                                 "count": cell["count"],
                             }
                         else:
-                            result[mut][label] = {
+                            result[clean_mut][label] = {
                                 "proportion": 0.0,
                                 "coverage": 0,
                                 "count": 0,
@@ -1090,6 +1094,12 @@ def app():
         return
 
     st.caption(f"Found {len(mutations_list)} mutations at primer-probe positions")
+
+    # DEBUG
+    st.write("mutations_list:", mutations_list)
+    st.write("date_from_str:", date_from_str)
+    st.write("date_to_str:", date_to_str)
+    st.write("location_filter:", location_filter)
 
     # ── Step 2: fetch time series ──────────────────────────────────────────────
     with st.spinner("Fetching time series data..."):
