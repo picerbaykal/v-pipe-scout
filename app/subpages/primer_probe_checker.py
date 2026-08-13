@@ -778,69 +778,72 @@ def build_summary_html(position_data, found, time_series, dominant_letters):
 
 
     def build_position_bar(summary, name):
-        """Build mini position bar showing mismatch location within primer."""
+        """Build mini position bar showing mismatch location within primer.
+        Uses hardcoded colors (not CSS vars) because this renders inside a
+        components.html iframe where Streamlit theme vars are unavailable."""
         length = summary.get("primer_length", 20)
         index = summary.get("mismatch_index")
-        primer_match = summary.get("primer_match", True)
         mismatch_positions = summary.get("mismatch_positions", [])
         three_prime_end_pct = 25  # last 25% = 3' end zone
 
         if index is None:
-            # clean primer — green dot in middle
-            dot_color = "#639922"
+            dot_color = "#3b6d11"
             dot_left = 50
             zone_html = ""
-            label = "✓"
+            label = "\u2713"  # checkmark
             label_color = "#3b6d11"
-            tooltip_text = "No mutations detected at this position"
+            tooltip_text = "No mutations detected"
             tooltip_detail = ""
         else:
-            # mismatch — red dot at calculated position
             dot_color = "#a32d2d"
             dot_left = int((index / length) * 100)
-            zone_html = f'<div style="position:absolute;right:0;top:0;width:{three_prime_end_pct}%;height:100%;background:#f7c1c1;border-radius:0 4px 4px 0;"></div>'
-            label = f"{index}/{length}"
-            label_color = "var(--text-secondary)"
-
-            # position description
+            zone_html = (
+                '<div style="position:absolute;right:0;top:0;width:'
+                + str(three_prime_end_pct)
+                + '%;height:100%;background:#f7c1c1;border-radius:0 5px 5px 0;"></div>'
+            )
+            label = str(index) + "/" + str(length)
+            label_color = "#555"
             pct = index / length
             if pct < 0.25:
-                pos_desc = "near 5′ end — minor impact"
+                pos_desc = "near 5\u2032 end \u2014 minor impact"
             elif pct > 0.75:
-                pos_desc = "near 3′ end — severe impact ⚠️"
+                pos_desc = "near 3\u2032 end \u2014 severe impact \u26a0\ufe0f"
             else:
-                pos_desc = "middle of primer — moderate impact"
+                pos_desc = "middle of primer \u2014 moderate impact"
+            tooltip_text = ", ".join(mismatch_positions)
+            tooltip_detail = "Position " + str(index) + "/" + str(length) + " \u2014 " + pos_desc
 
-            mut_str = ", ".join(mismatch_positions)
-            tooltip_text = f"{mut_str}"
-            tooltip_detail = f"Position {index}/{length} — {pos_desc}"
+        uid = "pb_" + str(abs(hash(name + str(index))))
 
-        # unique id for tooltip
-        import random
-        uid = f"pb_{abs(hash(summary.get('piece_type', '') + str(index)))}"
+        dot = (
+            '<div style="position:absolute;left:' + str(dot_left)
+            + '%;top:50%;transform:translate(-50%,-50%);width:11px;height:11px;background:'
+            + dot_color + ';border-radius:50%;border:2px solid #fff;box-shadow:0 0 0 1px '
+            + dot_color + ';"></div>'
+        )
 
-        bar_html = f'''
-    <div style="position:relative;display:inline-block;" 
-         onmouseenter="document.getElementById('{uid}').style.display='block'" 
-         onmouseleave="document.getElementById('{uid}').style.display='none'">
-      <div style="display:flex;align-items:center;gap:6px;cursor:default;">
-        <div style="position:relative;width:72px;height:8px;background:var(--surface-1);border-radius:4px;border:0.5px solid var(--border);">
-          {zone_html}
-          <div style="position:absolute;left:{dot_left}%;top:50%;transform:translate(-50%,-50%);width:9px;height:9px;background:{dot_color};border-radius:50%;border:1.5px solid white;"></div>
-        </div>
-        <span style="font-size:11px;color:{label_color};">{label}</span>
-      </div>
-      <div id="{uid}" style="display:none;position:absolute;top:calc(100% + 6px);left:0;background:var(--surface-2);border:0.5px solid var(--border);border-radius:var(--radius);padding:10px 12px;min-width:190px;z-index:100;box-shadow:0 4px 12px rgba(0,0,0,0.08);white-space:nowrap;">
-        <p style="font-size:11px;font-weight:500;color:var(--text-primary);margin:0 0 6px;">{tooltip_text}</p>
-        <div style="position:relative;width:100%;height:8px;background:var(--surface-1);border-radius:4px;border:0.5px solid var(--border);margin-bottom:4px;">
-          {zone_html}
-          <div style="position:absolute;left:{dot_left}%;top:50%;transform:translate(-50%,-50%);width:9px;height:9px;background:{dot_color};border-radius:50%;border:1.5px solid white;"></div>
-        </div>
-        <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text-muted);margin-bottom:6px;"><span>5′</span><span>3′</span></div>
-        <p style="font-size:11px;color:var(--text-secondary);margin:0;">{tooltip_detail}</p>
-      </div>
-    </div>'''
-        return bar_html
+        parts = [
+            '<div style="position:relative;display:inline-block;"',
+            ' onmouseenter="document.getElementById(\'', uid, '\').style.display=\'block\'"',
+            ' onmouseleave="document.getElementById(\'', uid, '\').style.display=\'none\'">',
+            '<div style="display:flex;align-items:center;gap:6px;cursor:default;">',
+            '<div style="position:relative;width:72px;height:10px;background:#eeeeee;border-radius:5px;border:0.5px solid #ccc;">',
+            zone_html, dot,
+            '</div>',
+            '<span style="font-size:11px;color:', label_color, ';">', label, '</span>',
+            '</div>',
+            '<div id="', uid, '" style="display:none;position:absolute;top:calc(100% + 6px);left:0;background:#ffffff;border:1px solid #ccc;border-radius:8px;padding:12px 14px;min-width:200px;z-index:9999;box-shadow:0 6px 20px rgba(0,0,0,0.15);white-space:nowrap;">',
+            '<p style="font-size:11px;font-weight:500;color:#333;margin:0 0 8px;">', tooltip_text, '</p>',
+            '<div style="position:relative;width:100%;height:10px;background:#eeeeee;border-radius:5px;border:0.5px solid #ccc;margin-bottom:4px;">',
+            zone_html, dot,
+            '</div>',
+            '<div style="display:flex;justify-content:space-between;font-size:10px;color:#999;margin-bottom:8px;"><span>5\u2032</span><span>3\u2032</span></div>',
+            '<p style="font-size:11px;color:#666;margin:0;">', tooltip_detail, '</p>',
+            '</div>',
+            '</div>',
+        ]
+        return "".join(parts)
 
     # ── build HTML ─────────────────────────────────────────────────────────────
 
@@ -1100,13 +1103,15 @@ def app():
     # ── Summary table ──────────────────────────────────────────────────────────
     st.subheader("Summary")
 
-    first_mut = list(time_series.keys())[0] if time_series else None
-
     with st.expander("Summary", expanded=True):
         summary_html = build_summary_html(
             position_data, found, time_series, dominant_letters
         )
-        components.html(summary_html, height=400, scrolling=True)
+        # height scales with row count; extra padding so hover popovers
+        # on the last rows aren't clipped by the iframe boundary
+        n_rows = len([r for r in found if r["Start"] is not None])
+        table_height = 120 + n_rows * 42 + 160
+        components.html(summary_html, height=table_height, scrolling=True)
 
     # ── GenSpectrum links ──────────────────────────────────────────────────────
     st.subheader("GenSpectrum links")
