@@ -422,13 +422,12 @@ def app():
                     scanner_tasks = st.session_state.get("acooc_scanner_tasks", {})
                     scanner_panels = st.session_state.get("acooc_scanner_panels", {})
 
-                    # invalidate if panel changed since last scan
                     if location in scanner_results:
-                        if set(scanner_panels.get(location, [])) != set(all_selected_variants):
-                            scanner_results.pop(location, None)
-                            scanner_tasks.pop(location, None)
-                            st.session_state["acooc_scanner_results"] = scanner_results
-                            st.session_state["acooc_scanner_tasks"] = scanner_tasks
+                        last_panel = set(scanner_panels.get(location, []))
+                        current_panel = set(all_selected_variants)
+                        if last_panel != current_panel:
+                            st.warning(
+                                "Panel changed since last scan — results may be outdated. Run scanner again to update.")
 
                     if cooc_result and cooc_result.get("unexplained_patterns"):
                         scan_col1, scan_col2 = st.columns([1, 5])
@@ -496,8 +495,6 @@ def app():
                                 ),
                                 on_add_variant=_add_variant,
                             )
-                        elif cooc_result:
-                            st.caption("Panel changed — run completeness again to update the scanner.")
                         else:
                             st.caption("Run panel completeness first to enable the scanner.")
 
