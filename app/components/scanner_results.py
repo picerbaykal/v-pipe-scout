@@ -81,7 +81,7 @@ def render_scanner_results(
     # ── Bucket 1: missing from panel ─────────────────────────────────────────
     with st.expander(
         f"🔴 Missing from panel ({len(missing)} variant{'s' if len(missing) != 1 else ''})",
-        expanded=True,
+        expanded=False,
     ):
         if not missing:
             st.caption("No missing tracked variants detected.")
@@ -112,7 +112,7 @@ def render_scanner_results(
                     if on_add_variant:
                         if st.button(
                             "＋ Add",
-                                key=f"scanner_add_{variant.replace(' ', '_').replace('(', '').replace(')', '')}",
+                                key=f"scanner_add_{location}_{variant.replace(' ', '_').replace('(', '').replace(')', '')}",
                                 use_container_width=True,
                             type="primary",
                         ):
@@ -121,7 +121,7 @@ def render_scanner_results(
                 # heatmap expander per variant
                 if client and item.get("observed_mutations") and date_range:
                     from components.scanner_heatmap import render_scanner_heatmap
-                    with st.expander(f"Signal over time — {variant}", expanded=False):
+                    with st.expander(f"Signal over time — {location} — {variant}", expanded=False):
                         render_scanner_heatmap(
                             variant=variant,
                             mutations=item["observed_mutations"],
@@ -186,14 +186,14 @@ def render_scanner_results(
                             if on_add_variant:
                                 if st.button(
                                         "＋ Add",
-                                        key=f"scanner_add_{lineage.replace(' ', '_').replace('(', '').replace(')', '')}",
+                                        key=f"scanner_add_{location}_{lineage.replace(' ', '_').replace('(', '').replace(')', '')}",
                                         use_container_width=True,
                                 ):
                                     on_add_variant(lineage)
 
                         if client and item.get("observed_mutations") and date_range:
                             from components.scanner_heatmap import render_scanner_heatmap
-                            with st.expander(f"Signal over time — {lineage}", expanded=False):
+                            with st.expander(f"Signal over time — {location} — {lineage}", expanded=False):
                                 render_scanner_heatmap(
                                     variant=lineage,
                                     mutations=item["observed_mutations"],

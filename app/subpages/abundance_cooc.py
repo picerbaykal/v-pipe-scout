@@ -29,6 +29,7 @@ from components.jaccard_heatmap import render_jaccard_heatmap
 from components.scanner_results import render_scanner_results
 
 from datetime import datetime
+import pandas as pd
 
 # Initialize Celery
 celery_app = Celery(
@@ -106,17 +107,18 @@ def _render_completeness(result: dict) -> None:
 
 def app():
     # Apply any pending variant additions from the scanner BEFORE widgets render
-    _pending = st.session_state.pop("acooc_add_variant_pending", None)
-    if _pending:
-        current = st.session_state.get("acooc_variant_multiselect", [])
-        if _pending not in current:
-            st.session_state["acooc_variant_multiselect"] = current + [_pending]
+    for key in list(st.session_state.keys()):
+        if key.startswith("acooc_add_variant_pending_"):
+            v = st.session_state.pop(key)
+            current = st.session_state.get("acooc_variant_multiselect", [])
+            if v not in current:
+                st.session_state["acooc_variant_multiselect"] = current + [v]
+            break
 
     st.session_state.setdefault("location_results", {})
     st.session_state.setdefault("acooc_location_tasks", {})
     st.session_state.setdefault("acooc_cooc_tasks", {})
     st.session_state.setdefault("acooc_cooc_results", {})
-    st.session_state.setdefault("acooc_scanner_tasks", {})
     st.session_state.setdefault("acooc_scanner_results", {})
     st.session_state.setdefault("acooc_scanner_panels", {})
 
@@ -370,12 +372,18 @@ def app():
                     len(st.session_state.location_results)
                     + len(st.session_state.get("acooc_cooc_results", {}))
             )
+
             any_just_completed = (
                     any(s == "SUCCESS" for s in states.values())
                     and n_results < len(all_task_ids)
             )
 
-            if any_running or any_just_completed:
+            deconv_or_cooc_running = any(
+                celery_app.AsyncResult(tid).state in ("PENDING", "STARTED", "RETRY")
+                for tid in list(location_tasks.values()) + cooc_task_ids
+            )
+
+            if deconv_or_cooc_running or any_just_completed:
                 from streamlit_autorefresh import st_autorefresh
                 st_autorefresh(interval=2000, key="acooc_autorefresh")
 
@@ -419,102 +427,102 @@ def app():
                             location, task_id, celery_app, redis_client
                         )
 
-            # ── Scanner (global) ─────────────────────────────────────────────────
+            # ── Scanner (global, synchronous) ────────────────────────────────────
             st.markdown("---")
             st.markdown("#### Scanner")
 
             scanner_results = st.session_state.get("acooc_scanner_results", {})
-            scanner_tasks = st.session_state.get("acooc_scanner_tasks", {})
             scanner_panels = st.session_state.get("acooc_scanner_panels", {})
 
-            # locations with completeness results available
+            # locations that have completeness results with patterns to classify
             available_locations = [
                 loc for loc in location_names
                 if loc in st.session_state.get("acooc_cooc_results", {})
+                   and st.session_state["acooc_cooc_results"][loc].get("unexplained_patterns")
             ]
 
             if not available_locations:
-                st.caption("Run panel completeness first to enable the scanner.")
+                st.caption("Scanner will be available once panel completeness finishes for a location.")
             else:
                 col1, col2 = st.columns([3, 1])
                 with col1:
-                    scan_location = st.selectbox(
+                    scan_choice = st.selectbox(
                         "Location",
-                        options=available_locations,
+                        options=["All ready locations"] + available_locations,
                         key="acooc_scanner_location_select",
                     )
                 with col2:
                     scan_clicked = st.button(
                         "▶ Run scanner",
-                        key="acooc_scan_global",
                         type="primary",
+                        key="acooc_scan_global",
                     )
 
-                cooc_result = st.session_state.get("acooc_cooc_results", {}).get(scan_location, {})
-
-                # stale warning
-                if scan_location in scanner_results:
-                    last_panel = set(scanner_panels.get(scan_location, []))
-                    if last_panel != set(all_selected_variants):
-                        st.warning(
-                            "Panel changed since last scan — results may be outdated. Run scanner again to update.")
-
-                if scan_clicked and cooc_result.get("unexplained_patterns"):
-                    scanner_results.pop(scan_location, None)
-                    st.session_state["acooc_scanner_results"] = scanner_results
-                    task = celery_app.send_task(
-                        "tasks.run_cooc_scanner_lapis",
-                        kwargs={
-                            "location": scan_location,
-                            "start_date": start_date.isoformat(),
-                            "end_date": end_date.isoformat(),
-                            "variants": all_selected_variants,
-                            "unexplained_patterns": cooc_result["unexplained_patterns"],
-                        }
-                    )
-                    scanner_tasks[scan_location] = task.id
-                    st.session_state["acooc_scanner_tasks"] = scanner_tasks
-                    st.rerun()
-
-                # poll for scanner result
-                if scan_location in scanner_tasks and scan_location not in scanner_results:
-                    scanner_task = celery_app.AsyncResult(scanner_tasks[scan_location])
-                    if scanner_task.ready():
-                        try:
-                            scanner_results[scan_location] = scanner_task.get()
-                            st.session_state.setdefault("acooc_scanner_panels", {})[scan_location] = list(
-                                all_selected_variants)
-                            st.session_state["acooc_scanner_results"] = scanner_results
-                            scanner_tasks.pop(scan_location, None)
-                            st.session_state["acooc_scanner_tasks"] = scanner_tasks
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Scanner failed: {e}")
+                if scan_clicked:
+                    if scan_choice == "All ready locations":
+                        targets = [
+                            loc for loc in available_locations
+                            if loc not in scanner_results
+                               or set(scanner_panels.get(loc, [])) != set(all_selected_variants)
+                        ]
+                        if not targets:
+                            st.info("All ready locations already scanned with the current panel.")
                     else:
-                        from components.scanner_results import render_scanner_progress
-                        render_scanner_progress(scan_location, scanner_tasks[scan_location], celery_app,
-                                                redis_client)
+                        targets = [scan_choice]
 
-                # render results
-                if scan_location in scanner_results:
-                    if st.session_state.pop("acooc_add_variant_pending", False):
-                        st.rerun()
+                    if targets:
+                        from process.scanner import scan_unexplained_patterns
+                        from api.signature_cache import (
+                            get_all_lineage_signatures,
+                            get_panel_parent_map,
+                            get_cowwid_signatures,
+                        )
+                        with st.spinner(f"Scanning {', '.join(targets)}…"):
+                            all_sigs = get_all_lineage_signatures()
+                            parent_map = get_panel_parent_map()
+                            cowwid = get_cowwid_signatures()
+                            for loc in targets:
+                                patterns_df = pd.DataFrame(
+                                    st.session_state["acooc_cooc_results"][loc]["unexplained_patterns"]
+                                )
+                                result = scan_unexplained_patterns(
+                                    unexplained_patterns=patterns_df,
+                                    panel_variants=all_selected_variants,
+                                    cowwid_signatures=cowwid,
+                                    all_lineage_signatures=all_sigs,
+                                    panel_parent_map=parent_map,
+                                    min_read_count=2,
+                                )
+                                scanner_results[loc] = result
+                                scanner_panels[loc] = list(all_selected_variants)
+                            st.session_state["acooc_scanner_results"] = scanner_results
+                            st.session_state["acooc_scanner_panels"] = scanner_panels
 
-                    def _add_variant(v):  # ← add here
-                        st.session_state["acooc_add_variant_pending"] = v
-                        st.rerun()
+                # render results per location
+                for loc in available_locations:
+                    if loc in scanner_results:
+                        stale = set(scanner_panels.get(loc, [])) != set(all_selected_variants)
+                        with st.expander(f"📍 {loc}" + (" ⚠️ panel changed" if stale else ""),
+                                         expanded=False):
+                            if stale:
+                                st.warning("Panel changed since last scan — run scanner again to update.")
 
-                    render_scanner_results(
-                        scanner_results[scan_location],
-                        selected_variants=all_selected_variants,
-                        client=wiseLoculus,
-                        location=scan_location,
-                        date_range=(
-                            datetime.combine(start_date, datetime.min.time()),
-                            datetime.combine(end_date, datetime.min.time()),
-                        ),
-                        on_add_variant = _add_variant,
-                    )
+                            def _add_variant(v, _loc=loc):
+                                st.session_state[f"acooc_add_variant_pending_{_loc}"] = v
+                                st.rerun()
+
+                            render_scanner_results(
+                                scanner_results[loc],
+                                selected_variants=all_selected_variants,
+                                client=wiseLoculus,
+                                location=loc,
+                                date_range=(
+                                    datetime.combine(start_date, datetime.min.time()),
+                                    datetime.combine(end_date, datetime.min.time()),
+                                ),
+                                on_add_variant=_add_variant,
+                            )
+
 
         # ── Signature similarity ──────────────────────────────────────────────
         if len(all_selected_variants) >= 2:
