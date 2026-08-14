@@ -249,7 +249,7 @@ def run_cooc_panel_completeness(
         if not dates:
             return []
 
-        sem = asyncio.Semaphore(2)  # cap concurrent batches
+        sem = asyncio.Semaphore(8)  # cap concurrent batches
 
         async def _one_batch(i, amp_name, batch_positions):
             async with sem:

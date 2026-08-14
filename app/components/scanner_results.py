@@ -112,8 +112,8 @@ def render_scanner_results(
                     if on_add_variant:
                         if st.button(
                             "＋ Add",
-                            key=f"scanner_add_{variant}",
-                            use_container_width=True,
+                                key=f"scanner_add_{variant.replace(' ', '_').replace('(', '').replace(')', '')}",
+                                use_container_width=True,
                             type="primary",
                         ):
                             on_add_variant(variant)
@@ -186,7 +186,7 @@ def render_scanner_results(
                             if on_add_variant:
                                 if st.button(
                                         "＋ Add",
-                                        key=f"scanner_add_{lineage}",
+                                        key=f"scanner_add_{lineage.replace(' ', '_').replace('(', '').replace(')', '')}",
                                         use_container_width=True,
                                 ):
                                     on_add_variant(lineage)
