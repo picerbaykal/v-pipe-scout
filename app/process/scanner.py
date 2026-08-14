@@ -151,6 +151,12 @@ def scan_unexplained_patterns(
             )
             if not is_desc:
                 continue
+            # only count if pattern contains at least one private mutation
+            # (not just inherited from parent panel variant)
+            parent_sig = all_lineage_signatures.get(panel_parent, set())
+            private_sig = sig - parent_sig
+            if not (present & private_sig):
+                continue
             if lineage not in emerging_hits:
                 emerging_hits[lineage] = {
                     "parent": panel_parent,
@@ -160,7 +166,7 @@ def scan_unexplained_patterns(
                 }
             emerging_hits[lineage]["total_reads"] += count
             emerging_hits[lineage]["pattern_count"] += 1
-            emerging_hits[lineage]["observed_mutations"].update(present & sig)
+            emerging_hits[lineage]["observed_mutations"].update(present & private_sig)
 
     emerging_sublineage = sorted(
         [{

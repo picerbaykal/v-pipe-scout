@@ -462,6 +462,7 @@ def app():
                         # check if scanner task completed
                         if location in scanner_tasks and location not in scanner_results:
                             scanner_task = celery_app.AsyncResult(scanner_tasks[location])
+                            st.write(f"DEBUG task_id: {scanner_tasks[location][:8]}...") # DEBUG
                             if scanner_task.ready():
                                 try:
                                     scanner_results[location] = scanner_task.get()
@@ -483,6 +484,13 @@ def app():
                             def _add_variant(v):
                                 st.session_state["acooc_add_variant_pending"] = v
                                 st.rerun()
+
+                            # DEBUG
+                            st.write("emerging count:", len(scanner_results[location].get('emerging_sublineage', [])))
+                            st.write("first emerging:",
+                                     scanner_results[location].get('emerging_sublineage', [{}])[0].get('lineage',
+                                                                                                       'none') if
+                                     scanner_results[location].get('emerging_sublineage') else 'none')
 
                             render_scanner_results(
                                 scanner_results[location],

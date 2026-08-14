@@ -100,7 +100,10 @@ def render_scanner_results(
                         f"<div style='background:#fef2f2; border:1px solid #fecaca; "
                         f"border-radius:6px; padding:8px 12px; margin:4px 0;'>"
                         f"<span style='font-weight:600; color:#dc2626;'>{variant}</span>"
-                        f"<span style='color:#6b7280; font-size:0.82rem; margin-left:8px;'>"
+                        f"<span style='color:#6b7280; font-size:0.82rem; margin-left:8px;' "
+                        f"title='{reads:,} reads carry patterns matching this sublineage "
+                        f"(may overlap with related sublineages) · "
+                        f"{n_patterns} distinct co-occurrence pattern(s)'>"
                         f"{reads:,} reads · {n_patterns} pattern(s)</span>"
                         f"</div>",
                         unsafe_allow_html=True,
@@ -139,55 +142,68 @@ def render_scanner_results(
         else:
             st.caption(
                 "Descendants of your panel variants with rising co-occurrence signal. "
-                "Not yet on the official surveillance list."
+                "Not yet on the official surveillance list. "
+                "Sorted by read count — note that closely related sublineages sharing "
+                "the same mutations may have overlapping counts."
             )
-            # AFTER
             from collections import defaultdict
             by_parent = defaultdict(list)
             for item in emerging:
                 by_parent[item["parent"]].append(item)
 
-            for parent_variant, items in sorted(by_parent.items()):
-                st.markdown(f"**{parent_variant} sublineages ({len(items)} found)**")
-                for item in items[:10]:
-                    lineage = item["lineage"]
-                    parent = item["parent"]
-                    reads = item["total_reads"]
-                    n_patterns = item["pattern_count"]
-                    col1, col2 = st.columns([4, 1])
-                    with col1:
-                        st.markdown(
-                            f"<div style='background:#fffbeb; border:1px solid #fde68a; "
-                            f"border-radius:6px; padding:8px 12px; margin:4px 0;'>"
-                            f"<span style='font-weight:600; color:#92400e;'>{lineage}</span>"
-                            f"<span style='color:#6b7280; font-size:0.82rem; margin-left:8px;'>"
-                            f"sublineage of {parent} · {reads:,} reads · {n_patterns} pattern(s)</span>"
-                            f"</div>",
-                            unsafe_allow_html=True,
-                        )
-                    with col2:
-                        if on_add_variant:
-                            if st.button(
-                                    "＋ Add",
-                                    key=f"scanner_add_{lineage}",
-                                    use_container_width=True,
-                            ):
-                                on_add_variant(lineage)
+            # sort groups by total reads (strongest signal first)
+            sorted_groups = sorted(
+                by_parent.items(),
+                key=lambda x: -sum(i["total_reads"] for i in x[1])
+            )
 
-                    if client and item.get("observed_mutations") and date_range:
-                        from components.scanner_heatmap import render_scanner_heatmap
-                        with st.expander(f"Signal over time — {lineage}", expanded=False):
-                            render_scanner_heatmap(
-                                variant=lineage,
-                                mutations=item["observed_mutations"],
-                                client=client,
-                                location=location,
-                                date_range=date_range,
-                                max_mutations=20,
+            for parent_variant, items in sorted_groups:
+                # sort sublineages within group by reads descending
+                items_sorted = sorted(items, key=lambda x: -x["total_reads"])
+                group_reads = sum(i["total_reads"] for i in items_sorted)
+
+                with st.expander(
+                        f"**{parent_variant}** sublineages — {len(items_sorted)} found · {group_reads:,} reads",
+                        expanded=False,
+                ):
+                    for item in items_sorted[:10]:
+                        lineage = item["lineage"]
+                        parent = item["parent"]
+                        reads = item["total_reads"]
+                        n_patterns = item["pattern_count"]
+                        col1, col2 = st.columns([4, 1])
+                        with col1:
+                            st.markdown(
+                                f"<div style='background:#fffbeb; border:1px solid #fde68a; "
+                                f"border-radius:6px; padding:8px 12px; margin:4px 0;'>"
+                                f"<span style='font-weight:600; color:#92400e;'>{lineage}</span>"
+                                f"<span style='color:#6b7280; font-size:0.82rem; margin-left:8px;'>"
+                                f"sublineage of {parent} · {reads:,} reads · {n_patterns} pattern(s)</span>"
+                                f"</div>",
+                                unsafe_allow_html=True,
+                            )
+                        with col2:
+                            if on_add_variant:
+                                if st.button(
+                                        "＋ Add",
+                                        key=f"scanner_add_{lineage}",
+                                        use_container_width=True,
+                                ):
+                                    on_add_variant(lineage)
+
+                        if client and item.get("observed_mutations") and date_range:
+                            from components.scanner_heatmap import render_scanner_heatmap
+                            with st.expander(f"Signal over time — {lineage}", expanded=False):
+                                render_scanner_heatmap(
+                                    variant=lineage,
+                                    mutations=item["observed_mutations"],
+                                    client=client,
+                                    location=location,
+                                    date_range=date_range,
+                                    max_mutations=20,
                             )
                 if len(items) > 10:
-                    st.caption(f"… and {len(items) - 10} more {parent_variant} sublineages.")
-
+                    st.caption(f"… and {len(items_sorted) - 10} more {parent_variant} sublineages.")
     # ── Bucket 3: possibly new ───────────────────────────────────────────────
     with st.expander(
         f"🔵 Possibly new ({pn_reads:,} reads)",
