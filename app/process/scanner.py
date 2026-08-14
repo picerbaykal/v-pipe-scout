@@ -82,6 +82,12 @@ def scan_unexplained_patterns(
             total_unexplained_reads: int
             summary: human-readable one-line summary
     """
+    # NOTE on "possibly new" coverage:
+    # Currently checks patterns only at ~421 positions from known variant signatures.
+    # When SaneQL deploys, expand to all covered positions (non-N reads > threshold)
+    # for comprehensive novel variant detection. Zero-coverage positions should be
+    # excluded from the query set — no coverage means no signal to detect.
+    # See: worker/cooc.py TODO for the SaneQL migration plan.
     if unexplained_patterns.empty:
         return _empty_result("No unexplained patterns to classify.")
 

@@ -215,6 +215,22 @@ def run_cooc_panel_completeness(
     )
 
     _progress(2, "Grouping positions by amplicon + read-length distance")
+    # TODO: when SaneQL REST endpoint deploys, replace per-amplicon batching with:
+    # 1. Coverage scan: query positions with non-N reads > MIN_COVERAGE threshold
+    #    (skip positions with no real coverage — no point querying them)
+    # 2. Single SaneQL query for all covered positions in one request:
+    #    default
+    #    .filter(locationName == location & samplingDate in date_range)
+    #    .map({"pos1" := main.at(pos1), "pos2" := main.at(pos2), ...covered_positions...})
+    #    .groupBy({count := count()}, {pos1, pos2, ..., samplingDate})
+    #    This gives full genome co-occurrence without BED file or amplicon batching.
+    #    For "possibly new" detection: expand position set beyond known variant signatures
+    #    to all covered positions (~500-1000 on a typical date) for comprehensive novel
+    #    variant detection. Zero-coverage positions are excluded by the coverage scan,
+    #    keeping the query fast (~2-5s estimated based on 130-position benchmark).
+    amplicons = load_amplicons(Path(bed_path))
+    amp_groups = group_positions_by_amplicon(positions, amplicons)
+    batches = list(amp_groups.items())
     amplicons = load_amplicons(Path(bed_path))
     # new — one batch per amplicon, all positions together
     amp_groups = group_positions_by_amplicon(positions, amplicons)
