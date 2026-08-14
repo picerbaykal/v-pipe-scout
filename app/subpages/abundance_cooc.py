@@ -28,6 +28,8 @@ from components.jaccard_heatmap import render_jaccard_heatmap
 
 from components.scanner_results import render_scanner_results
 
+from datetime import datetime
+
 # Initialize Celery
 celery_app = Celery(
     'tasks',
@@ -116,6 +118,7 @@ def app():
     st.session_state.setdefault("acooc_cooc_results", {})
     st.session_state.setdefault("acooc_scanner_tasks", {})
     st.session_state.setdefault("acooc_scanner_results", {})
+    st.session_state.setdefault("acooc_scanner_panels", {})
 
     # ── Header ───────────────────────────────────────────────────────────────
     st.title("Abundance & Co-occurrence")
@@ -417,6 +420,15 @@ def app():
                     cooc_result = st.session_state.get("acooc_cooc_results", {}).get(location, {})
                     scanner_results = st.session_state.get("acooc_scanner_results", {})
                     scanner_tasks = st.session_state.get("acooc_scanner_tasks", {})
+                    scanner_panels = st.session_state.get("acooc_scanner_panels", {})
+
+                    # invalidate if panel changed since last scan
+                    if location in scanner_results:
+                        if set(scanner_panels.get(location, [])) != set(all_selected_variants):
+                            scanner_results.pop(location, None)
+                            scanner_tasks.pop(location, None)
+                            st.session_state["acooc_scanner_results"] = scanner_results
+                            st.session_state["acooc_scanner_tasks"] = scanner_tasks
 
                     if cooc_result and cooc_result.get("unexplained_patterns"):
                         scan_col1, scan_col2 = st.columns([1, 5])
@@ -431,6 +443,9 @@ def app():
                                 f"ready to classify."
                             )
                         if scan_clicked:
+                            # clear old result so previous run doesn't show while new one runs
+                            scanner_results.pop(location, None)
+                            st.session_state["acooc_scanner_results"] = scanner_results
                             task = celery_app.send_task(
                                 "tasks.run_cooc_scanner_lapis",
                                 kwargs={
@@ -451,12 +466,18 @@ def app():
                             if scanner_task.ready():
                                 try:
                                     scanner_results[location] = scanner_task.get()
+                                    # store which panel produced this result
+                                    st.session_state.setdefault("acooc_scanner_panels", {})[location] = list(
+                                        all_selected_variants)
                                     st.session_state["acooc_scanner_results"] = scanner_results
+                                    # remove completed task so it stops being polled
+                                    scanner_tasks.pop(location, None)
                                     st.rerun()
                                 except Exception as e:
                                     st.error(f"Scanner failed: {e}")
                             else:
-                                st.info("Scanner running…")
+                                from components.scanner_results import render_scanner_progress
+                                render_scanner_progress(location, scanner_tasks[location], celery_app, redis_client)
 
                         if location in scanner_results:
 
@@ -467,8 +488,16 @@ def app():
                             render_scanner_results(
                                 scanner_results[location],
                                 selected_variants=all_selected_variants,
+                                client=wiseLoculus,
+                                location=location,
+                                date_range=(
+                                    datetime.combine(start_date, datetime.min.time()),
+                                    datetime.combine(end_date, datetime.min.time()),
+                                ),
                                 on_add_variant=_add_variant,
                             )
+                        elif cooc_result:
+                            st.caption("Panel changed — run completeness again to update the scanner.")
                         else:
                             st.caption("Run panel completeness first to enable the scanner.")
 

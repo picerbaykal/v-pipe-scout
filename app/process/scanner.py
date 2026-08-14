@@ -116,23 +116,29 @@ def scan_unexplained_patterns(
         for variant, sig in cowwid_not_in_panel.items():
             if _sig_explains(present, sig):
                 if variant not in missing_hits:
-                    missing_hits[variant] = {"total_reads": 0, "pattern_count": 0}
+                    missing_hits[variant] = {
+                        "total_reads": 0,
+                        "pattern_count": 0,
+                        "observed_mutations": set(),  # mutations seen in unexplained patterns
+                    }
                 missing_hits[variant]["total_reads"] += count
                 missing_hits[variant]["pattern_count"] += 1
-                bucket1_explained.add(idx)
+                missing_hits[variant]["observed_mutations"].update(present & sig)
 
     missing_from_panel = sorted(
-        [{"variant": v, **s} for v, s in missing_hits.items()],
+        [{
+            "variant": v,
+            "total_reads": s["total_reads"],
+            "pattern_count": s["pattern_count"],
+            "observed_mutations": sorted(s["observed_mutations"]),
+        } for v, s in missing_hits.items()],
         key=lambda x: -x["total_reads"],
     )
 
     # ── Bucket 2: emerging sublineages ───────────────────────────────────────
     emerging_hits: Dict[str, dict] = {}
-    bucket2_explained = set()
 
     for idx, row in patterns.iterrows():
-        if idx in bucket1_explained:
-            continue
         present = set(row["confirmed_present"])
         count = int(row["count"])
         for lineage, sig in all_lineage_signatures.items():
@@ -150,13 +156,20 @@ def scan_unexplained_patterns(
                     "parent": panel_parent,
                     "total_reads": 0,
                     "pattern_count": 0,
+                    "observed_mutations": set(),
                 }
             emerging_hits[lineage]["total_reads"] += count
             emerging_hits[lineage]["pattern_count"] += 1
-            bucket2_explained.add(idx)
+            emerging_hits[lineage]["observed_mutations"].update(present & sig)
 
     emerging_sublineage = sorted(
-        [{"lineage": l, **s} for l, s in emerging_hits.items()],
+        [{
+            "lineage": l,
+            "parent": s["parent"],
+            "total_reads": s["total_reads"],
+            "pattern_count": s["pattern_count"],
+            "observed_mutations": sorted(s["observed_mutations"]),
+        } for l, s in emerging_hits.items()],
         key=lambda x: -x["total_reads"],
     )
 
@@ -166,8 +179,6 @@ def scan_unexplained_patterns(
     all_lineage_sigs = list(all_lineage_signatures.values())
 
     for idx, row in patterns.iterrows():
-        if idx in bucket1_explained or idx in bucket2_explained:
-            continue
         present = set(row["confirmed_present"])
         count = int(row["count"])
         if any(_sig_explains(present, sig) for sig in all_lineage_sigs):

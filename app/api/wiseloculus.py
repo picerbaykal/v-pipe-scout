@@ -4,7 +4,7 @@ import logging
 import aiohttp
 import asyncio
 import re
-from typing import Optional, List, Tuple, Any
+from typing import Optional, List, Tuple, Any, Dict
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -581,6 +581,86 @@ class WiseLoculusLapis(Lapis):
             f"{locationName} | positions={positions}"
         )
         return pd.DataFrame(all_rows)
+
+    async def get_queries_over_time(
+            self,
+            locationName: str,
+            date_range: Tuple[datetime, datetime],
+            queries: List[Dict[str, str]],
+            date_granularity: str = "week",
+    ) -> dict:
+        """
+        Fetch mutation frequencies over time using the queriesOverTime endpoint.
+
+        Args:
+            locationName: Location filter e.g. "Lugano (TI)"
+            date_range: (start, end) datetime tuple
+            queries: List of dicts with keys:
+                - countQuery: advanced query string e.g. "main:23018T"
+                - coverageQuery: denominator query e.g. "!main:23018N"
+                - displayLabel: label for the result (optional)
+            date_granularity: "day", "week", or "month"
+
+        Returns:
+            Raw response dict with keys:
+                queries: list of display labels
+                dateRanges: list of {dateFrom, dateTo}
+                data: list[query_index][date_range_index] = {count, coverage}
+        """
+        start, end = date_range
+
+        # build weekly date ranges from start to end
+        date_ranges = []
+        if date_granularity == "week":
+            current = start
+            while current <= end:
+                week_end = min(current + timedelta(days=6), end)
+                date_ranges.append({
+                    "dateFrom": current.strftime("%Y-%m-%d"),
+                    "dateTo": week_end.strftime("%Y-%m-%d"),
+                })
+                current = week_end + timedelta(days=1)
+        elif date_granularity == "month":
+            from calendar import monthrange
+            current = start.replace(day=1)
+            while current <= end:
+                last_day = monthrange(current.year, current.month)[1]
+                month_end = min(current.replace(day=last_day), end)
+                date_ranges.append({
+                    "dateFrom": current.strftime("%Y-%m-%d"),
+                    "dateTo": month_end.strftime("%Y-%m-%d"),
+                })
+                # move to first day of next month
+                if current.month == 12:
+                    current = current.replace(year=current.year + 1, month=1, day=1)
+                else:
+                    current = current.replace(month=current.month + 1, day=1)
+        else:  # day
+            current = start
+            while current <= end:
+                date_ranges.append({
+                    "dateFrom": current.strftime("%Y-%m-%d"),
+                    "dateTo": current.strftime("%Y-%m-%d"),
+                })
+                current += timedelta(days=1)
+
+        payload = {
+            "filters": {"locationName": locationName},
+            "dateField": "samplingDate",
+            "queries": queries,
+            "dateRanges": date_ranges,
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                    f"{self.server_ip}/component/queriesOverTime",
+                    json=payload,
+                    headers={"accept": "application/json"},
+            ) as response:
+                result = await response.json()
+                if "error" in result:
+                    raise RuntimeError(result["error"])
+                return result.get("data", {})
 
 
     async def get_date_range(self) -> Tuple[Optional[datetime], Optional[datetime]]:
