@@ -82,12 +82,6 @@ def scan_unexplained_patterns(
             total_unexplained_reads: int
             summary: human-readable one-line summary
     """
-    # NOTE on "possibly new" coverage:
-    # Currently checks patterns only at ~421 positions from known variant signatures.
-    # When SaneQL deploys, expand to all covered positions (non-N reads > threshold)
-    # for comprehensive novel variant detection. Zero-coverage positions should be
-    # excluded from the query set — no coverage means no signal to detect.
-    # See: worker/cooc.py TODO for the SaneQL migration plan.
     if unexplained_patterns.empty:
         return _empty_result("No unexplained patterns to classify.")
 
@@ -114,7 +108,6 @@ def scan_unexplained_patterns(
 
     # ── Bucket 1: missing cowwid tracked variants ─────────────────────────────
     missing_hits: Dict[str, dict] = {}
-    bucket1_explained = set()  # pattern indices explained by bucket 1
 
     for idx, row in patterns.iterrows():
         present = set(row["confirmed_present"])
@@ -125,7 +118,7 @@ def scan_unexplained_patterns(
                     missing_hits[variant] = {
                         "total_reads": 0,
                         "pattern_count": 0,
-                        "observed_mutations": set(),  # mutations seen in unexplained patterns
+                        "observed_mutations": set(),
                     }
                 missing_hits[variant]["total_reads"] += count
                 missing_hits[variant]["pattern_count"] += 1
@@ -157,11 +150,15 @@ def scan_unexplained_patterns(
             )
             if not is_desc:
                 continue
-            # only count if pattern contains at least one private mutation
-            # (not just inherited from parent panel variant)
             parent_sig = all_lineage_signatures.get(panel_parent, set())
             private_sig = sig - parent_sig
-            if not (present & private_sig):
+            private_observed = present & private_sig
+            # require >=2 co-occurring private mutations — matches the
+            # process/cooc.py uninformative cutoff and eliminates single-
+            # position sublineages that cannot be distinguished from noise
+            # (e.g. a sublineage whose only private mutation is one position
+            # appearing at high frequency — indistinguishable from drift)
+            if len(private_observed) < 2:
                 continue
             if lineage not in emerging_hits:
                 emerging_hits[lineage] = {
@@ -172,7 +169,21 @@ def scan_unexplained_patterns(
                 }
             emerging_hits[lineage]["total_reads"] += count
             emerging_hits[lineage]["pattern_count"] += 1
-            emerging_hits[lineage]["observed_mutations"].update(present & private_sig)
+            emerging_hits[lineage]["observed_mutations"].update(private_observed)
+
+    # deduplicate by observed-mutation fingerprint:
+    # sublineages matching the exact same private mutations are explaining
+    # the same reads (signature overlap). Keep the most specific lineage —
+    # deepest pango designation (most dots = most specific).
+    fingerprint_to_lineages: dict = {}
+    for l, s in emerging_hits.items():
+        fp = frozenset(s["observed_mutations"])
+        fingerprint_to_lineages.setdefault(fp, []).append(l)
+
+    deduped: dict = {}
+    for fp, lineages in fingerprint_to_lineages.items():
+        winner = max(lineages, key=lambda x: (len(x.split(".")), x))
+        deduped[winner] = emerging_hits[winner]
 
     emerging_sublineage = sorted(
         [{
@@ -181,7 +192,7 @@ def scan_unexplained_patterns(
             "total_reads": s["total_reads"],
             "pattern_count": s["pattern_count"],
             "observed_mutations": sorted(s["observed_mutations"]),
-        } for l, s in emerging_hits.items()],
+        } for l, s in deduped.items()],
         key=lambda x: -x["total_reads"],
     )
 
