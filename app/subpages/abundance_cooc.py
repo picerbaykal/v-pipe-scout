@@ -68,7 +68,15 @@ def cached_get_variant_names() -> list:
     return get_variant_names()
 
 def _render_completeness(result: dict) -> None:
-    """Plot per-date panel completeness with an informative-read count below."""
+    """Plot per-date panel completeness.
+
+    Shows the raw per-date completeness as faint markers (size ∝ informative
+    reads) plus a read-weighted smoothed line. Weighting by informative reads
+    means sparse dates (few reads, noisy completeness) barely move the smoothed
+    curve, while high-read dates anchor it — directly addressing the
+    "sparse dates give unstable values" problem.
+    """
+    import numpy as np
     import pandas as pd
     import plotly.graph_objects as go
 
@@ -81,28 +89,61 @@ def _render_completeness(result: dict) -> None:
         "matched": result["matched_counts"],
         "unexplained": result["unexplained_counts"],
         "completeness": result["completeness"],
-    })
+    }).sort_values("date").reset_index(drop=True)
     df["informative"] = df["matched"] + df["unexplained"]
 
-    fig = go.Figure(go.Scatter(
-        x=df["date"], y=df["completeness"],
-        mode="lines+markers",
-        marker=dict(size=[6 + min(8, n / 5000) for n in df["informative"]]),
-        line=dict(width=1.5),
+    # ── read-weighted rolling smoother ───────────────────────────────────────
+    # smoothed[i] = Σ(completeness·weight) / Σ(weight) over a centered window,
+    # weight = informative reads. NaN completeness (no informative reads) is
+    # dropped from both numerator and denominator so it neither biases nor
+    # breaks the average.
+    WINDOW = 5  # centered window in sampling points; tune to taste
+    comp = pd.to_numeric(df["completeness"], errors="coerce")
+    w = df["informative"].astype(float).where(comp.notna(), 0.0)
+    cw = (comp.fillna(0.0) * w)
+    num = cw.rolling(WINDOW, center=True, min_periods=1).sum()
+    den = w.rolling(WINDOW, center=True, min_periods=1).sum()
+    df["smoothed"] = np.where(den > 0, num / den, np.nan)
+
+    fig = go.Figure()
+
+    # raw points — faint, size scales with informative reads
+    fig.add_trace(go.Scatter(
+        x=df["date"], y=comp,
+        mode="markers",
+        marker=dict(
+            size=[6 + min(8, n / 5000) for n in df["informative"]],
+            color="rgba(120,120,120,0.35)",
+        ),
+        name="per-date",
         customdata=df[["informative"]],
         hovertemplate="%{x|%Y-%m-%d}<br>completeness %{y:.1%}"
                       "<br>%{customdata[0]:,} informative reads<extra></extra>",
     ))
+
+    # smoothed line — the primary read
+    fig.add_trace(go.Scatter(
+        x=df["date"], y=df["smoothed"],
+        mode="lines",
+        line=dict(width=2.5, color="#4C6EF5", shape="spline"),
+        name="weighted smoothed",
+        hovertemplate="%{x|%Y-%m-%d}<br>smoothed %{y:.1%}<extra></extra>",
+    ))
+
     fig.update_yaxes(range=[-0.05, 1.05], tickformat=".0%", title="completeness")
-    fig.update_layout(height=200, margin=dict(t=10, b=30, l=50, r=20),
-                      template="plotly_white")
+    fig.update_layout(
+        height=220, margin=dict(t=10, b=30, l=50, r=20),
+        template="plotly_white",
+        legend=dict(orientation="h", yanchor="bottom", y=1.0, x=0),
+        showlegend=True,
+    )
     st.plotly_chart(fig, use_container_width=True)
     st.caption(
-        f"Marker size scales with informative reads "
+        f"Line = read-weighted smoothed (window {WINDOW}). Points = per-date, "
+        f"size scales with informative reads "
         f"({df['informative'].min():,}–{df['informative'].max():,} across dates). "
-        "Sparse dates give unstable values."
+        "Weighting lets high-read dates anchor the curve and down-weights sparse ones."
     )
-
 
 
 def app():
