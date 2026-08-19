@@ -3,13 +3,21 @@
 Given a location, date range, and panel variants, computes per-date panel
 completeness by:
 1. Building amp_dict + variant_signatures from panel variants.
-2. Loading amplicons from BED, grouping panel positions by amplicon,
-   splitting by read-length distance → query batches.
+2. Loading amplicons from BED, grouping panel positions by amplicon → query
+   batches (one batch per amplicon; positions within an amplicon co-occur).
 3. For each batch, calling LAPIS /aggregated for read-level co-occurrence.
 4. Annotating results (confirmed_present/absent/classification).
 5. Aggregating matched vs unexplained counts per date across batches.
 
 Returns a dict shaped for JSON serialization back through Celery.
+
+Note (2026-08): the LAPIS co-occurrence endpoint (PR #1768, `[position]`
+bracket fields in /aggregated) is now deployed on WASAP. Benchmarks show
+~0.1s per co-occurrence query regardless of position count (to 12+), and a
+full multi-amplicon sweep of all sampling dates runs in ~5s at 16-way
+concurrency. There is therefore no longer any need to truncate the date
+range for speed — the `scope.weeks` clamp has been removed from the default
+path.
 """
 
 import asyncio
@@ -30,12 +38,16 @@ from process.amplicons import (
     build_amp_dict_from_variants,
     group_positions_by_amplicon,
     load_amplicons,
-    split_positions_by_distance,
 )
 from process.cooc import annotate_cooc_dataframe, panel_completeness_by_date
 from utils.config import get_wiseloculus_url
 
 logger = logging.getLogger(__name__)
+
+# Concurrency cap for parallel batch queries. Benchmarks (2026-08) show
+# near-linear scaling to 16 workers with no server-side rate-limiting;
+# 16 roughly halves wall time vs 8 for a full sweep.
+BATCH_CONCURRENCY = 16
 
 
 def _load_cowwid_variants() -> dict:
@@ -59,13 +71,11 @@ def _load_cowwid_variants() -> dict:
         return {}
 
 
-# existing
 _COWWID_VARIANTS = _load_cowwid_variants()
 
-# add these two after
+
 def _load_all_lineage_signatures() -> dict:
     """Load all pango lineage signatures at startup. Cached for scanner use."""
-    import re
     try:
         pl = PangoLoader(get_pango_summary_path())
         raw = pl.get_raw_data()
@@ -111,6 +121,7 @@ def get_panel_parent_map() -> dict:
     if _PANEL_PARENT_MAP is None:
         _PANEL_PARENT_MAP = _load_panel_parent_map()
     return _PANEL_PARENT_MAP
+
 
 def _build_variant_signatures(
     variants: List[str],
@@ -160,16 +171,11 @@ def run_cooc_panel_completeness(
 
     from utils.config import get_cooc_setting
 
-    scope_weeks = get_cooc_setting("scope.weeks", default=None)
-    if scope_weeks:
-        from datetime import timedelta
-        clamped = end_date - timedelta(weeks=int(scope_weeks))
-        if clamped > start_date:
-            logger.info(
-                f"[cooc][{location}] scope.weeks={scope_weeks} — "
-                f"clamping start {start_date.date()} → {clamped.date()}"
-            )
-            start_date = clamped
+    # NOTE: the former `scope.weeks` start-date clamp has been removed.
+    # Co-occurrence queries are now fast enough (~5s full sweep) to run over
+    # the full requested date range without truncation. If a genuine upper
+    # bound on range is ever needed again, enforce it in the UI/date-picker
+    # rather than silently clamping here.
 
     def _progress(step: int, msg: str):
         if progress_callback:
@@ -214,27 +220,14 @@ def run_cooc_panel_completeness(
         f"{len(variants)} variants"
     )
 
-    _progress(2, "Grouping positions by amplicon + read-length distance")
-    # TODO: when SaneQL REST endpoint deploys, replace per-amplicon batching with:
-    # 1. Coverage scan: query positions with non-N reads > MIN_COVERAGE threshold
-    #    (skip positions with no real coverage — no point querying them)
-    # 2. Single SaneQL query for all covered positions in one request:
-    #    default
-    #    .filter(locationName == location & samplingDate in date_range)
-    #    .map({"pos1" := main.at(pos1), "pos2" := main.at(pos2), ...covered_positions...})
-    #    .groupBy({count := count()}, {pos1, pos2, ..., samplingDate})
-    #    This gives full genome co-occurrence without BED file or amplicon batching.
-    #    For "possibly new" detection: expand position set beyond known variant signatures
-    #    to all covered positions (~500-1000 on a typical date) for comprehensive novel
-    #    variant detection. Zero-coverage positions are excluded by the coverage scan,
-    #    keeping the query fast (~2-5s estimated based on 130-position benchmark).
+    _progress(2, "Grouping positions by amplicon")
+    # One batch per amplicon — positions within an amplicon co-occur on a read,
+    # positions across amplicons cannot. No sub-splitting by read-length is
+    # needed: a single co-occurrence query with all of an amplicon's positions
+    # is ~0.1s regardless of position count (LAPIS PR #1768, benchmarked 2026-08).
     amplicons = load_amplicons(Path(bed_path))
     amp_groups = group_positions_by_amplicon(positions, amplicons)
-    batches = list(amp_groups.items())
-    amplicons = load_amplicons(Path(bed_path))
-    # new — one batch per amplicon, all positions together
-    amp_groups = group_positions_by_amplicon(positions, amplicons)
-    batches = list(amp_groups.items())  # (amplicon_name, positions) directly
+    batches = list(amp_groups.items())  # (amplicon_name, positions)
     logger.info(
         f"[cooc][{location}] {len(batches)} query batches "
         f"(from {len(amp_groups)} amplicons)"
@@ -247,9 +240,9 @@ def run_cooc_panel_completeness(
         dates = await client._get_sampling_dates(location, (start_date, end_date))
         logger.info(f"[cooc][{location}] {len(dates)} sampling dates")
         if not dates:
-            return []
+            return [], []
 
-        sem = asyncio.Semaphore(8)  # cap concurrent batches
+        sem = asyncio.Semaphore(BATCH_CONCURRENCY)
 
         async def _one_batch(i, amp_name, batch_positions):
             async with sem:
