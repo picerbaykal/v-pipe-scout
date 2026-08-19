@@ -30,8 +30,8 @@ FALLBACK_START_DATE, FALLBACK_END_DATE = get_fallback_date_range()
 
 # Connection pool limits to prevent "too many open files" errors
 # These limits control the maximum number of concurrent HTTP connections
-MAX_CONCURRENT_CONNECTIONS = 50  # Total connections per session
-MAX_CONNECTIONS_PER_HOST = 30    # Connections per host
+MAX_CONCURRENT_CONNECTIONS = 100  # Total connections per session
+MAX_CONNECTIONS_PER_HOST = 50    # Connections per host
 
 class WiseLoculusLapis(Lapis):
     """Wise-Loculus Instance API"""

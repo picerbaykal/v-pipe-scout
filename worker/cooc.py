@@ -319,7 +319,17 @@ def run_cooc_panel_completeness(
 
         return completeness_results, pattern_results
 
-    per_batch_results, pattern_results = asyncio.run(_query_all_batches())
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                future = pool.submit(asyncio.run, _query_all_batches())
+                per_batch_results, pattern_results = future.result()
+        else:
+            per_batch_results, pattern_results = loop.run_until_complete(_query_all_batches())
+    except RuntimeError:
+        per_batch_results, pattern_results = asyncio.run(_query_all_batches())
 
     _progress(4, "Aggregating across batches")
     if not per_batch_results:
