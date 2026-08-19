@@ -8,6 +8,9 @@ Rendered as HTML/JS via streamlit.components.v1 for precise visual control.
 
 Green = distinct signatures (low overlap).
 Red = near-identical signatures (high overlap, harder to discriminate).
+
+Only the lower triangle is shown (rows > cols) — the upper triangle
+mirrors it and the diagonal is always 1.0, so both are redundant.
 """
 from __future__ import annotations
 
@@ -49,6 +52,8 @@ def render_jaccard_heatmap(
 ) -> None:
     """
     Render a Jaccard similarity heatmap for the selected variants.
+    Only the lower triangle is shown — upper triangle mirrors it
+    and diagonal is always 1.0, so both are redundant.
 
     Args:
         variants: List of selected pango lineage names
@@ -65,8 +70,11 @@ def render_jaccard_heatmap(
 
     cell_px = 52
     label_w = max(len(v) for v in variants) * 7 + 16
-    table_w = label_w + len(variants) * (cell_px + 2) + 20
-    table_h = len(variants) * (cell_px - 8 + 2) + 80
+    # lower triangle: row i shows columns 0..i-1 (skip col i and above)
+    # so table width only needs to fit up to n-1 columns
+    n = len(variants)
+    table_w = label_w + (n - 1) * (cell_px + 2) + 20
+    table_h = (n - 1) * (cell_px - 8 + 2) + 80
 
     html = f"""
 <!DOCTYPE html>
@@ -83,6 +91,7 @@ th{{font-size:11px;font-weight:400;color:#888;padding:3px 6px;white-space:nowrap
 th.rh{{text-align:right;padding-right:10px;min-width:{label_w}px;}}
 td{{width:{cell_px}px;height:44px;text-align:center;font-size:11px;
     font-weight:500;border:2px solid #fff;}}
+td.empty{{background:transparent;}}
 .scale-wrap{{display:flex;align-items:center;gap:8px;margin-top:12px;}}
 .scale-bar{{height:7px;width:140px;border-radius:3px;}}
 .sl{{display:flex;justify-content:space-between;width:140px;
@@ -102,7 +111,7 @@ td{{width:{cell_px}px;height:44px;text-align:center;font-size:11px;
   </div>
   <span style="font-size:10px;color:#888;">identical</span>
 </div>
-<div class="cap">Green = distinct signatures. Red = near-identical, harder to discriminate in deconvolution. Diagonal = variant vs itself (1.0).</div>
+<div class="cap">Green = distinct signatures. Red = near-identical, harder to discriminate in deconvolution.<br>Lower triangle only — values are symmetric.</div>
 
 <script>
 const variants = {variants_json};
@@ -138,39 +147,52 @@ function textColor(hex) {{
 }}
 
 const table = document.createElement('table');
+
+// header row: empty corner + column labels for cols 0..n-2
+// (col n-1 never appears — the last variant only appears as a row label)
 const thead = document.createElement('tr');
 const corner = document.createElement('th');
-corner.className='rh';
+corner.className = 'rh';
 thead.appendChild(corner);
-variants.forEach(v=>{{
-  const th=document.createElement('th');
-  th.textContent=v;
+for (let j = 0; j < variants.length - 1; j++) {{
+  const th = document.createElement('th');
+  th.textContent = variants[j];
   thead.appendChild(th);
-}});
+}}
 table.appendChild(thead);
 
-values.forEach((row,i)=>{{
-  const tr=document.createElement('tr');
-  const th=document.createElement('th');
-  th.className='rh';
-  th.textContent=variants[i];
+// rows: start from i=1 (variant 1 has no lower-triangle cells to show for i=0)
+for (let i = 1; i < variants.length; i++) {{
+  const tr = document.createElement('tr');
+  const th = document.createElement('th');
+  th.className = 'rh';
+  th.textContent = variants[i];
   tr.appendChild(th);
-  row.forEach((val,j)=>{{
-    const td=document.createElement('td');
-    const bg=interpolate(val);
-    td.style.background=bg;
-    td.style.color=textColor(bg);
-    td.textContent=val.toFixed(2);
-    td.title=`${{variants[i]}} ↔ ${{variants[j]}}: ${{val.toFixed(3)}}`;
+
+  for (let j = 0; j < variants.length - 1; j++) {{
+    const td = document.createElement('td');
+    if (j < i) {{
+      // lower triangle — show the value
+      const val = values[i][j];
+      const bg = interpolate(val);
+      td.style.background = bg;
+      td.style.color = textColor(bg);
+      td.textContent = val.toFixed(2);
+      td.title = variants[i] + ' \u2194 ' + variants[j] + ': ' + val.toFixed(3);
+    }} else {{
+      // upper triangle + diagonal — leave empty
+      td.className = 'empty';
+    }}
     tr.appendChild(td);
-  }});
+  }}
   table.appendChild(tr);
-}});
+}}
+
 document.getElementById('heatmap').appendChild(table);
 </script>
 </body>
 </html>
 """
 
-    height = table_h + 80
+    height = table_h + 100
     components.html(html, height=height, scrolling=False)

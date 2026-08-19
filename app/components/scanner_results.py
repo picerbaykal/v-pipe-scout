@@ -221,17 +221,21 @@ def render_scanner_results(
                 "Officially tracked variants not in your panel that explain unexplained reads. "
                 "Add them to improve completeness."
             )
+            import re
+            try:
+                from api.pango_loader import PangoLoader, get_pango_summary_path
+                _pl = PangoLoader(get_pango_summary_path())
+            except Exception:
+                _pl = None
+
             for item in missing:
-                import re
                 variant = item["variant"]
                 reads = item["total_reads"]
                 n_patterns = item["pattern_count"]
 
                 # get candidate signature for Jaccard check
                 try:
-                    from api.pango_loader import PangoLoader, get_pango_summary_path
-                    pl = PangoLoader(get_pango_summary_path())
-                    raw_sig = pl.get_signature(variant)
+                    raw_sig = _pl.get_signature(variant) if _pl else []
                     candidate_sig = {m for m in raw_sig if re.match(r'^\d+[ACGT]$', m)}
                 except Exception:
                     candidate_sig = set()

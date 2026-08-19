@@ -468,6 +468,16 @@ def app():
                             location, task_id, celery_app, redis_client
                         )
 
+                    # 3. Jaccard heatmap — collapsed, right after deconvolution
+                    if len(all_selected_variants) >= 2:
+                        with st.expander("Signature similarity (Jaccard)", expanded=False):
+                            render_jaccard_heatmap(
+                                variants=all_selected_variants,
+                                pango_loader=cached_get_pango_loader(),
+                            )
+
+
+
             # ── Scanner (global, synchronous) ────────────────────────────────────
             st.markdown("---")
             st.markdown("#### Scanner")
@@ -565,13 +575,7 @@ def app():
                             )
 
 
-        # ── Signature similarity ──────────────────────────────────────────────
-        if len(all_selected_variants) >= 2:
-            st.markdown("---")
-            render_jaccard_heatmap(
-                variants=all_selected_variants,
-                pango_loader=cached_get_pango_loader(),
-            )
+
 
 
 
