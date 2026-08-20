@@ -395,11 +395,10 @@ def app():
 
             location_names = list(location_tasks.keys())
 
-            # city tabs + summary at the end
-            tab_labels = [f"📍 {loc}" for loc in location_names] + ["📊 Summary"]
+            tab_labels = ["📊 Summary"] + [f"📍 {loc}" for loc in location_names]
             all_tabs = st.tabs(tab_labels)
-            city_tabs = all_tabs[:-1]
-            summary_tab = all_tabs[-1]
+            summary_tab = all_tabs[0]
+            city_tabs = all_tabs[1:]
 
             added_for = st.session_state.get("acooc_scanner_added_for", {})
 
