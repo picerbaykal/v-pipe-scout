@@ -484,7 +484,7 @@ def app():
                                 st.session_state["acooc_scanner_panels"] = scanner_panels
                                 scanner_results.pop(location, None)
                                 st.session_state["acooc_scanner_results"] = scanner_results
-                                st.rerun()
+                                # st.rerun() - autorefresh picks up the new task
                         else:
                             st.caption("Available after completeness.")
 
