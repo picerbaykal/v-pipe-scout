@@ -230,6 +230,8 @@ def render_scanner_results(
 
             for item in missing:
                 variant = item["variant"]
+                if variant in selected_variants:
+                    continue
                 reads = item["total_reads"]
                 n_patterns = item["pattern_count"]
 
