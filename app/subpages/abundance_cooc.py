@@ -497,57 +497,97 @@ def app():
                         if st.button("⬇ Download report", key="acooc_dl_report", use_container_width=True):
                             st.session_state["acooc_show_report"] = True
 
-            # city cards grid
-            _city_cols = st.columns(min(3, len(location_names)))
-            for _ci, _loc in enumerate(location_names):
+            # ── Compact progress rows ─────────────────────────────────────────
+            st.markdown(
+                "<div style='display:flex;gap:10px;margin-bottom:4px;font-size:10px;color:#898781;'>"
+                "<span style='display:flex;align-items:center;gap:3px;'>"
+                "<span style='width:12px;height:3px;border-radius:2px;background:#3B6D11;display:inline-block;'></span>done</span>"
+                "<span style='display:flex;align-items:center;gap:3px;'>"
+                "<span style='width:12px;height:3px;border-radius:2px;background:#93C5FD;display:inline-block;'></span>running</span>"
+                "<span style='display:flex;align-items:center;gap:3px;'>"
+                "<span style='width:12px;height:3px;border-radius:2px;background:#E5E3DC;display:inline-block;'></span>pending</span>"
+                "<span style='margin-left:6px;'>deconv · completeness · scanner</span></div>",
+                unsafe_allow_html=True,
+            )
+            def _dot_color(done, running):
+                return "#3B6D11" if done else ("#93C5FD" if running else "#E5E3DC")
+
+            for _loc in location_names:
                 _pct, _n_miss, _scan_done, _scan_running, _deconv_done, _cooc_done, _deconv_running, _cooc_running = _city_status(_loc)
-                with _city_cols[_ci % 3]:
-                    # dot states
-                    def _dot(done, running):
-                        if done: return "#3B6D11"
-                        if running: return "#93C5FD"
-                        return "#E5E3DC"
+                _c1 = _dot_color(_deconv_done, _deconv_running)
+                _c2 = _dot_color(_cooc_done, _cooc_running)
+                _c3 = _dot_color(_scan_done, _scan_running)
+                _pct_str = f"{_pct}%" if _pct is not None else "—"
+                if _scan_done:
+                    _badge = f"⚠ {_n_miss} missing" if _n_miss > 0 else ("✓ complete" if _pct is not None and _pct >= 95 else "✓ scanned")
+                    _badge_bg, _badge_col = ("#FCEBEB","#A32D2D") if _n_miss > 0 else ("#EAF3DE","#3B6D11")
+                elif _scan_running:
+                    _badge, _badge_bg, _badge_col = "scanning…","#EFF6FF","#1E40AF"
+                elif _cooc_running or _deconv_running:
+                    _badge, _badge_bg, _badge_col = "running…","#EFF6FF","#1E40AF"
+                else:
+                    _badge, _badge_bg, _badge_col = "queued","#F1EFE8","#898781"
+                st.markdown(
+                    f"<div style='display:flex;align-items:center;gap:8px;padding:4px 0;"
+                    f"border-bottom:0.5px solid rgba(0,0,0,.06);'>"
+                    f"<span style='font-size:11px;font-weight:500;width:90px;flex:none;"
+                    f"overflow:hidden;text-overflow:ellipsis;white-space:nowrap;'>{_loc.split('(')[0].strip()}</span>"
+                    f"<div style='display:flex;gap:2px;flex:none;'>"
+                    f"<div style='width:16px;height:4px;border-radius:2px;background:{_c1};'></div>"
+                    f"<div style='width:16px;height:4px;border-radius:2px;background:{_c2};'></div>"
+                    f"<div style='width:16px;height:4px;border-radius:2px;background:{_c3};'></div>"
+                    f"</div>"
+                    f"<span style='font-size:10px;color:#898781;width:28px;flex:none;text-align:right;'>{_pct_str}</span>"
+                    f"<span style='font-size:10px;padding:1px 5px;border-radius:5px;"
+                    f"background:{_badge_bg};color:{_badge_col};flex:none;'>{_badge}</span>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
 
-                    _c1 = _dot(_deconv_done, _deconv_running)
-                    _c2 = _dot(_cooc_done, _cooc_running)
-                    _c3 = _dot(_scan_done, _scan_running)
-                    _pct_str = f"{_pct}%" if _pct is not None else "—"
-                    if _scan_done:
-                        _badge = f"⚠ {_n_miss} missing" if _n_miss > 0 else ("✓ complete" if _pct is not None and _pct >= 95 else "✓ scanned")
-                        _badge_bg = "#FCEBEB" if _n_miss > 0 else "#EAF3DE"
-                        _badge_col = "#A32D2D" if _n_miss > 0 else "#3B6D11"
-                    elif _scan_running:
-                        _badge, _badge_bg, _badge_col = "scanning…", "#EFF6FF", "#1E40AF"
-                    elif _cooc_running or _deconv_running:
-                        _badge, _badge_bg, _badge_col = "running…", "#EFF6FF", "#1E40AF"
-                    else:
-                        _badge, _badge_bg, _badge_col = "pending", "#F1EFE8", "#898781"
-                    _is_sel = st.session_state.get("acooc_selected_city","") == f"📍 {_loc}"
-                    _border = "#E24B4A" if _is_sel else ("#97C459" if _scan_done and _n_miss==0 else "#93C5FD" if _scan_running or _cooc_running or _deconv_running else "rgba(0,0,0,.08)")
-                    st.markdown(
-                        f"<div style='border:1.5px solid {_border};border-radius:8px;padding:7px 9px;margin-bottom:4px;'>"
-                        f"<div style='font-size:11px;font-weight:500;margin-bottom:4px;'>{_loc.split('(')[0].strip()}</div>"
-                        f"<div style='display:flex;gap:3px;margin-bottom:4px;' title='deconvolution · completeness · scanner'>"
-                        f"<div style='width:22px;height:5px;border-radius:3px;background:{_c1};'></div>"
-                        f"<div style='width:22px;height:5px;border-radius:3px;background:{_c2};'></div>"
-                        f"<div style='width:22px;height:5px;border-radius:3px;background:{_c3};'></div>"
-                        f"</div>"
-                        f"<div style='display:flex;align-items:center;justify-content:space-between;'>"
-                        f"<span style='font-size:10px;color:#898781;'>{_pct_str}</span>"
-                        f"<span style='font-size:10px;padding:1px 5px;border-radius:5px;background:{_badge_bg};color:{_badge_col};'>{_badge}</span>"
-                        f"</div></div>",
-                        unsafe_allow_html=True,
-                    )
-                    if st.button(f"View {_loc.split('(')[0].strip()}", key=f"acooc_view_{_loc}", use_container_width=True):
-                        st.session_state["acooc_selected_city"] = f"📍 {_loc}"
+            st.markdown("<hr style='margin:8px 0 6px;opacity:.15;'>", unsafe_allow_html=True)
 
-            st.markdown("<hr style='margin:8px 0 10px;opacity:.15;'>", unsafe_allow_html=True)
-
-            # city selection driven by View buttons on cards — no separate radio needed
+            # ── Tab strip ────────────────────────────────────────────────────
             _city_options = [f"📍 {loc}" for loc in location_names]
-            if "acooc_selected_city" not in st.session_state or                st.session_state.get("acooc_selected_city") not in _city_options:
+            if ("acooc_selected_city" not in st.session_state or
+                    st.session_state.get("acooc_selected_city") not in _city_options):
                 st.session_state["acooc_selected_city"] = _city_options[0] if _city_options else ""
-            _selected = st.session_state.get("acooc_selected_city", "")
+
+            # HTML visual tab strip
+            _tab_html = (
+                "<div style='display:flex;gap:0;background:#fff;border:0.5px solid rgba(0,0,0,.08);"
+                "border-radius:10px;overflow:hidden;margin-bottom:4px;'>"
+            )
+            for _ti, _loc in enumerate(location_names):
+                _p2, _nm2, _sd2, _sr2, _dd2, _cd2, _dr2, _cr2 = _city_status(_loc)
+                _dc1 = _dot_color(_dd2, _dr2)
+                _dc2 = _dot_color(_cd2, _cr2)
+                _dc3 = _dot_color(_sd2, _sr2)
+                _is_on = st.session_state.get("acooc_selected_city","") == f"📍 {_loc}"
+                _ts = "border-bottom:2px solid #E24B4A;font-weight:500;background:#faf9f5;" if _is_on else "border-bottom:2px solid transparent;"
+                _br = "" if _ti == len(location_names)-1 else "border-right:0.5px solid rgba(0,0,0,.06);"
+                _sn = _loc.split("(")[0].strip()
+                _tc = "#0b0b0b" if _is_on else "#898781"
+                _tab_html += (
+                    f"<div style='padding:6px 10px;font-size:11px;flex:1;text-align:center;color:{_tc};{_ts}{_br}'>"
+                    f"<div style='display:flex;gap:2px;justify-content:center;margin-bottom:2px;'>"
+                    f"<div style='width:10px;height:3px;border-radius:2px;background:{_dc1};'></div>"
+                    f"<div style='width:10px;height:3px;border-radius:2px;background:{_dc2};'></div>"
+                    f"<div style='width:10px;height:3px;border-radius:2px;background:{_dc3};'></div>"
+                    f"</div>{_sn}</div>"
+                )
+            _tab_html += "</div>"
+            st.markdown(_tab_html, unsafe_allow_html=True)
+
+            # invisible radio drives actual selection (hidden via CSS)
+            _selected = st.radio(
+                "City", options=_city_options, horizontal=True,
+                label_visibility="collapsed", key="acooc_selected_city",
+            )
+            st.markdown(
+                "<style>div[data-testid='stRadio']{display:none!important;}</style>",
+                unsafe_allow_html=True,
+            )
+            st.markdown("<hr style='margin:2px 0 10px;opacity:.1;'>", unsafe_allow_html=True)
 
             def _city_tab_content(location, task_id):
                 """Shared content for both active and idle city tab fragments."""
@@ -617,14 +657,9 @@ def app():
                 if location in _scanner_results:
                     _stale2 = set(_scanner_panels.get(location, [])) != set(all_selected_variants)
                     if _stale2:
-                        st.warning("Panel changed since last scan — re-run scanner.")
+                        st.warning("Panel changed — re-run analysis to refresh scanner.")
 
-                    def _add_variant(v, _loc=location):
-                        st.session_state[f"acooc_add_variant_pending_{_loc}"] = v
-                        _af2 = st.session_state.get("acooc_scanner_added_for", {})
-                        _af2[v] = _loc
-                        st.session_state["acooc_scanner_added_for"] = _af2
-
+                    # scanner is read-only — no add button
                     render_scanner_results(
                         _scanner_results[location],
                         selected_variants=all_selected_variants,
@@ -634,70 +669,118 @@ def app():
                             datetime.combine(start_date, datetime.min.time()),
                             datetime.combine(end_date, datetime.min.time()),
                         ),
-                        on_add_variant=_add_variant,
+                        on_add_variant=None,
                     )
-
-                    _loc_added = [
-                        v for v, l in _added_for.items()
-                        if l == location and v in all_selected_variants
-                    ]
-                    if _loc_added:
-                        _short = location.split("(")[0].strip()
-                        st.markdown(
-                            f"<div style='background:#EFF6FF;border:0.5px solid #BFDBFE;"
-                            f"border-radius:8px;padding:8px 12px;margin-top:8px;'>"
-                            f"<span style='font-size:12px;font-weight:500;color:#1E40AF;'>"
-                            f"{', '.join(f"+{v}" for v in _loc_added)} added to panel</span>"
-                            f"</div>",
-                            unsafe_allow_html=True,
-                        )
-                        if st.button(
-                            f"▶ Re-run {_short}",
-                            key=f"acooc_rerun_{location}",
-                            type="primary",
-                            use_container_width=True,
-                        ):
-                            _rt = celery_app.send_task(
-                                "tasks.run_deconvolve_lapis",
-                                kwargs={
-                                    "location": location,
-                                    "start_date": start_date.isoformat(),
-                                    "end_date": end_date.isoformat(),
-                                    "variants": all_selected_variants,
-                                    "bootstraps": bootstraps,
-                                    "bandwidth": bandwidth,
-                                }
-                            )
-                            _rct = celery_app.send_task(
-                                "tasks.run_cooc_completeness_lapis",
-                                kwargs={
-                                    "location": location,
-                                    "start_date": start_date.isoformat(),
-                                    "end_date": end_date.isoformat(),
-                                    "variants": all_selected_variants,
-                                }
-                            )
-                            st.session_state["acooc_location_tasks"][location] = _rt.id
-                            st.session_state["acooc_cooc_tasks"][location] = _rct.id
-                            st.session_state["location_results"].pop(location, None)
-                            st.session_state["acooc_cooc_results"].pop(location, None)
-                            st.session_state["acooc_scanner_results"].pop(location, None)
-                            st.session_state["acooc_scanner_added_for"] = {
-                                v: l for v, l in _added_for.items() if l != location
-                            }
-                            logger.info(f"Re-run submitted for {location} only")
 
                 elif location in _scanner_tasks_map:
                     _stt = celery_app.AsyncResult(_scanner_tasks_map[location])
                     if _stt.state in ("PENDING", "STARTED", "RETRY"):
-                        with st.status("Scanner running…", expanded=True) as _scan_status:
-                            st.write(f"Classifying unexplained patterns for {location}…")
-                            st.write("Checking against known lineages and panel variants…")
-                        _scan_status.update(label="Scanner running…", state="running")
+                        st.info("⟳ Scanner running — auto-runs after completeness…")
                     elif _stt.state == "FAILURE":
                         st.error("Scanner failed — check worker logs.")
                 else:
-                    st.caption("Run scanner to classify unexplained patterns.")
+                    st.caption("Scanner will run automatically after completeness.")
+
+                # ── Per-city panel additions ──────────────────────────────────
+                st.markdown("---")
+                _short2 = location.split("(")[0].strip()
+                st.markdown(f"#### Refine panel for {_short2}")
+
+                # get scanner suggestions for this city
+                _suggestions = []
+                if location in _scanner_results:
+                    _suggestions = [
+                        item["variant"]
+                        for item in _scanner_results[location].get("missing_from_panel", [])
+                        if item["variant"] not in all_selected_variants
+                    ][:5]  # top 5 suggestions
+
+                _city_extras = st.session_state.get("acooc_city_extras", {})
+                _current_extras = _city_extras.get(location, [])
+
+                st.caption(
+                    f"Add variants for {_short2} only — these extend the base panel ({len(all_selected_variants)} variants) "
+                    f"without affecting other cities."
+                )
+
+                # clickable suggestion pills
+                if _suggestions:
+                    st.markdown(
+                        "<span style='font-size:11px;color:#898781;'>Scanner suggestions:</span>",
+                        unsafe_allow_html=True,
+                    )
+                    _pill_cols = st.columns(min(5, len(_suggestions)))
+                    for _pi, _sug in enumerate(_suggestions):
+                        with _pill_cols[_pi % 5]:
+                            if _sug not in _current_extras:
+                                if st.button(f"+ {_sug}", key=f"acooc_suggest_{location}_{_sug}", use_container_width=True):
+                                    _city_extras[location] = _current_extras + [_sug]
+                                    st.session_state["acooc_city_extras"] = _city_extras
+                            else:
+                                st.markdown(
+                                    f"<div style='font-size:11px;padding:4px 8px;background:#EAF3DE;"
+                                    f"color:#3B6D11;border-radius:6px;text-align:center;'>✓ {_sug}</div>",
+                                    unsafe_allow_html=True,
+                                )
+
+                # multiselect for local additions (includes suggestions + any pango lineage)
+                _pango_loader_local = cached_get_pango_loader()
+                _all_lineages = sorted(_pango_loader_local.get_raw_data().keys())
+                _extra_options = [v for v in _all_lineages if v not in all_selected_variants]
+                _new_extras = st.multiselect(
+                    "Additional variants",
+                    options=_extra_options,
+                    default=_current_extras,
+                    placeholder="Search any pango lineage…",
+                    key=f"acooc_extras_ms_{location}",
+                    label_visibility="collapsed",
+                )
+                # sync multiselect back to session state
+                if _new_extras != _current_extras:
+                    _city_extras[location] = _new_extras
+                    st.session_state["acooc_city_extras"] = _city_extras
+                    _current_extras = _new_extras
+
+                # re-run button
+                _combined_variants = all_selected_variants + [v for v in _current_extras if v not in all_selected_variants]
+                _rerun_col1, _rerun_col2 = st.columns([3, 1])
+                with _rerun_col1:
+                    if _current_extras:
+                        st.caption(f"Base ({len(all_selected_variants)}) + {len(_current_extras)} local = {len(_combined_variants)} variants total")
+                    else:
+                        st.caption("No local additions — will use base panel only")
+                with _rerun_col2:
+                    if st.button(f"▶ Re-run {_short2}", key=f"acooc_rerun_{location}", type="primary", use_container_width=True):
+                        _rt = celery_app.send_task(
+                            "tasks.run_deconvolve_lapis",
+                            kwargs={
+                                "location": location,
+                                "start_date": start_date.isoformat(),
+                                "end_date": end_date.isoformat(),
+                                "variants": _combined_variants,
+                                "bootstraps": bootstraps,
+                                "bandwidth": bandwidth,
+                            }
+                        )
+                        _rct = celery_app.send_task(
+                            "tasks.run_cooc_completeness_lapis",
+                            kwargs={
+                                "location": location,
+                                "start_date": start_date.isoformat(),
+                                "end_date": end_date.isoformat(),
+                                "variants": _combined_variants,
+                            }
+                        )
+                        st.session_state["acooc_location_tasks"][location] = _rt.id
+                        st.session_state["acooc_cooc_tasks"][location] = _rct.id
+                        st.session_state["location_results"].pop(location, None)
+                        st.session_state["acooc_cooc_results"].pop(location, None)
+                        st.session_state["acooc_scanner_results"].pop(location, None)
+                        # clear scanner task so it re-runs after new completeness
+                        _sct2 = st.session_state.get("acooc_scanner_tasks", {})
+                        _sct2.pop(location, None)
+                        st.session_state["acooc_scanner_tasks"] = _sct2
+                        logger.info(f"Re-run {location} with {len(_combined_variants)} variants ({len(_current_extras)} local extras)")
 
             _active_loc = _selected.replace("📍 ", "")
             if _active_loc in location_tasks:
