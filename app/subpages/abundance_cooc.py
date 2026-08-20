@@ -236,6 +236,13 @@ def app():
         # ── Step 3: Locations ─────────────────────────────────────────────────
         _step_label(3, "Locations", done=has_locations)
         available_locations = wiseLoculus.fetch_locations()
+        col_loc_all, col_loc_clear = st.columns(2)
+        with col_loc_all:
+            if st.button("Select all", key="acooc_loc_select_all", use_container_width=True):
+                st.session_state["acooc_location_multiselect"] = available_locations
+        with col_loc_clear:
+            if st.button("Clear", key="acooc_loc_clear", use_container_width=True):
+                st.session_state["acooc_location_multiselect"] = []
         selected_locations = st.multiselect(
             "Select sampling locations",
             options=available_locations,
