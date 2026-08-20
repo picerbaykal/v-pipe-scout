@@ -501,55 +501,51 @@ def app():
                 _pct, _n_miss, _scan_done, _scan_running, _deconv_done, _cooc_done, _deconv_running, _cooc_running = _city_status(_loc)
                 with _city_cols[_ci % 3]:
                     # dot states
-                    _d1 = "🟢" if _deconv_done else ("🔵" if _deconv_running else "⚪")
-                    _d2 = "🟢" if _cooc_done else ("🔵" if _cooc_running else "⚪")
-                    _d3 = "🟢" if _scan_done else ("🔵" if _scan_running else "⚪")
+                    def _dot(done, running):
+                        if done: return "#3B6D11"
+                        if running: return "#93C5FD"
+                        return "#E5E3DC"
+
+                    _c1 = _dot(_deconv_done, _deconv_running)
+                    _c2 = _dot(_cooc_done, _cooc_running)
+                    _c3 = _dot(_scan_done, _scan_running)
                     _pct_str = f"{_pct}%" if _pct is not None else "—"
-                    _badge = ""
                     if _scan_done:
-                        if _n_miss > 0:
-                            _badge = f"⚠ {_n_miss} missing"
-                        elif _pct is not None and _pct >= 95:
-                            _badge = "✓ complete"
+                        _badge = f"⚠ {_n_miss} missing" if _n_miss > 0 else ("✓ complete" if _pct is not None and _pct >= 95 else "✓ scanned")
+                        _badge_bg = "#FCEBEB" if _n_miss > 0 else "#EAF3DE"
+                        _badge_col = "#A32D2D" if _n_miss > 0 else "#3B6D11"
                     elif _scan_running:
-                        _badge = "scanning…"
+                        _badge, _badge_bg, _badge_col = "scanning…", "#EFF6FF", "#1E40AF"
                     elif _cooc_running or _deconv_running:
-                        _badge = "running…"
-                    _is_selected = st.session_state.get("acooc_selected_city","") == f"📍 {_loc}"
-                    _border = "#E24B4A" if _is_selected else ("#97C459" if _scan_done and _n_miss==0 else "#93C5FD" if _scan_running or _cooc_running or _deconv_running else "rgba(0,0,0,.08)")
+                        _badge, _badge_bg, _badge_col = "running…", "#EFF6FF", "#1E40AF"
+                    else:
+                        _badge, _badge_bg, _badge_col = "pending", "#F1EFE8", "#898781"
+                    _is_sel = st.session_state.get("acooc_selected_city","") == f"📍 {_loc}"
+                    _border = "#E24B4A" if _is_sel else ("#97C459" if _scan_done and _n_miss==0 else "#93C5FD" if _scan_running or _cooc_running or _deconv_running else "rgba(0,0,0,.08)")
                     st.markdown(
                         f"<div style='border:1.5px solid {_border};border-radius:8px;padding:7px 9px;margin-bottom:4px;'>"
-                        f"<div style='font-size:11px;font-weight:500;margin-bottom:3px;'>{_loc.split('(')[0].strip()}</div>"
-                        f"<div style='display:flex;gap:3px;margin-bottom:3px;'>"
-                        f"<span title='Deconvolution'>{_d1}</span>"
-                        f"<span title='Completeness'>{_d2}</span>"
-                        f"<span title='Scanner'>{_d3}</span>"
+                        f"<div style='font-size:11px;font-weight:500;margin-bottom:4px;'>{_loc.split('(')[0].strip()}</div>"
+                        f"<div style='display:flex;gap:3px;margin-bottom:4px;' title='deconvolution · completeness · scanner'>"
+                        f"<div style='width:22px;height:5px;border-radius:3px;background:{_c1};'></div>"
+                        f"<div style='width:22px;height:5px;border-radius:3px;background:{_c2};'></div>"
+                        f"<div style='width:22px;height:5px;border-radius:3px;background:{_c3};'></div>"
                         f"</div>"
                         f"<div style='display:flex;align-items:center;justify-content:space-between;'>"
                         f"<span style='font-size:10px;color:#898781;'>{_pct_str}</span>"
-                        f"<span style='font-size:10px;padding:1px 5px;border-radius:5px;background:#F1EFE8;color:#5F5E5A;'>{_badge}</span>"
+                        f"<span style='font-size:10px;padding:1px 5px;border-radius:5px;background:{_badge_bg};color:{_badge_col};'>{_badge}</span>"
                         f"</div></div>",
                         unsafe_allow_html=True,
                     )
                     if st.button(f"View {_loc.split('(')[0].strip()}", key=f"acooc_view_{_loc}", use_container_width=True):
                         st.session_state["acooc_selected_city"] = f"📍 {_loc}"
 
-            st.markdown("<hr style='margin:6px 0 10px;opacity:.15;'>", unsafe_allow_html=True)
+            st.markdown("<hr style='margin:8px 0 10px;opacity:.15;'>", unsafe_allow_html=True)
 
-            # city selector pills
+            # city selection driven by View buttons on cards — no separate radio needed
             _city_options = [f"📍 {loc}" for loc in location_names]
-            if "acooc_selected_city" not in st.session_state:
+            if "acooc_selected_city" not in st.session_state or                st.session_state.get("acooc_selected_city") not in _city_options:
                 st.session_state["acooc_selected_city"] = _city_options[0] if _city_options else ""
-            elif st.session_state["acooc_selected_city"] not in _city_options:
-                st.session_state["acooc_selected_city"] = _city_options[0] if _city_options else ""
-            _selected = st.radio(
-                "View",
-                options=_city_options,
-                horizontal=True,
-                label_visibility="collapsed",
-                key="acooc_selected_city",
-            )
-            st.markdown("<hr style='margin:4px 0 10px;opacity:.15;'>", unsafe_allow_html=True)
+            _selected = st.session_state.get("acooc_selected_city", "")
 
             def _city_tab_content(location, task_id):
                 """Shared content for both active and idle city tab fragments."""
