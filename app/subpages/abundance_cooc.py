@@ -301,82 +301,31 @@ def app():
             disabled=not can_run,
             key="acooc_run_button",
             use_container_width=True,
-            help="Runs deconvolution + panel-completeness check for all selected locations.",
+            help="Runs deconvolution, completeness check, and scanner for all locations.",
         ):
             st.session_state["acooc_trigger_run"] = True
 
 
-        # scanner state
+        # scanner state — read by result collection in right column
         scanner_results = st.session_state.get("acooc_scanner_results", {})
         scanner_panels = st.session_state.get("acooc_scanner_panels", {})
-        location_names_for_scan = list(st.session_state.get("acooc_location_tasks", {}).keys())
-        available_for_scan = [
-            loc for loc in location_names_for_scan
-            if loc in st.session_state.get("acooc_cooc_results", {})
-            and st.session_state["acooc_cooc_results"][loc].get("unexplained_patterns")
-        ]
-        scanner_ready = bool(available_for_scan)
-        _step_label(6, "Scanner", done=has_scanner, active=scanner_ready and not has_scanner)
 
-        if not scanner_ready:
-            st.caption("Available once completeness finishes.")
-        else:
-            _scan_choice = st.selectbox(
-                "Location",
-                options=["All ready locations"] + available_for_scan,
-                key="acooc_scanner_location_select",
-                label_visibility="collapsed",
-            )
-            if st.button(
-                "▶ Run scanner",
-                type="primary" if not has_scanner else "secondary",
-                key="acooc_scan_global",
-                use_container_width=True,
-            ):
-                _targets = (
-                    [loc for loc in available_for_scan
-                     if loc not in scanner_results
-                     or set(scanner_panels.get(loc, [])) != set(all_selected_variants)]
-                    if _scan_choice == "All ready locations"
-                    else [_scan_choice]
-                )
-                if not _targets:
-                    st.info("All locations already scanned with the current panel.")
-                else:
-                    _already_done = [l for l in available_for_scan if l not in _targets]
-                    if _already_done:
-                        st.caption(f"Skipping (already scanned): {', '.join(_already_done)}")
-                    _new_scanner_tasks = st.session_state.get("acooc_scanner_tasks", {})
-                    for _loc in _targets:
-                        _stask = celery_app.send_task(
-                            "tasks.run_cooc_scanner_lapis",
-                            kwargs={
-                                "location": _loc,
-                                "start_date": start_date.isoformat(),
-                                "end_date": end_date.isoformat(),
-                                "variants": all_selected_variants,
-                                "unexplained_patterns": st.session_state["acooc_cooc_results"][_loc]["unexplained_patterns"],
-                            }
-                        )
-                        _new_scanner_tasks[_loc] = _stask.id
-                        scanner_panels[_loc] = list(all_selected_variants)
-                        logger.info(f"Submitted scanner task {_stask.id} for {_loc}")
-                    st.session_state["acooc_scanner_tasks"] = _new_scanner_tasks
-                    st.session_state["acooc_scanner_panels"] = scanner_panels
-
-            # scanner progress in left column
-            _stasks = st.session_state.get("acooc_scanner_tasks", {})
-            for _sloc, _stid in _stasks.items():
+        # scanner status in left column (auto-runs, no button needed)
+        _stasks_left = st.session_state.get("acooc_scanner_tasks", {})
+        if _stasks_left:
+            st.markdown("---")
+            _step_label(6, "Scanner", done=bool(st.session_state.get("acooc_scanner_results")), active=False)
+            for _sloc, _stid in _stasks_left.items():
                 _sstate = celery_app.AsyncResult(_stid).state
                 if _sstate in ("PENDING", "STARTED", "RETRY"):
-                    st.caption(f"Scanning {_sloc.split('(')[0].strip()}…")
+                    st.caption(f"⟳ Scanning {_sloc.split('(')[0].strip()}…")
                 elif _sstate == "SUCCESS":
-                    st.caption(f"✓ {_sloc.split('(')[0].strip()} scanned")
+                    _sr = st.session_state.get("acooc_scanner_results", {})
+                    if _sloc in _sr:
+                        _nm = len(_sr[_sloc].get("missing_from_panel", []))
+                        st.caption(f"✓ {_sloc.split('(')[0].strip()} — {_nm} missing" if _nm else f"✓ {_sloc.split('(')[0].strip()} — panel ok")
                 elif _sstate == "FAILURE":
                     st.caption(f"✗ {_sloc.split('(')[0].strip()} failed")
-
-        st.markdown("---")
-
     # ── Right column: all outputs ─────────────────────────────────────────────
     with col_results:
 
@@ -417,7 +366,6 @@ def app():
             for loc in cooc_tasks:
                 existing_cooc.pop(loc, None)
             st.session_state["acooc_cooc_results"] = existing_cooc
-            st.rerun()
 
         from components.multi_location_results import (
             render_single_location_result,
@@ -433,20 +381,18 @@ def app():
             scanner_task_ids = list(st.session_state.get("acooc_scanner_tasks", {}).values())
             all_task_ids = list(location_tasks.values()) + cooc_task_ids + scanner_task_ids
 
-            # only autorefresh while tasks are genuinely running — stop immediately
-            # when everything is done so scanner results can render uninterrupted
+            # autorefresh only while tasks are running — stops when all done
+            # using 3s interval to give render cycles enough time to complete
+            _all_tids = list(location_tasks.values()) + cooc_task_ids + scanner_task_ids
             _running_tids = [
-                tid for tid in all_task_ids
-                if celery_app.AsyncResult(tid).state in ("PENDING", "STARTED", "RETRY")
+                tid for tid in _all_tids
+                if tid and celery_app.AsyncResult(tid).state in ("PENDING", "STARTED", "RETRY")
             ]
             if _running_tids:
                 from streamlit_autorefresh import st_autorefresh
                 st_autorefresh(interval=3000, key="acooc_autorefresh")
 
-            # collect any newly completed results and rerun immediately
-            # so UI updates without waiting for the next autorefresh tick
-            # (autorefresh mid-render is what was preventing scanner buckets from appearing)
-            _any_new = False
+            # collect completed results
             scanner_tasks_map = st.session_state.get("acooc_scanner_tasks", {})
             for _loc, _tid in list(scanner_tasks_map.items()):
                 if _loc not in scanner_results:
@@ -455,12 +401,13 @@ def app():
                         try:
                             scanner_results[_loc] = _t.get()
                             st.session_state["acooc_scanner_results"] = scanner_results
-                            _any_new = True
                             logger.info(f"Scanner results collected for {_loc}")
                         except Exception as _e:
                             logger.error(f"Scanner task failed for {_loc}: {_e}")
-            # collect completed cooc results
+
+            # collect completed cooc results + auto-submit scanner
             _cooc_res = st.session_state.get("acooc_cooc_results", {})
+            _scanner_tasks = st.session_state.get("acooc_scanner_tasks", {})
             for _loc, _tid in list(st.session_state.get("acooc_cooc_tasks", {}).items()):
                 if _loc not in _cooc_res:
                     _t = celery_app.AsyncResult(_tid)
@@ -468,22 +415,133 @@ def app():
                         try:
                             _cooc_res[_loc] = _t.get()
                             st.session_state["acooc_cooc_results"] = _cooc_res
-                            _any_new = True
                         except Exception:
                             pass
-            if _any_new:
-                st.rerun()
+                # auto-submit scanner when completeness is ready and scanner not yet run
+                if (_loc in _cooc_res
+                        and _cooc_res[_loc].get("unexplained_patterns")
+                        and _loc not in _scanner_tasks
+                        and _loc not in scanner_results):
+                    _stask = celery_app.send_task(
+                        "tasks.run_cooc_scanner_lapis",
+                        kwargs={
+                            "location": _loc,
+                            "start_date": start_date.isoformat(),
+                            "end_date": end_date.isoformat(),
+                            "variants": all_selected_variants,
+                            "unexplained_patterns": _cooc_res[_loc]["unexplained_patterns"],
+                        }
+                    )
+                    _scanner_tasks[_loc] = _stask.id
+                    scanner_panels[_loc] = list(all_selected_variants)
+                    logger.info(f"Auto-submitted scanner for {_loc}")
+            st.session_state["acooc_scanner_tasks"] = _scanner_tasks
+            st.session_state["acooc_scanner_panels"] = scanner_panels
 
             location_names = list(location_tasks.keys())
 
-            # radio selector — never greys out during autorefresh unlike st.tabs
-            _city_options = [f"📍 {loc}" for loc in location_names] + ["📊 Summary"]
-            # preserve selection across reruns — setdefault only sets if key absent
-            # never override an existing valid selection with _city_options[0]
+            # ── Progress header ───────────────────────────────────────────────
+            _cooc_res2 = st.session_state.get("acooc_cooc_results", {})
+            _scan_res2 = st.session_state.get("acooc_scanner_results", {})
+            _scan_tasks2 = st.session_state.get("acooc_scanner_tasks", {})
+
+            def _city_status(loc):
+                """Return (pct, status_label, step_states) for a city."""
+                _deconv_done = loc in st.session_state.get("location_results", {})
+                _cooc_done = loc in _cooc_res2
+                _scan_done = loc in _scan_res2
+                _scan_running = (loc in _scan_tasks2 and
+                    celery_app.AsyncResult(_scan_tasks2[loc]).state in ("PENDING","STARTED","RETRY"))
+                _deconv_running = (loc in location_tasks and
+                    celery_app.AsyncResult(location_tasks[loc]).state in ("PENDING","STARTED","RETRY"))
+                _cooc_running = (loc in st.session_state.get("acooc_cooc_tasks",{}) and
+                    celery_app.AsyncResult(st.session_state["acooc_cooc_tasks"][loc]).state in ("PENDING","STARTED","RETRY"))
+                _pct = None
+                if _cooc_done:
+                    _m = sum(_cooc_res2[loc].get("matched_counts",[]))
+                    _u = sum(_cooc_res2[loc].get("unexplained_counts",[]))
+                    _t = _m + _u
+                    _pct = int(_m/_t*100) if _t>0 else 0
+                _n_miss = len(_scan_res2.get(loc,{}).get("missing_from_panel",[])) if _scan_done else 0
+                return _pct, _n_miss, _scan_done, _scan_running, _deconv_done, _cooc_done, _deconv_running, _cooc_running
+
+            _n_complete = sum(1 for loc in location_names
+                if loc in _scan_res2 and
+                sum(_cooc_res2.get(loc,{}).get("matched_counts",[]))/
+                max(1,sum(_cooc_res2.get(loc,{}).get("matched_counts",[]))+
+                    sum(_cooc_res2.get(loc,{}).get("unexplained_counts",[])))>=0.95)
+            _n_running = sum(1 for loc in location_names
+                if celery_app.AsyncResult(location_tasks.get(loc,"")).state in ("PENDING","STARTED","RETRY")
+                or celery_app.AsyncResult(st.session_state.get("acooc_cooc_tasks",{}).get(loc,"")).state in ("PENDING","STARTED","RETRY")
+                or celery_app.AsyncResult(st.session_state.get("acooc_scanner_tasks",{}).get(loc,"")).state in ("PENDING","STARTED","RETRY"))
+            _n_pending = len(location_names) - _n_complete - _n_running
+
+            with st.container():
+                _ph1, _ph2 = st.columns([3,1])
+                with _ph1:
+                    st.markdown(
+                        f"<div style='display:flex;gap:16px;align-items:center;padding:4px 0;'>"
+                        f"<span style='font-size:13px;font-weight:500;'>Analysis progress</span>"
+                        f"<span style='font-size:12px;color:#3B6D11;font-weight:500;'>✓ {_n_complete} complete</span>"
+                        f"<span style='font-size:12px;color:#185FA5;'>⟳ {_n_running} running</span>"
+                        f"<span style='font-size:12px;color:#898781;'>○ {_n_pending} pending</span>"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+                with _ph2:
+                    # download report button
+                    _completed_locs = [loc for loc in location_names if loc in st.session_state.get("location_results",{})]
+                    if _completed_locs:
+                        if st.button("⬇ Download report", key="acooc_dl_report", use_container_width=True):
+                            st.session_state["acooc_show_report"] = True
+
+            # city cards grid
+            _city_cols = st.columns(min(3, len(location_names)))
+            for _ci, _loc in enumerate(location_names):
+                _pct, _n_miss, _scan_done, _scan_running, _deconv_done, _cooc_done, _deconv_running, _cooc_running = _city_status(_loc)
+                with _city_cols[_ci % 3]:
+                    # dot states
+                    _d1 = "🟢" if _deconv_done else ("🔵" if _deconv_running else "⚪")
+                    _d2 = "🟢" if _cooc_done else ("🔵" if _cooc_running else "⚪")
+                    _d3 = "🟢" if _scan_done else ("🔵" if _scan_running else "⚪")
+                    _pct_str = f"{_pct}%" if _pct is not None else "—"
+                    _badge = ""
+                    if _scan_done:
+                        if _n_miss > 0:
+                            _badge = f"⚠ {_n_miss} missing"
+                        elif _pct is not None and _pct >= 95:
+                            _badge = "✓ complete"
+                    elif _scan_running:
+                        _badge = "scanning…"
+                    elif _cooc_running or _deconv_running:
+                        _badge = "running…"
+                    _is_selected = st.session_state.get("acooc_selected_city","") == f"📍 {_loc}"
+                    _border = "#E24B4A" if _is_selected else ("#97C459" if _scan_done and _n_miss==0 else "#93C5FD" if _scan_running or _cooc_running or _deconv_running else "rgba(0,0,0,.08)")
+                    st.markdown(
+                        f"<div style='border:1.5px solid {_border};border-radius:8px;padding:7px 9px;margin-bottom:4px;'>"
+                        f"<div style='font-size:11px;font-weight:500;margin-bottom:3px;'>{_loc.split('(')[0].strip()}</div>"
+                        f"<div style='display:flex;gap:3px;margin-bottom:3px;'>"
+                        f"<span title='Deconvolution'>{_d1}</span>"
+                        f"<span title='Completeness'>{_d2}</span>"
+                        f"<span title='Scanner'>{_d3}</span>"
+                        f"</div>"
+                        f"<div style='display:flex;align-items:center;justify-content:space-between;'>"
+                        f"<span style='font-size:10px;color:#898781;'>{_pct_str}</span>"
+                        f"<span style='font-size:10px;padding:1px 5px;border-radius:5px;background:#F1EFE8;color:#5F5E5A;'>{_badge}</span>"
+                        f"</div></div>",
+                        unsafe_allow_html=True,
+                    )
+                    if st.button(f"View {_loc.split('(')[0].strip()}", key=f"acooc_view_{_loc}", use_container_width=True):
+                        st.session_state["acooc_selected_city"] = f"📍 {_loc}"
+
+            st.markdown("<hr style='margin:6px 0 10px;opacity:.15;'>", unsafe_allow_html=True)
+
+            # city selector pills
+            _city_options = [f"📍 {loc}" for loc in location_names]
             if "acooc_selected_city" not in st.session_state:
-                st.session_state["acooc_selected_city"] = "📊 Summary"
+                st.session_state["acooc_selected_city"] = _city_options[0] if _city_options else ""
             elif st.session_state["acooc_selected_city"] not in _city_options:
-                st.session_state["acooc_selected_city"] = "📊 Summary"
+                st.session_state["acooc_selected_city"] = _city_options[0] if _city_options else ""
             _selected = st.radio(
                 "View",
                 options=_city_options,
@@ -491,7 +549,7 @@ def app():
                 label_visibility="collapsed",
                 key="acooc_selected_city",
             )
-            st.markdown("<hr style='margin:4px 0 12px;opacity:.2;'>", unsafe_allow_html=True)
+            st.markdown("<hr style='margin:4px 0 10px;opacity:.15;'>", unsafe_allow_html=True)
 
             def _city_tab_content(location, task_id):
                 """Shared content for both active and idle city tab fragments."""
@@ -539,7 +597,7 @@ def app():
                         location, task_id, celery_app, redis_client
                     )
 
-                # ── scanner results (read-only — trigger from left column) ──────
+                # ── scanner (auto-runs after completeness) ────────────────────
                 st.markdown("---")
                 _scan_badge = ""
                 if location in _cooc_results:
@@ -549,7 +607,14 @@ def app():
                     if _tt > 0:
                         _pp = _mm / _tt
                         _scan_badge = "✓ complete" if _pp >= 0.95 else "⚠ panel incomplete"
-                st.markdown(f"#### Scanner {_scan_badge}")
+                _scan_col_h, _scan_col_note = st.columns([2, 2])
+                with _scan_col_h:
+                    st.markdown(f"#### Scanner {_scan_badge}")
+                with _scan_col_note:
+                    if location not in _scanner_results and location not in _scanner_tasks_map:
+                        st.caption("auto-runs after completeness")
+                    elif location in _scanner_tasks_map and location not in _scanner_results:
+                        st.caption("⟳ scanning…")
 
                 if location in _scanner_results:
                     _stale2 = set(_scanner_panels.get(location, [])) != set(all_selected_variants)
@@ -636,117 +701,49 @@ def app():
                 else:
                     st.caption("Run scanner to classify unexplained patterns.")
 
-            if _selected != "📊 Summary":
-                _active_loc = _selected.replace("📍 ", "")
-                if _active_loc in location_tasks:
-                    _city_tab_content(_active_loc, location_tasks[_active_loc])
+            _active_loc = _selected.replace("📍 ", "")
+            if _active_loc in location_tasks:
+                _city_tab_content(_active_loc, location_tasks[_active_loc])
 
 
-            # ── Summary view ───────────────────────────────────────────────────
-            if _selected == "📊 Summary":
-                st.markdown("#### Location status")
-                cooc_results = st.session_state.get("acooc_cooc_results", {})
-
-                # status table
-                _cols = st.columns([2, 2, 3, 1])
-                _cols[0].caption("Location")
-                _cols[1].caption("Completeness")
-                _cols[2].caption("Status")
-                _cols[3].caption("")
-                st.markdown("<hr style='margin:4px 0;opacity:.3;'>", unsafe_allow_html=True)
-
-                for loc in location_names:
-                    _c1, _c2, _c3, _c4 = st.columns([2, 2, 3, 1])
-                    _c1.write(f"📍 {loc.split('(')[0].strip()}")
-                    if loc in cooc_results:
-                        _m = sum(cooc_results[loc].get("matched_counts", []))
-                        _u = sum(cooc_results[loc].get("unexplained_counts", []))
-                        _t = _m + _u
-                        _pct = int(_m / _t * 100) if _t > 0 else 0
-                        _c2.write(f"{_pct}%")
-                        if _pct >= 95:
-                            _c3.success("✓ complete")
-                        elif loc in scanner_results:
-                            _n_miss = len(scanner_results[loc].get("missing_from_panel", []))
-                            _c3.error(f"⚠ {_n_miss} missing")
-                        else:
-                            _c3.warning("⚠ run scanner")
-                        _c4.write("")
-                    else:
-                        _c2.caption("—")
-                        _c3.caption("not run")
-                        _c4.write("")
-
-                st.markdown("---")
-
-                # multi-city report
-                _rep_col1, _rep_col2 = st.columns([3, 1])
-                with _rep_col1:
-                    st.markdown("#### Multi-city report")
-                    st.caption("All deconvolution curves in one view · download-ready")
-                with _rep_col2:
-                    if st.button(
-                        "Generate report",
-                        key="acooc_gen_report",
-                        use_container_width=True,
-                    ):
-                        st.session_state["acooc_show_report"] = True
-
-                if st.session_state.get("acooc_show_report"):
-                    _completed = [loc for loc in location_names if loc in st.session_state.location_results]
-                    if not _completed:
-                        st.info("Run analysis for at least one location to generate the report.")
-                    else:
-                        import plotly.graph_objects as go
-                        from plotly.subplots import make_subplots
-                        import math
-                        _ncols = 2
-                        _nrows = math.ceil(len(_completed) / _ncols)
-                        _fig = make_subplots(
-                            rows=_nrows, cols=_ncols,
-                            subplot_titles=_completed,
-                            vertical_spacing=0.12,
-                            horizontal_spacing=0.08,
-                        )
-                        for _i, _loc in enumerate(_completed):
-                            _row = _i // _ncols + 1
-                            _col = _i % _ncols + 1
-                            _res = st.session_state.location_results[_loc]
-                            for _variant, _data in _res.items():
-                                if _variant == "undetermined":
-                                    continue
-                                _ts = _data.get("timeseriesSummary", [])
-                                if not _ts:
-                                    continue
-                                _dates = [e.get("date") for e in _ts]
-                                _props = [e.get("proportion", 0) for e in _ts]
-                                _fig.add_trace(
-                                    go.Scatter(x=_dates, y=_props, name=_variant,
-                                               mode="lines+markers",
-                                               marker=dict(size=4),
-                                               showlegend=(_i == 0)),
-                                    row=_row, col=_col,
-                                )
-                        _fig.update_layout(
-                            height=300 * _nrows,
-                            template="plotly_white",
-                            title_text="Variant Proportion Estimates — All Locations",
-                        )
-                        st.plotly_chart(_fig, use_container_width=True)
-                        # download button
-                        import io
-                        try:
-                            _buf = io.BytesIO()
-                            _fig.write_image(_buf, format="pdf")
-                            st.download_button(
-                                "⬇ Download PDF",
-                                data=_buf.getvalue(),
-                                file_name="vpipe_scout_report.pdf",
-                                mime="application/pdf",
-                                key="acooc_download_pdf",
-                            )
-                        except Exception:
-                            st.caption("Install kaleido for PDF export: pip install kaleido")
+            # ── Download report (triggered by button in progress header) ───────
+            if st.session_state.get("acooc_show_report"):
+                _completed_locs2 = [loc for loc in location_names if loc in st.session_state.get("location_results",{})]
+                if _completed_locs2:
+                    import plotly.graph_objects as go
+                    from plotly.subplots import make_subplots
+                    import math
+                    _ncols = 2
+                    _nrows = math.ceil(len(_completed_locs2)/_ncols)
+                    _fig = make_subplots(rows=_nrows, cols=_ncols, subplot_titles=_completed_locs2,
+                        vertical_spacing=0.12, horizontal_spacing=0.08)
+                    for _i, _loc in enumerate(_completed_locs2):
+                        _row = _i//_ncols+1; _col = _i%_ncols+1
+                        _res = st.session_state.location_results[_loc]
+                        for _variant, _data in _res.items():
+                            if _variant == "undetermined": continue
+                            _ts = _data.get("timeseriesSummary",[])
+                            if not _ts: continue
+                            _fig.add_trace(go.Scatter(
+                                x=[e.get("date") for e in _ts],
+                                y=[e.get("proportion",0) for e in _ts],
+                                name=_variant, mode="lines+markers",
+                                marker=dict(size=4), showlegend=(_i==0)),
+                                row=_row, col=_col)
+                    _fig.update_layout(height=300*_nrows, template="plotly_white",
+                        title_text="Variant Proportion Estimates — All Locations")
+                    st.plotly_chart(_fig, use_container_width=True)
+                    import io
+                    try:
+                        _buf = io.BytesIO()
+                        _fig.write_image(_buf, format="pdf")
+                        st.download_button("⬇ Download PDF", data=_buf.getvalue(),
+                            file_name="vpipe_scout_report.pdf", mime="application/pdf",
+                            key="acooc_download_pdf")
+                    except Exception:
+                        st.caption("Install kaleido for PDF export.")
+                if st.button("Close report", key="acooc_close_report"):
+                    st.session_state["acooc_show_report"] = False
 
 
 if __name__ == "__main__":
