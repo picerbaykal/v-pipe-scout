@@ -7,12 +7,8 @@ Renders a pruned pango tree rooted at B, showing:
 - Selected variants (in deconv panel) — filled blue circles
 - Cowwid OT variants (officially tracked, not selected) — open blue circles
   with "OT" badge
+- Scanner-added variants — amber dot, OT badge if applicable, city badge(s)
 - Spine/structural nodes — small grey circles connecting the hierarchy
-- Scanner signal placeholders (v1 — requires co-occurrence/SaneQL data)
-
-Adapted from lollijac's core/panel_tree_component.py.
-Scanner/cooc logic stripped for v0 — parameters kept as None defaults
-so the function signature is forward-compatible with v1.
 """
 from __future__ import annotations
 from collections import defaultdict
@@ -24,11 +20,7 @@ import streamlit.components.v1 as components
 C = {
     "panel_ot": "#185FA5",
     "panel":    "#185FA5",
-    "cooc":     "#1D9E75",
-    "signal":   "#D85A30",
-    "moderate": "#BA7517",
-    "clade":    "#BA7517",
-    "parallel": "#7F77DD",
+    "scanner":  "#F59E0B",
     "yaml":     "#185FA5",
     "none":     "#C8C6BE",
     "spine":    "#C8C6BE",
@@ -37,15 +29,29 @@ C = {
 BADGE = {
     "panel_ot": ("OT", "#F1EFE8", "#5F5E5A"),
     "panel":    ("", "", ""),
-    "cooc":     ("cooc only",       "#E1F5EE", "#085041"),
-    "signal":   ("strong signal",   "#FAECE7", "#712B13"),
-    "moderate": ("moderate signal", "#FAEEDA", "#633806"),
-    "clade":    ("unresolved",      "#FAEEDA", "#633806"),
-    "parallel": ("parallel signal", "#EEEDFE", "#3C3489"),
-    "yaml": ("OT", "#F1EFE8", "#5F5E5A"),
+    "scanner":  ("", "", ""),
+    "yaml":     ("OT", "#F1EFE8", "#5F5E5A"),
     "none":     ("", "", ""),
     "spine":    ("", "", ""),
 }
+
+# city color palette — consistent across UI
+CITY_COLORS = [
+    ("#FEF3C7", "#92400E", "#F59E0B"),  # amber  — Lugano
+    ("#EFF6FF", "#1E40AF", "#3B82F6"),  # blue   — Basel
+    ("#F0FDF4", "#166534", "#22C55E"),  # green  — Zürich
+    ("#F5F3FF", "#4C1D95", "#7C3AED"),  # purple
+    ("#FFF1F2", "#881337", "#F43F5E"),  # rose
+    ("#ECFEFF", "#164E63", "#06B6D4"),  # cyan
+]
+
+
+def _city_color(city: str, city_index: dict) -> tuple[str, str, str]:
+    """Return (bg, text, border) for a city, assigning a color on first use."""
+    if city not in city_index:
+        city_index[city] = len(city_index) % len(CITY_COLORS)
+    return CITY_COLORS[city_index[city]]
+
 
 # ── Ancestry helpers ──────────────────────────────────────────────────────────
 
@@ -57,50 +63,24 @@ def _ancestors(v: str, parent_map: dict) -> list[str]:
     return path
 
 
-def _lca(variants: list[str], parent_map: dict) -> str:
-    """Always root at B so the full spine is always visible."""
-    return "B"
-
-
 def _build_spine(
     selected_set: set,
-    cooc_set: set,
     yaml_set: set,
-    scanner_results: dict | None,
+    scanner_added: dict,   # {variant: city_name}
     parent_map: dict,
 ):
-    if not selected_set:
+    if not selected_set and not scanner_added:
         return None
 
-    # Scanner nodes — v1, not yet available
-    # Structure kept for forward compatibility when SaneQL lands
-    scanner_nodes: dict[str, str] = {}
-    if scanner_results:
-        for v, res in scanner_results.items():
-            if v in selected_set or v in yaml_set:
-                continue
-            sl = getattr(res, 'signal_level', None)
-            sl = sl.value if sl else ""
-            has_cooc = bool(
-                getattr(res, 'cooc_signal', None) and
-                any(f > 0.01 for f in res.cooc_signal)
-            )
-            if sl == "strong" and has_cooc:
-                scanner_nodes[v] = "signal"
-            elif sl == "moderate" and has_cooc:
-                scanner_nodes[v] = "moderate"
+    all_variants = selected_set | set(scanner_added.keys())
 
     needed: set = set()
-    for v in selected_set:
-        needed.add(v)
-        for a in _ancestors(v, parent_map):
-            needed.add(a)
-    for v in scanner_nodes:
+    for v in all_variants:
         needed.add(v)
         for a in _ancestors(v, parent_map):
             needed.add(a)
     for v in yaml_set:
-        if any(a in selected_set for a in _ancestors(v, parent_map) + [v]):
+        if any(a in all_variants for a in _ancestors(v, parent_map) + [v]):
             needed.add(v)
 
     needed.add("B")
@@ -111,7 +91,7 @@ def _build_spine(
         if p and p in needed:
             children[p].append(v)
 
-    root = _lca(list(selected_set), parent_map)
+    root = "B"
 
     def is_desc(v, r):
         x = v
@@ -131,16 +111,14 @@ def _build_spine(
             children[p].append(v)
 
     def kind_of(v):
+        if v in scanner_added:
+            return "scanner"
         if v in selected_set:
             if v in yaml_set:
                 return "panel_ot"
             return "panel"
-        if v in cooc_set:
-            return "cooc"
         if v in yaml_set:
             return "yaml"
-        if v in scanner_nodes:
-            return scanner_nodes[v]
         return "spine"
 
     def collapse(v):
@@ -159,9 +137,12 @@ def _build_spine(
 
     return children, root, needed, kind_of, collapse
 
+
 # ── SVG renderer ──────────────────────────────────────────────────────────────
 
-def _build_svg(children, root, kind_of, collapse, width=320):
+def _build_svg(children, root, kind_of, collapse,
+               yaml_set: set, scanner_added: dict,
+               city_index: dict, width=340):
     ROW_H  = 26
     INDENT = 20
     X0     = 16
@@ -181,8 +162,8 @@ def _build_svg(children, root, kind_of, collapse, width=320):
             real_v = v
         rows.append((v, label, real_v, depth, kind))
         ch = sorted(children.get(real_v, []), key=lambda x: (
-            0 if kind_of(x) == "panel" else
-            1 if kind_of(x) in ("signal", "clade", "parallel") else
+            0 if kind_of(x) in ("panel", "panel_ot") else
+            1 if kind_of(x) == "scanner" else
             2 if kind_of(x) == "yaml" else 3, x))
         for c in ch:
             assign_rows(c, depth + 1)
@@ -190,15 +171,18 @@ def _build_svg(children, root, kind_of, collapse, width=320):
     assign_rows(root, 0)
 
     row_y   = {rows[i][0]: i * ROW_H + ROW_H // 2 for i in range(len(rows))}
-    total_h = len(rows) * ROW_H + 80
+    # legend: selected + not selected + scanner find + OT note + city pills
+    n_cities = len(city_index)
+    legend_h = 30 + 16 + max(0, (n_cities - 1)) * 0 + 14
+    total_h  = len(rows) * ROW_H + legend_h + 50
 
     lines_svg = []
     nodes_svg = []
 
     for v, _, real_v, depth, kind in rows:
         ch = sorted(children.get(real_v, []), key=lambda x: (
-            0 if kind_of(x) == "panel" else
-            1 if kind_of(x) in ("signal", "clade", "parallel") else
+            0 if kind_of(x) in ("panel", "panel_ot") else
+            1 if kind_of(x) == "scanner" else
             2 if kind_of(x) == "yaml" else 3, x))
         if not ch:
             continue
@@ -216,8 +200,8 @@ def _build_svg(children, root, kind_of, collapse, width=320):
         y = row_y[v]
         color = C[kind]
         is_spine = kind in ("spine", "none")
-        filled = kind in ("panel", "panel_ot", "cooc", "signal")
-        fw = "600" if kind in ("panel", "panel_ot", "cooc") else "400"
+        filled = kind in ("panel", "panel_ot", "scanner")
+        fw = "600" if kind in ("panel", "panel_ot") else "400"
         fsize = "11" if is_spine else "13"
         fcolor = color if not is_spine else "#B4B2A9"
         r = 5 if not is_spine else 3
@@ -225,10 +209,9 @@ def _build_svg(children, root, kind_of, collapse, width=320):
         if depth > 0:
             px = X0 + (depth - 1) * INDENT
             branch_color = color if not is_spine else "#D3D1C7"
-            dash = ' stroke-dasharray="4,3"' if kind in ("parallel", "none") else ""
             lines_svg.append(
                 f'<line x1="{px+1}" y1="{y}" x2="{x-r-2}" y2="{y}" '
-                f'stroke="{branch_color}" stroke-width="1.8"{dash}/>'
+                f'stroke="{branch_color}" stroke-width="1.8"/>'
             )
 
         if filled:
@@ -249,81 +232,105 @@ def _build_svg(children, root, kind_of, collapse, width=320):
             f'{label}</text>'
         )
 
+        # OT badge (only for non-scanner variants)
+        cursor_x = tx + len(label) * (7 if not is_spine else 6) + 16
         bdg, bbg, bfg = BADGE[kind]
         if bdg:
-            lw  = len(label) * (7 if not is_spine else 6) + 16
-            bx  = tx + lw
-            bw  = len(bdg) * 6.2 + 14
-            bh  = 15
+            bw = len(bdg) * 6.2 + 14
+            bh = 15
             nodes_svg.append(
-                f'<rect x="{bx}" y="{y - bh//2}" width="{bw}" height="{bh}" '
+                f'<rect x="{cursor_x}" y="{y - bh//2}" width="{bw}" height="{bh}" '
                 f'rx="7" fill="{bbg}"/>'
-                f'<text x="{bx + bw/2:.1f}" y="{y}" dy="0.35em" '
+                f'<text x="{cursor_x + bw/2:.1f}" y="{y}" dy="0.35em" '
                 f'text-anchor="middle" font-size="10" fill="{bfg}" '
                 f'font-family="-apple-system,BlinkMacSystemFont,\'Segoe UI\',sans-serif">'
                 f'{bdg}</text>'
             )
+            cursor_x += bw + 4
 
-    legend_items_row1 = [
-        ("#185FA5", True, "selected"),
-        ("#185FA5", False, "not selected"),
-        ("#D85A30", True, "signal"),
-    ]
-    legend_items_row2 = [
-        ("#1D9E75", True, "cooc only"),
-        ("#BA7517", True, "unresolved"),
-    ]
+        # OT badge for scanner-added OT variants
+        if kind == "scanner" and v in yaml_set:
+            ot_bw = 6.2 * 2 + 14  # "OT"
+            bh = 15
+            nodes_svg.append(
+                f'<rect x="{cursor_x}" y="{y - bh//2}" width="{ot_bw}" height="{bh}" '
+                f'rx="7" fill="#F1EFE8"/>'
+                f'<text x="{cursor_x + ot_bw/2:.1f}" y="{y}" dy="0.35em" '
+                f'text-anchor="middle" font-size="10" fill="#5F5E5A" '
+                f'font-family="-apple-system,BlinkMacSystemFont,\'Segoe UI\',sans-serif">'
+                f'OT</text>'
+            )
+            cursor_x += ot_bw + 4
 
-    leg_y1 = total_h - 42
-    leg_y2 = total_h - 28
+        # city badge for scanner-added variants
+        if kind == "scanner" and v in scanner_added:
+            cities = scanner_added[v]
+            if isinstance(cities, str):
+                cities = [cities]
+            for city in cities:
+                bg, fg, border = _city_color(city, city_index)
+                short = city.split("(")[0].strip()  # "Lugano (TI)" → "Lugano"
+                cw = len(short) * 6.2 + 14
+                bh = 15
+                nodes_svg.append(
+                    f'<rect x="{cursor_x}" y="{y - bh//2}" width="{cw}" height="{bh}" '
+                    f'rx="7" fill="{bg}" stroke="{border}" stroke-width="0.5"/>'
+                    f'<text x="{cursor_x + cw/2:.1f}" y="{y}" dy="0.35em" '
+                    f'text-anchor="middle" font-size="10" font-weight="500" fill="{fg}" '
+                    f'font-family="-apple-system,BlinkMacSystemFont,\'Segoe UI\',sans-serif">'
+                    f'{short}</text>'
+                )
+                cursor_x += cw + 4
+
+    # ── legend ────────────────────────────────────────────────────────────────
+    leg_y = total_h - legend_h + 8
     leg_svg = [
-        f'<line x1="0" y1="{total_h - 56}" x2="{width}" y2="{total_h - 56}" '
+        f'<line x1="0" y1="{leg_y - 8}" x2="{width}" y2="{leg_y - 8}" '
         f'stroke="#E8E6E0" stroke-width="1"/>'
     ]
 
-    leg_x = 0
-    for lc, lf, ltxt in legend_items_row1:
+    # row 1: selected · not selected · scanner find
+    items = [
+        ("#185FA5", True,  "selected"),
+        ("#185FA5", False, "not selected"),
+        ("#F59E0B", True,  "scanner find"),
+    ]
+    lx = 0
+    for lc, lf, ltxt in items:
         if lf:
-            leg_svg.append(
-                f'<circle cx="{leg_x + 5}" cy="{leg_y1}" r="4" '
-                f'fill="{lc}" stroke="{lc}" stroke-width="1.5"/>'
-            )
+            leg_svg.append(f'<circle cx="{lx+5}" cy="{leg_y}" r="4" fill="{lc}"/>')
         else:
             leg_svg.append(
-                f'<circle cx="{leg_x + 5}" cy="{leg_y1}" r="4" '
-                f'fill="white" stroke="{lc}" stroke-width="1.5"/>'
+                f'<circle cx="{lx+5}" cy="{leg_y}" r="4" fill="white" '
+                f'stroke="{lc}" stroke-width="1.5"/>'
             )
         leg_svg.append(
-            f'<text x="{leg_x + 13}" y="{leg_y1}" dy="0.35em" '
-            f'font-size="10" fill="#888" '
+            f'<text x="{lx+13}" y="{leg_y}" dy="0.35em" font-size="10" fill="#888" '
             f'font-family="-apple-system,BlinkMacSystemFont,\'Segoe UI\',sans-serif">'
             f'{ltxt}</text>'
         )
-        leg_x += len(ltxt) * 6 + 26
+        lx += len(ltxt) * 6 + 26
 
-    leg_x = 0
-    for lc, lf, ltxt in legend_items_row2:
-        if lf:
-            leg_svg.append(
-                f'<circle cx="{leg_x + 5}" cy="{leg_y2}" r="4" '
-                f'fill="{lc}" stroke="{lc}" stroke-width="1.5"/>'
-            )
-        else:
-            leg_svg.append(
-                f'<circle cx="{leg_x + 5}" cy="{leg_y2}" r="4" '
-                f'fill="white" stroke="{lc}" stroke-width="1.5"/>'
-            )
+    # row 2: city pills
+    cy_y = leg_y + 18
+    lx = 0
+    for city, idx in sorted(city_index.items(), key=lambda x: x[1]):
+        bg, fg, border = CITY_COLORS[idx]
+        short = city.split("(")[0].strip()
+        cw = len(short) * 6.2 + 14
         leg_svg.append(
-            f'<text x="{leg_x + 13}" y="{leg_y2}" dy="0.35em" '
-            f'font-size="10" fill="#888" '
+            f'<rect x="{lx}" y="{cy_y - 7}" width="{cw}" height="14" '
+            f'rx="7" fill="{bg}" stroke="{border}" stroke-width="0.5"/>'
+            f'<text x="{lx + cw/2:.1f}" y="{cy_y}" dy="0.35em" '
+            f'text-anchor="middle" font-size="10" font-weight="500" fill="{fg}" '
             f'font-family="-apple-system,BlinkMacSystemFont,\'Segoe UI\',sans-serif">'
-            f'{ltxt}</text>'
+            f'{short}</text>'
         )
-        leg_x += len(ltxt) * 6 + 26
+        lx += cw + 6
 
+    # OT note
     leg_svg.append(
-        f'<text x="0" y="{total_h - 12}" '
-        f'font-size="10" fill="#B4B2A9" '
+        f'<text x="0" y="{cy_y + 18}" font-size="10" fill="#B4B2A9" '
         f'font-family="-apple-system,BlinkMacSystemFont,\'Segoe UI\',sans-serif">'
         f'OT = Officially Tracked (cowwid surveillance panel)</text>'
     )
@@ -343,6 +350,7 @@ def _build_svg(children, root, kind_of, collapse, width=320):
     )
     return html, total_h
 
+
 # ── Public entry point ────────────────────────────────────────────────────────
 
 def render_panel_tree(
@@ -351,20 +359,35 @@ def render_panel_tree(
     pango_loader,
     scanner_results: dict | None = None,
     cooc_only: set | None = None,
+    scanner_added_for: dict | None = None,
 ):
     """
-    Render the phylogenetic variant tree for the Abundance & Co-occurrence tab.
+    Render the phylogenetic variant tree.
 
     Args:
-        selected_variants: Variants currently in the deconv panel
-        yaml_variants: Officially tracked variants (cowwid OT list)
-        pango_loader: PangoLoader instance
-        scanner_results: Scanner candidate results (v1, pass None for now)
-        cooc_only: Cooc-only variant set (v1, pass None for now)
+        selected_variants: Variants currently in the deconv panel.
+        yaml_variants: Officially tracked variants (cowwid OT list).
+        pango_loader: PangoLoader instance.
+        scanner_results: Unused (v1 forward-compat param).
+        cooc_only: Unused (v1 forward-compat param).
+        scanner_added_for: {variant: city_or_list_of_cities} for city badges.
     """
-    selected_set = set(selected_variants)
-    cooc_set     = cooc_only or set()
-    yaml_set     = set(yaml_variants)
+    selected_set  = set(selected_variants)
+    yaml_set      = set(yaml_variants)
+    scanner_added = scanner_added_for or {}
+
+    # normalize city values to lists
+    scanner_added = {
+        v: ([c] if isinstance(c, str) else c)
+        for v, c in scanner_added.items()
+        if v in selected_set  # only show badge if variant is in panel
+    }
+
+    # build city index for consistent color assignment
+    city_index: dict[str, int] = {}
+    for cities in scanner_added.values():
+        for city in cities:
+            _city_color(city, city_index)
 
     raw = pango_loader.get_raw_data()
     parent_map = {
@@ -373,22 +396,16 @@ def render_panel_tree(
         if e.get("parent")
     }
 
-    # Patch recombinant aliases that have no parent in pango_summary
     RECOMBINANT_PARENT = {
-        "XDV": "JN.1",
-        "XFG": "JN.1",
-        "XEC": "JN.1",
-        "XBB": "BA.2",
-        "XBB.1": "XBB",
-        "XBB.2": "XBB",
+        "XDV": "JN.1", "XFG": "JN.1", "XEC": "JN.1",
+        "XBB": "BA.2", "XBB.1": "XBB", "XBB.2": "XBB",
     }
     for alias, par in RECOMBINANT_PARENT.items():
         if alias in raw and alias not in parent_map:
             parent_map[alias] = par
 
-    # Patch missing intermediate nodes via name-prefix inference
     all_known = set(raw.keys())
-    for v in list(selected_set) + list(yaml_set):
+    for v in list(selected_set) + list(yaml_set) + list(scanner_added.keys()):
         if v in parent_map:
             continue
         if "." not in v:
@@ -407,18 +424,18 @@ def render_panel_tree(
                 parent_map[cur] = par
                 cur = par
 
-    if not selected_set and not yaml_set:
+    if not selected_set and not scanner_added:
         st.caption("Select at least one variant to build the tree.")
         return
 
-    result = _build_spine(
-        selected_set, cooc_set, yaml_set,
-        scanner_results, parent_map,
-    )
+    result = _build_spine(selected_set, yaml_set, scanner_added, parent_map)
     if not result:
         st.caption("Select at least one variant to build the tree.")
         return
 
     children, root, needed, kind_of, collapse = result
-    _html, _h = _build_svg(children, root, kind_of, collapse)
+    _html, _h = _build_svg(
+        children, root, kind_of, collapse,
+        yaml_set, scanner_added, city_index,
+    )
     components.html(_html, height=_h + 20, scrolling=True)
