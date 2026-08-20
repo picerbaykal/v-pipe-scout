@@ -342,6 +342,17 @@ def app():
                 )
                 if not targets:
                     st.info("All ready locations already scanned with the current panel.")
+                    # show which ones were skipped so the user knows why
+                    skipped = [
+                        loc for loc in available_for_scan
+                        if loc in scanner_results
+                        and set(scanner_panels.get(loc, [])) == set(all_selected_variants)
+                    ]
+                    if skipped:
+                        st.caption(
+                            f"Already scanned with current panel: {', '.join(skipped)}. "
+                            "Change the panel or select a specific location to re-scan."
+                        )
                 else:
                     from process.scanner import scan_unexplained_patterns
                     from api.signature_cache import (
@@ -349,26 +360,46 @@ def app():
                         get_panel_parent_map,
                         get_cowwid_signatures,
                     )
-                    with st.spinner(f"Scanning {', '.join(targets)}…"):
-                        all_sigs = get_all_lineage_signatures()
-                        parent_map = get_panel_parent_map()
-                        cowwid = get_cowwid_signatures()
-                        for loc in targets:
-                            patterns_df = pd.DataFrame(
-                                st.session_state["acooc_cooc_results"][loc]["unexplained_patterns"]
-                            )
-                            result = scan_unexplained_patterns(
-                                unexplained_patterns=patterns_df,
-                                panel_variants=all_selected_variants,
-                                cowwid_signatures=cowwid,
-                                all_lineage_signatures=all_sigs,
-                                panel_parent_map=parent_map,
-                                min_read_count=2,
-                            )
-                            scanner_results[loc] = result
-                            scanner_panels[loc] = list(all_selected_variants)
-                        st.session_state["acooc_scanner_results"] = scanner_results
-                        st.session_state["acooc_scanner_panels"] = scanner_panels
+                    # show which are being skipped (already done) vs scanned
+                    already_done = [
+                        loc for loc in available_for_scan if loc not in targets
+                    ]
+                    if already_done:
+                        st.caption(
+                            f"Skipping (already scanned): {', '.join(already_done)}"
+                        )
+
+                    all_sigs = get_all_lineage_signatures()
+                    parent_map = get_panel_parent_map()
+                    cowwid = get_cowwid_signatures()
+
+                    progress_bar = st.progress(0, text=f"Scanning {targets[0]}…")
+                    status_text = st.empty()
+
+                    for i, loc in enumerate(targets):
+                        progress_bar.progress(
+                            i / len(targets),
+                            text=f"Scanning {loc} ({i+1}/{len(targets)})…"
+                        )
+                        status_text.caption(f"Classifying unexplained patterns for {loc}…")
+                        patterns_df = pd.DataFrame(
+                            st.session_state["acooc_cooc_results"][loc]["unexplained_patterns"]
+                        )
+                        result = scan_unexplained_patterns(
+                            unexplained_patterns=patterns_df,
+                            panel_variants=all_selected_variants,
+                            cowwid_signatures=cowwid,
+                            all_lineage_signatures=all_sigs,
+                            panel_parent_map=parent_map,
+                            min_read_count=2,
+                        )
+                        scanner_results[loc] = result
+                        scanner_panels[loc] = list(all_selected_variants)
+
+                    progress_bar.progress(1.0, text=f"Done — scanned {len(targets)} location(s).")
+                    status_text.empty()
+                    st.session_state["acooc_scanner_results"] = scanner_results
+                    st.session_state["acooc_scanner_panels"] = scanner_panels
 
         st.markdown("---")
 
