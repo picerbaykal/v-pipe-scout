@@ -401,8 +401,8 @@ def app():
             summary_tab = all_tabs[0]
             city_tabs = all_tabs[1:]
 
-            @st.fragment(run_every=2)
-            def _render_city_tab(location, task_id):
+            def _city_tab_content(location, task_id):
+                """Shared content for both active and idle city tab fragments."""
                 _cooc_tasks_map = st.session_state.get("acooc_cooc_tasks", {})
                 _cooc_results = st.session_state.get("acooc_cooc_results", {})
                 _scanner_results = st.session_state.get("acooc_scanner_results", {})
@@ -573,9 +573,32 @@ def app():
                 else:
                     st.caption("Run scanner to classify unexplained patterns.")
 
+            @st.fragment(run_every="3s")
+            def _render_city_tab_active(location, task_id):
+                _city_tab_content(location, task_id)
+
+            @st.fragment
+            def _render_city_tab_idle(location, task_id):
+                _city_tab_content(location, task_id)
+
+            def _is_tab_active(location):
+                """True if this city has any Celery tasks still running."""
+                _tids = [
+                    location_tasks.get(location, ""),
+                    st.session_state.get("acooc_cooc_tasks", {}).get(location, ""),
+                    st.session_state.get("acooc_scanner_tasks", {}).get(location, ""),
+                ]
+                return any(
+                    tid and celery_app.AsyncResult(tid).state in ("PENDING", "STARTED", "RETRY")
+                    for tid in _tids
+                )
+
             for location, tab in zip(location_names, city_tabs):
                 with tab:
-                    _render_city_tab(location, location_tasks[location])
+                    if _is_tab_active(location):
+                        _render_city_tab_active(location, location_tasks[location])
+                    else:
+                        _render_city_tab_idle(location, location_tasks[location])
 
 
             # ── Summary tab (last) ─────────────────────────────────────────────
