@@ -145,7 +145,19 @@ def app():
     # Scanner-found variants may not be in the curated cowwid list, so they go
     # into the manual-add multiselect (acooc_extra_variants), which accepts any
     # pango lineage. Curated ones could go either way; extra_variants is safe.
-    _pending_added = False
+    _pending_changed = False
+    # removals first (for "track instead" swaps: remove parent, add sublineage)
+    for key in list(st.session_state.keys()):
+        if key.startswith("acooc_remove_variant_pending_"):
+            v = st.session_state.pop(key)
+            _cm = st.session_state.get("acooc_variant_multiselect", [])
+            if v in _cm:
+                st.session_state["acooc_variant_multiselect"] = [x for x in _cm if x != v]
+            _ce = st.session_state.get("acooc_extra_variants", [])
+            if v in _ce:
+                st.session_state["acooc_extra_variants"] = [x for x in _ce if x != v]
+            _pending_changed = True
+    # then additions
     for key in list(st.session_state.keys()):
         if key.startswith("acooc_add_variant_pending_"):
             v = st.session_state.pop(key)
@@ -158,8 +170,8 @@ def app():
                 _cur = st.session_state.get("acooc_extra_variants", [])
                 if v not in _cur:
                     st.session_state["acooc_extra_variants"] = _cur + [v]
-            _pending_added = True
-    if _pending_added:
+            _pending_changed = True
+    if _pending_changed:
         st.rerun()
 
     st.session_state.setdefault("location_results", {})
@@ -331,47 +343,7 @@ def app():
             st.session_state["acooc_trigger_run"] = True
         st.caption("runs all cities with base panel" if not _busy else "⟳ analysis in progress…")
 
-        # ── Scanner suggestions (aggregated across all cities) ────────────────
-        if scanner_results:
-            # aggregate missing variants across all cities → {variant: [cities]}
-            from collections import defaultdict as _ddict
-            _agg = _ddict(list)
-            for _loc, _res in scanner_results.items():
-                for _item in _res.get("missing_from_panel", []):
-                    _var = _item["variant"]
-                    if _var not in all_selected_variants:
-                        _agg[_var].append(_loc)
-            # rank by number of cities (most widespread first)
-            _ranked = sorted(_agg.items(), key=lambda x: -len(x[1]))
-
-            if _ranked:
-                st.markdown("---")
-                _step_label(6, "Scanner suggestions", done=False, active=True)
-                st.caption(
-                    "Variants explaining unexplained reads, ranked by how many "
-                    "cities need them. Adding applies to the whole panel."
-                )
-                for _var, _cities in _ranked:
-                    _short_cities = [c.split("(")[0].strip() for c in _cities]
-                    _n = len(_cities)
-                    _cols_s = st.columns([3, 1])
-                    with _cols_s[0]:
-                        _city_str = ", ".join(_short_cities[:3])
-                        if len(_short_cities) > 3:
-                            _city_str += f" +{len(_short_cities)-3}"
-                        st.markdown(
-                            f"<div style='font-size:12px;font-weight:500;color:#dc2626;'>{_var}</div>"
-                            f"<div style='font-size:10px;color:#898781;'>{_n} "
-                            f"cit{'ies' if _n != 1 else 'y'}: {_city_str}</div>",
-                            unsafe_allow_html=True,
-                        )
-                    with _cols_s[1]:
-                        if st.button("＋ Add", key=f"acooc_add_sugg_{_var}", use_container_width=True):
-                            st.session_state[f"acooc_add_variant_pending_{_var}"] = _var
-                            st.rerun()
-                st.info("After adding, re-run analysis to apply to all locations.")
-
-        # scanner status list (while scanning)
+        # scanner scanning status only (suggestions moved to right column)
         _stasks_left = st.session_state.get("acooc_scanner_tasks", {})
         _scanning = [
             _sloc for _sloc, _stid in _stasks_left.items()
@@ -693,46 +665,128 @@ def app():
             if _active_loc in location_tasks:
                 _city_tab_content(_active_loc, location_tasks[_active_loc])
 
-            # ── Combined scanner findings (one summary, all cities) ────────────
+            # ── Scanner (one section, aggregated across all cities) ────────────
             _scan_res_all = st.session_state.get("acooc_scanner_results", {})
             if _scan_res_all:
+                from collections import defaultdict as _ddict
                 st.markdown("---")
-                st.markdown("### Scanner findings")
+                st.markdown("### Scanner")
                 st.caption(
-                    "Diagnostic across all cities — what's missing, emerging, or unexplained. "
-                    "To act, add variants via the suggestions panel on the left, then re-run."
+                    "Diagnostic across all cities — expand a category to see findings "
+                    "and add variants. Adding applies to the whole panel; re-run to apply."
                 )
-                # city selector for which city's detailed findings to view
-                _scanned_cities = [loc for loc in location_names if loc in _scan_res_all]
-                if _scanned_cities:
-                    _fcols = st.columns(len(_scanned_cities))
-                    if "acooc_scanner_view_city" not in st.session_state or \
-                       st.session_state["acooc_scanner_view_city"] not in _scanned_cities:
-                        st.session_state["acooc_scanner_view_city"] = _scanned_cities[0]
-                    for _fi, _floc in enumerate(_scanned_cities):
-                        with _fcols[_fi]:
-                            _nm = len(_scan_res_all[_floc].get("missing_from_panel", []))
-                            _fon = st.session_state["acooc_scanner_view_city"] == _floc
-                            if st.button(
-                                f"{_floc.split('(')[0].strip()} ({_nm})",
-                                key=f"acooc_scanview_{_floc}",
-                                use_container_width=True,
-                                type="primary" if _fon else "secondary",
-                            ):
-                                st.session_state["acooc_scanner_view_city"] = _floc
 
-                    _view_city = st.session_state["acooc_scanner_view_city"]
-                    render_scanner_results(
-                        _scan_res_all[_view_city],
-                        selected_variants=all_selected_variants,
-                        client=wiseLoculus,
-                        location=_view_city,
-                        date_range=(
-                            datetime.combine(start_date, datetime.min.time()),
-                            datetime.combine(end_date, datetime.min.time()),
-                        ),
-                        on_add_variant=None,
+                def _chip_html(cities):
+                    return "".join(
+                        f"<span style='display:inline-block;font-size:10px;padding:1px 6px;"
+                        f"border-radius:4px;background:#F1EFE8;color:#5F5E5A;margin:1px 2px 1px 0;'>"
+                        f"{c.split('(')[0].strip()}</span>"
+                        for c in cities
                     )
+
+                # ---- Bucket 1: Missing from panel (aggregated) ----
+                _agg_miss = _ddict(list)
+                for _loc, _res in _scan_res_all.items():
+                    for _item in _res.get("missing_from_panel", []):
+                        _v = _item["variant"]
+                        if _v not in all_selected_variants:
+                            _agg_miss[_v].append(_loc)
+                _ranked_miss = sorted(_agg_miss.items(), key=lambda x: -len(x[1]))
+
+                with st.expander(f"🔴 Missing from panel ({len(_ranked_miss)} variants)", expanded=False):
+                    if not _ranked_miss:
+                        st.caption("No missing tracked variants.")
+                    else:
+                        st.caption("Officially tracked variants not in your panel. Ranked by how many cities need them.")
+                        for _var, _cities in _ranked_miss:
+                            _n = len(_cities)
+                            _m1, _m2 = st.columns([4, 1])
+                            with _m1:
+                                st.markdown(
+                                    f"<div style='font-size:13px;font-weight:600;color:#dc2626;'>{_var} "
+                                    f"<span style='font-size:10px;font-weight:400;color:#92400E;'>· {_n} cit{'ies' if _n!=1 else 'y'}</span></div>"
+                                    f"<div style='margin-top:2px;'>{_chip_html(_cities)}</div>",
+                                    unsafe_allow_html=True,
+                                )
+                            with _m2:
+                                if st.button("＋ Add", key=f"acooc_addmiss_{_var}", use_container_width=True):
+                                    st.session_state[f"acooc_add_variant_pending_{_var}"] = _var
+                                    st.rerun()
+
+                # ---- Bucket 2: Emerging sublineages (aggregated) ----
+                _agg_sub = {}  # lineage -> {parent, reads, cities, obs_muts}
+                for _loc, _res in _scan_res_all.items():
+                    for _item in _res.get("emerging_sublineage", []):
+                        _lin = _item["lineage"]
+                        if _lin not in _agg_sub:
+                            _agg_sub[_lin] = {
+                                "parent": _item["parent"],
+                                "reads": _item["total_reads"],
+                                "cities": [],
+                                "obs": _item.get("observed_mutations", []),
+                            }
+                        _agg_sub[_lin]["cities"].append(_loc)
+                _sub_list = sorted(_agg_sub.items(), key=lambda x: -x[1]["reads"])
+
+                with st.expander(f"🟡 Emerging sublineages ({len(_sub_list)} found)", expanded=False):
+                    if not _sub_list:
+                        st.caption("No emerging sublineages detected.")
+                    else:
+                        st.caption("Descendants of panel variants with rising signal. Highly similar to their parent — see options.")
+                        for _lin, _d in _sub_list:
+                            _parent = _d["parent"]
+                            _in_panel = _lin in all_selected_variants
+                            st.markdown(
+                                f"<div style='border:0.5px solid #FDE68A;background:#FFFBEB;"
+                                f"border-radius:8px;padding:8px 11px;margin:6px 0;'>"
+                                f"<div style='font-size:13px;font-weight:600;color:#92400E;'>{_lin}</div>"
+                                f"<div style='font-size:11px;color:#6b7280;margin-top:1px;'>"
+                                f"sublineage of <b>{_parent}</b> · {_d['reads']:,} reads</div>"
+                                f"<div style='margin-top:3px;'>{_chip_html(_d['cities'])}</div>"
+                                f"</div>",
+                                unsafe_allow_html=True,
+                            )
+                            _parent_in = _parent in all_selected_variants
+                            if _in_panel:
+                                st.caption(f"✓ {_lin} already in panel.")
+                            else:
+                                st.caption(
+                                    f"⚠ Very similar to parent {_parent} — adding both may destabilize "
+                                    f"deconvolution. 'Track instead' swaps {_parent} → {_lin}."
+                                )
+                                _b1, _b2, _b3 = st.columns([2, 2, 3])
+                                with _b1:
+                                    if _parent_in and st.button(f"⇄ Track instead of {_parent}", key=f"acooc_swap_{_lin}", use_container_width=True):
+                                        # remove parent, add sublineage (both via pending mechanism)
+                                        st.session_state[f"acooc_remove_variant_pending_{_parent}"] = _parent
+                                        st.session_state[f"acooc_add_variant_pending_{_lin}"] = _lin
+                                        st.rerun()
+                                with _b2:
+                                    if st.button("＋ Add anyway", key=f"acooc_addsub_{_lin}", use_container_width=True):
+                                        st.session_state[f"acooc_add_variant_pending_{_lin}"] = _lin
+                                        st.rerun()
+
+                # ---- Bucket 3: Possibly new (aggregated reads) ----
+                _pn_total = sum(
+                    _res.get("possibly_new", {}).get("total_reads", 0)
+                    for _res in _scan_res_all.values()
+                )
+                with st.expander(f"🔵 Possibly new ({_pn_total:,} reads)", expanded=False):
+                    if _pn_total == 0:
+                        st.caption("No unexplained patterns without a known lineage.")
+                    else:
+                        st.caption(
+                            f"{_pn_total:,} reads across all cities match no known lineage. "
+                            "Could be a novel variant, recombinant, or artifact. No action — monitor."
+                        )
+                        for _loc, _res in _scan_res_all.items():
+                            _pn = _res.get("possibly_new", {})
+                            if _pn.get("total_reads", 0) > 0:
+                                st.markdown(
+                                    f"<span style='font-size:11px;'><b>{_loc.split('(')[0].strip()}</b>: "
+                                    f"{_pn['total_reads']:,} reads, {_pn.get('pattern_count',0)} pattern(s)</span>",
+                                    unsafe_allow_html=True,
+                                )
 
 
             # ── Download report (triggered by button in progress header) ───────
