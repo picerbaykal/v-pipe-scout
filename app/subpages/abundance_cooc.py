@@ -148,6 +148,7 @@ def app():
             current = st.session_state.get("acooc_variant_multiselect", [])
             if v not in current:
                 st.session_state["acooc_variant_multiselect"] = current + [v]
+            st.rerun()
             break
 
     st.session_state.setdefault("location_results", {})
@@ -305,9 +306,76 @@ def app():
             st.session_state["acooc_trigger_run"] = True
 
 
-        # scanner state — read by the right column city tabs
+        # scanner state
         scanner_results = st.session_state.get("acooc_scanner_results", {})
         scanner_panels = st.session_state.get("acooc_scanner_panels", {})
+        location_names_for_scan = list(st.session_state.get("acooc_location_tasks", {}).keys())
+        available_for_scan = [
+            loc for loc in location_names_for_scan
+            if loc in st.session_state.get("acooc_cooc_results", {})
+            and st.session_state["acooc_cooc_results"][loc].get("unexplained_patterns")
+        ]
+        scanner_ready = bool(available_for_scan)
+        _step_label(6, "Scanner", done=has_scanner, active=scanner_ready and not has_scanner)
+
+        if not scanner_ready:
+            st.caption("Available once completeness finishes.")
+        else:
+            _scan_choice = st.selectbox(
+                "Location",
+                options=["All ready locations"] + available_for_scan,
+                key="acooc_scanner_location_select",
+                label_visibility="collapsed",
+            )
+            if st.button(
+                "▶ Run scanner",
+                type="primary" if not has_scanner else "secondary",
+                key="acooc_scan_global",
+                use_container_width=True,
+            ):
+                _targets = (
+                    [loc for loc in available_for_scan
+                     if loc not in scanner_results
+                     or set(scanner_panels.get(loc, [])) != set(all_selected_variants)]
+                    if _scan_choice == "All ready locations"
+                    else [_scan_choice]
+                )
+                if not _targets:
+                    st.info("All locations already scanned with the current panel.")
+                else:
+                    _already_done = [l for l in available_for_scan if l not in _targets]
+                    if _already_done:
+                        st.caption(f"Skipping (already scanned): {', '.join(_already_done)}")
+                    _new_scanner_tasks = st.session_state.get("acooc_scanner_tasks", {})
+                    for _loc in _targets:
+                        _stask = celery_app.send_task(
+                            "tasks.run_cooc_scanner_lapis",
+                            kwargs={
+                                "location": _loc,
+                                "start_date": start_date.isoformat(),
+                                "end_date": end_date.isoformat(),
+                                "variants": all_selected_variants,
+                                "unexplained_patterns": st.session_state["acooc_cooc_results"][_loc]["unexplained_patterns"],
+                            }
+                        )
+                        _new_scanner_tasks[_loc] = _stask.id
+                        scanner_panels[_loc] = list(all_selected_variants)
+                        logger.info(f"Submitted scanner task {_stask.id} for {_loc}")
+                    st.session_state["acooc_scanner_tasks"] = _new_scanner_tasks
+                    st.session_state["acooc_scanner_panels"] = scanner_panels
+
+            # scanner progress in left column
+            _stasks = st.session_state.get("acooc_scanner_tasks", {})
+            for _sloc, _stid in _stasks.items():
+                _sstate = celery_app.AsyncResult(_stid).state
+                if _sstate in ("PENDING", "STARTED", "RETRY"):
+                    st.caption(f"Scanning {_sloc.split('(')[0].strip()}…")
+                elif _sstate == "SUCCESS":
+                    st.caption(f"✓ {_sloc.split('(')[0].strip()} scanned")
+                elif _sstate == "FAILURE":
+                    st.caption(f"✗ {_sloc.split('(')[0].strip()} failed")
+
+        st.markdown("---")
 
     # ── Right column: all outputs ─────────────────────────────────────────────
     with col_results:
@@ -364,24 +432,21 @@ def app():
             cooc_task_ids = list(st.session_state.get("acooc_cooc_tasks", {}).values())
             scanner_task_ids = list(st.session_state.get("acooc_scanner_tasks", {}).values())
             all_task_ids = list(location_tasks.values()) + cooc_task_ids + scanner_task_ids
-            states = {tid: celery_app.AsyncResult(tid).state for tid in all_task_ids}
-            n_results = (
-                len(st.session_state.location_results)
-                + len(st.session_state.get("acooc_cooc_results", {}))
-            )
-            deconv_or_cooc_running = any(
-                celery_app.AsyncResult(tid).state in ("PENDING", "STARTED", "RETRY")
-                for tid in all_task_ids
-            )
-            any_just_completed = (
-                any(s == "SUCCESS" for s in states.values())
-                and n_results < len(all_task_ids)
-            )
-            if deconv_or_cooc_running or any_just_completed:
-                from streamlit_autorefresh import st_autorefresh
-                st_autorefresh(interval=2000, key="acooc_autorefresh")
 
-            # collect completed scanner task results
+            # only autorefresh while tasks are genuinely running — stop immediately
+            # when everything is done so scanner results can render uninterrupted
+            _running_tids = [
+                tid for tid in all_task_ids
+                if celery_app.AsyncResult(tid).state in ("PENDING", "STARTED", "RETRY")
+            ]
+            if _running_tids:
+                from streamlit_autorefresh import st_autorefresh
+                st_autorefresh(interval=3000, key="acooc_autorefresh")
+
+            # collect any newly completed results and rerun immediately
+            # so UI updates without waiting for the next autorefresh tick
+            # (autorefresh mid-render is what was preventing scanner buckets from appearing)
+            _any_new = False
             scanner_tasks_map = st.session_state.get("acooc_scanner_tasks", {})
             for _loc, _tid in list(scanner_tasks_map.items()):
                 if _loc not in scanner_results:
@@ -390,16 +455,43 @@ def app():
                         try:
                             scanner_results[_loc] = _t.get()
                             st.session_state["acooc_scanner_results"] = scanner_results
+                            _any_new = True
+                            logger.info(f"Scanner results collected for {_loc}")
                         except Exception as _e:
                             logger.error(f"Scanner task failed for {_loc}: {_e}")
+            # collect completed cooc results
+            _cooc_res = st.session_state.get("acooc_cooc_results", {})
+            for _loc, _tid in list(st.session_state.get("acooc_cooc_tasks", {}).items()):
+                if _loc not in _cooc_res:
+                    _t = celery_app.AsyncResult(_tid)
+                    if _t.ready():
+                        try:
+                            _cooc_res[_loc] = _t.get()
+                            st.session_state["acooc_cooc_results"] = _cooc_res
+                            _any_new = True
+                        except Exception:
+                            pass
+            if _any_new:
+                st.rerun()
 
             location_names = list(location_tasks.keys())
 
-            # city tabs + summary at the end
-            tab_labels = ["📊 Summary"] + [f"📍 {loc}" for loc in location_names]
-            all_tabs = st.tabs(tab_labels)
-            summary_tab = all_tabs[0]
-            city_tabs = all_tabs[1:]
+            # radio selector — never greys out during autorefresh unlike st.tabs
+            _city_options = [f"📍 {loc}" for loc in location_names] + ["📊 Summary"]
+            # preserve selection across reruns — setdefault only sets if key absent
+            # never override an existing valid selection with _city_options[0]
+            if "acooc_selected_city" not in st.session_state:
+                st.session_state["acooc_selected_city"] = "📊 Summary"
+            elif st.session_state["acooc_selected_city"] not in _city_options:
+                st.session_state["acooc_selected_city"] = "📊 Summary"
+            _selected = st.radio(
+                "View",
+                options=_city_options,
+                horizontal=True,
+                label_visibility="collapsed",
+                key="acooc_selected_city",
+            )
+            st.markdown("<hr style='margin:4px 0 12px;opacity:.2;'>", unsafe_allow_html=True)
 
             def _city_tab_content(location, task_id):
                 """Shared content for both active and idle city tab fragments."""
@@ -447,46 +539,17 @@ def app():
                         location, task_id, celery_app, redis_client
                     )
 
-                # ── scanner ───────────────────────────────────────────────────
+                # ── scanner results (read-only — trigger from left column) ──────
                 st.markdown("---")
-                _sc1, _sc2 = st.columns([3, 1])
-                with _sc1:
-                    _scan_badge = ""
-                    if location in _cooc_results:
-                        _mm = sum(_cooc_results[location].get("matched_counts", []))
-                        _uu = sum(_cooc_results[location].get("unexplained_counts", []))
-                        _tt = _mm + _uu
-                        if _tt > 0:
-                            _pp = _mm / _tt
-                            _scan_badge = "✓ complete" if _pp >= 0.95 else "⚠ panel incomplete"
-                    st.markdown(f"#### Scanner {_scan_badge}")
-                with _sc2:
-                    _can_scan = location in _cooc_results and bool(
-                        _cooc_results[location].get("unexplained_patterns")
-                    )
-                    if _can_scan:
-                        _stale = set(_scanner_panels.get(location, [])) != set(all_selected_variants)
-                        _btn_lbl = "▶ Re-scan" if location in _scanner_results and not _stale else "▶ Run scanner"
-                        if st.button(_btn_lbl, key=f"acooc_scan_{location}", use_container_width=True):
-                            _stask = celery_app.send_task(
-                                "tasks.run_cooc_scanner_lapis",
-                                kwargs={
-                                    "location": location,
-                                    "start_date": start_date.isoformat(),
-                                    "end_date": end_date.isoformat(),
-                                    "variants": all_selected_variants,
-                                    "unexplained_patterns": _cooc_results[location]["unexplained_patterns"],
-                                }
-                            )
-                            _sct = st.session_state.get("acooc_scanner_tasks", {})
-                            _sct[location] = _stask.id
-                            _scanner_panels[location] = list(all_selected_variants)
-                            st.session_state["acooc_scanner_tasks"] = _sct
-                            st.session_state["acooc_scanner_panels"] = _scanner_panels
-                            _scanner_results.pop(location, None)
-                            st.session_state["acooc_scanner_results"] = _scanner_results
-                    else:
-                        st.caption("Available after completeness.")
+                _scan_badge = ""
+                if location in _cooc_results:
+                    _mm = sum(_cooc_results[location].get("matched_counts", []))
+                    _uu = sum(_cooc_results[location].get("unexplained_counts", []))
+                    _tt = _mm + _uu
+                    if _tt > 0:
+                        _pp = _mm / _tt
+                        _scan_badge = "✓ complete" if _pp >= 0.95 else "⚠ panel incomplete"
+                st.markdown(f"#### Scanner {_scan_badge}")
 
                 if location in _scanner_results:
                     _stale2 = set(_scanner_panels.get(location, [])) != set(all_selected_variants)
@@ -573,36 +636,14 @@ def app():
                 else:
                     st.caption("Run scanner to classify unexplained patterns.")
 
-            @st.fragment(run_every="3s")
-            def _render_city_tab_active(location, task_id):
-                _city_tab_content(location, task_id)
-
-            @st.fragment
-            def _render_city_tab_idle(location, task_id):
-                _city_tab_content(location, task_id)
-
-            def _is_tab_active(location):
-                """True if this city has any Celery tasks still running."""
-                _tids = [
-                    location_tasks.get(location, ""),
-                    st.session_state.get("acooc_cooc_tasks", {}).get(location, ""),
-                    st.session_state.get("acooc_scanner_tasks", {}).get(location, ""),
-                ]
-                return any(
-                    tid and celery_app.AsyncResult(tid).state in ("PENDING", "STARTED", "RETRY")
-                    for tid in _tids
-                )
-
-            for location, tab in zip(location_names, city_tabs):
-                with tab:
-                    if _is_tab_active(location):
-                        _render_city_tab_active(location, location_tasks[location])
-                    else:
-                        _render_city_tab_idle(location, location_tasks[location])
+            if _selected != "📊 Summary":
+                _active_loc = _selected.replace("📍 ", "")
+                if _active_loc in location_tasks:
+                    _city_tab_content(_active_loc, location_tasks[_active_loc])
 
 
-            # ── Summary tab (last) ─────────────────────────────────────────────
-            with summary_tab:
+            # ── Summary view ───────────────────────────────────────────────────
+            if _selected == "📊 Summary":
                 st.markdown("#### Location status")
                 cooc_results = st.session_state.get("acooc_cooc_results", {})
 

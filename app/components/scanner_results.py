@@ -67,6 +67,8 @@ def _similarity_warning(
     worst_pvt_panel = 0
 
     for pv in panel_variants:
+        if pv == candidate:
+            continue  # skip self-comparison
         sig_p = panel_sigs.get(pv, set())
         if not sig_p or not candidate_sig:
             continue
@@ -230,8 +232,6 @@ def render_scanner_results(
 
             for item in missing:
                 variant = item["variant"]
-                if variant in selected_variants:
-                    continue
                 reads = item["total_reads"]
                 n_patterns = item["pattern_count"]
 
