@@ -314,13 +314,24 @@ def app():
         scanner_results = st.session_state.get("acooc_scanner_results", {})
         scanner_panels = st.session_state.get("acooc_scanner_panels", {})
 
-        # is anything currently running? (guards Run + Re-run buttons)
+        # is anything currently running? (guards Run button)
         def _any_running():
-            for _m in ("acooc_location_tasks", "acooc_cooc_tasks", "acooc_scanner_tasks"):
-                for _t in st.session_state.get(_m, {}).values():
-                    if _t and celery_app.AsyncResult(_t).state in ("PENDING", "STARTED", "RETRY"):
+            _lr = st.session_state.get("location_results", {})
+            _cr = st.session_state.get("acooc_cooc_results", {})
+            _sr = st.session_state.get("acooc_scanner_results", {})
+            _checks = [
+                (st.session_state.get("acooc_location_tasks", {}), _lr),
+                (st.session_state.get("acooc_cooc_tasks", {}), _cr),
+                (st.session_state.get("acooc_scanner_tasks", {}), _sr),
+            ]
+            for _tasks, _results in _checks:
+                for _loc, _t in _tasks.items():
+                    if _loc in _results:
+                        continue  # result already collected — not running
+                    if _t and celery_app.AsyncResult(_t).state in ("STARTED", "RETRY"):
                         return True
             return False
+
         _busy = _any_running()
 
         # ── Step 5: Run analysis ──────────────────────────────────────────────
