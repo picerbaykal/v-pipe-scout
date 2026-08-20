@@ -212,7 +212,7 @@ def app():
                 "Search pango lineage",
                 options=extra_options,
                 placeholder="e.g. KP.2.3",
-                help="Add any pango lineage. Use the scanner (step 6) to discover missing variants automatically.",
+                help="Add any pango lineage. Scanner suggestions below highlight missing variants automatically.",
                 key="acooc_extra_variants",
             )
 
@@ -230,7 +230,6 @@ def app():
             selected_variants=all_selected_variants,
             yaml_variants=curated_variants,
             pango_loader=cached_get_pango_loader(),
-            scanner_added_for=st.session_state.get("acooc_scanner_added_for", {}),
         )
 
         st.markdown("---")
@@ -321,98 +320,57 @@ def app():
             st.session_state["acooc_trigger_run"] = True
         st.caption("runs all cities with base panel" if not _busy else "⟳ analysis in progress…")
 
-        # ── Step 6: Refine one city ───────────────────────────────────────────
-        _run_locations = list(st.session_state.get("acooc_location_tasks", {}).keys())
-        if _run_locations:
+        # ── Scanner suggestions (aggregated across all cities) ────────────────
+        if scanner_results:
+            # aggregate missing variants across all cities → {variant: [cities]}
+            from collections import defaultdict as _ddict
+            _agg = _ddict(list)
+            for _loc, _res in scanner_results.items():
+                for _item in _res.get("missing_from_panel", []):
+                    _var = _item["variant"]
+                    if _var not in all_selected_variants:
+                        _agg[_var].append(_loc)
+            # rank by number of cities (most widespread first)
+            _ranked = sorted(_agg.items(), key=lambda x: -len(x[1]))
+
+            if _ranked:
+                st.markdown("---")
+                _step_label(6, "Scanner suggestions", done=False, active=True)
+                st.caption(
+                    "Variants explaining unexplained reads, ranked by how many "
+                    "cities need them. Adding applies to the whole panel."
+                )
+                for _var, _cities in _ranked[:8]:
+                    _short_cities = [c.split("(")[0].strip() for c in _cities]
+                    _n = len(_cities)
+                    _cols_s = st.columns([3, 1])
+                    with _cols_s[0]:
+                        _city_str = ", ".join(_short_cities[:3])
+                        if len(_short_cities) > 3:
+                            _city_str += f" +{len(_short_cities)-3}"
+                        st.markdown(
+                            f"<div style='font-size:12px;font-weight:500;color:#dc2626;'>{_var}</div>"
+                            f"<div style='font-size:10px;color:#898781;'>{_n} "
+                            f"cit{'ies' if _n != 1 else 'y'}: {_city_str}</div>",
+                            unsafe_allow_html=True,
+                        )
+                    with _cols_s[1]:
+                        if st.button("＋ Add", key=f"acooc_add_sugg_{_var}", use_container_width=True):
+                            _cur = st.session_state.get("acooc_variant_multiselect", [])
+                            if _var not in _cur:
+                                st.session_state["acooc_variant_multiselect"] = _cur + [_var]
+                            st.rerun()
+                st.info("After adding, re-run analysis to apply to all locations.")
+
+        # scanner status list (while scanning)
+        _stasks_left = st.session_state.get("acooc_scanner_tasks", {})
+        _scanning = [
+            _sloc for _sloc, _stid in _stasks_left.items()
+            if celery_app.AsyncResult(_stid).state in ("PENDING", "STARTED", "RETRY")
+        ]
+        if _scanning:
             st.markdown("---")
-            _step_label(6, "Refine one city", done=False,
-                        active=bool(st.session_state.get("acooc_scanner_results")))
-            st.caption("Add variants for a single city without affecting others.")
-
-            _refine_city = st.selectbox(
-                "City to refine",
-                options=_run_locations,
-                key="acooc_refine_city",
-                label_visibility="collapsed",
-            )
-
-            # scanner suggestions for the selected city
-            _sugg = []
-            if _refine_city in scanner_results:
-                _sugg = [
-                    item["variant"]
-                    for item in scanner_results[_refine_city].get("missing_from_panel", [])
-                    if item["variant"] not in all_selected_variants
-                ][:6]
-            if _sugg:
-                st.caption(f"Scanner found: {', '.join(_sugg)}")
-
-            _city_extras = st.session_state.get("acooc_city_extras", {})
-            _cur_extras = _city_extras.get(_refine_city, [])
-
-            _pl6 = cached_get_pango_loader()
-            _all_lin = sorted(_pl6.get_raw_data().keys())
-            _opts6 = [v for v in _all_lin if v not in all_selected_variants]
-            _extras6 = st.multiselect(
-                f"Add for {_refine_city.split('(')[0].strip()} only",
-                options=_opts6,
-                default=_cur_extras,
-                placeholder="Search any pango lineage…",
-                key=f"acooc_refine_ms_{_refine_city}",
-            )
-            if _extras6 != _cur_extras:
-                _city_extras[_refine_city] = _extras6
-                st.session_state["acooc_city_extras"] = _city_extras
-                _cur_extras = _extras6
-
-            _combined6 = all_selected_variants + [v for v in _cur_extras if v not in all_selected_variants]
-            _city_done = (_refine_city in scanner_results)
-            _city_busy = (
-                celery_app.AsyncResult(st.session_state.get("acooc_location_tasks",{}).get(_refine_city,"")).state in ("PENDING","STARTED","RETRY")
-                or celery_app.AsyncResult(st.session_state.get("acooc_cooc_tasks",{}).get(_refine_city,"")).state in ("PENDING","STARTED","RETRY")
-                or celery_app.AsyncResult(st.session_state.get("acooc_scanner_tasks",{}).get(_refine_city,"")).state in ("PENDING","STARTED","RETRY")
-            )
-            if _cur_extras:
-                st.caption(f"Base ({len(all_selected_variants)}) + {len(_cur_extras)} local = {len(_combined6)} for {_refine_city.split('(')[0].strip()}")
-            _rerun_disabled = _city_busy or not _city_done
-            if st.button(
-                f"▶ Re-run {_refine_city.split('(')[0].strip()}",
-                key=f"acooc_refine_rerun_{_refine_city}",
-                type="primary",
-                use_container_width=True,
-                disabled=_rerun_disabled,
-                help=("Finish the initial analysis first." if _city_busy or not _city_done else None),
-            ):
-                _rt = celery_app.send_task(
-                    "tasks.run_deconvolve_lapis",
-                    kwargs={"location": _refine_city,
-                            "start_date": start_date.isoformat(),
-                            "end_date": end_date.isoformat(),
-                            "variants": _combined6,
-                            "bootstraps": bootstraps, "bandwidth": bandwidth})
-                _rct = celery_app.send_task(
-                    "tasks.run_cooc_completeness_lapis",
-                    kwargs={"location": _refine_city,
-                            "start_date": start_date.isoformat(),
-                            "end_date": end_date.isoformat(),
-                            "variants": _combined6})
-                st.session_state["acooc_location_tasks"][_refine_city] = _rt.id
-                st.session_state["acooc_cooc_tasks"][_refine_city] = _rct.id
-                st.session_state["location_results"].pop(_refine_city, None)
-                st.session_state["acooc_cooc_results"].pop(_refine_city, None)
-                st.session_state["acooc_scanner_results"].pop(_refine_city, None)
-                _sct6 = st.session_state.get("acooc_scanner_tasks", {})
-                _sct6.pop(_refine_city, None)
-                st.session_state["acooc_scanner_tasks"] = _sct6
-                logger.info(f"Refine re-run {_refine_city}: {len(_combined6)} variants")
-
-            # scanner status list
-            _stasks_left = st.session_state.get("acooc_scanner_tasks", {})
-            if _stasks_left:
-                for _sloc, _stid in _stasks_left.items():
-                    _sstate = celery_app.AsyncResult(_stid).state
-                    if _sstate in ("PENDING", "STARTED", "RETRY"):
-                        st.caption(f"⟳ Scanning {_sloc.split('(')[0].strip()}…")
+            st.caption("⟳ Scanning: " + ", ".join(s.split("(")[0].strip() for s in _scanning))
     # ── Right column: all outputs ─────────────────────────────────────────────
     with col_results:
 
@@ -766,13 +724,12 @@ def app():
                 else:
                     st.caption("Scanner will run automatically after completeness.")
 
-                # scanner is read-only — refine controls live in step 6 (left column)
-                _short2 = location.split("(")[0].strip()
-                _city_extras_view = st.session_state.get("acooc_city_extras", {}).get(location, [])
-                if _city_extras_view:
-                    st.caption(f"Local additions for {_short2}: {', '.join(_city_extras_view)} (manage in step 6, left)")
-                else:
-                    st.caption(f"To add missing variants for {_short2}: use step 6 (left) → select {_short2} → add → re-run.")
+                # scanner is read-only — add missing variants via the suggestions
+                # panel in the left column (below the variant panel), then re-run
+                st.caption(
+                    "Scanner is a diagnostic — to act on missing variants, use the "
+                    "suggestions panel on the left, then re-run analysis."
+                )
 
             _active_loc = _selected.replace("📍 ", "")
             if _active_loc in location_tasks:

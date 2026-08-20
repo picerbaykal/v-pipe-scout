@@ -1,14 +1,15 @@
 """
 components/abundance_cooc_tree.py
 
-Interactive phylogenetic variant tree for the Abundance & Co-occurrence tab.
+Phylogenetic variant tree for the Abundance & Co-occurrence tab.
 
-Renders a pruned pango tree rooted at B, showing:
-- Selected variants (in deconv panel) — filled blue circles
-- Cowwid OT variants (officially tracked, not selected) — open blue circles
-  with "OT" badge
-- Scanner-added variants — amber dot, OT badge if applicable, city badge(s)
+Shows the global variant panel rooted at B:
+- Selected variants — filled blue circles
+- Officially tracked (cowwid OT) variants get an "OT" badge
 - Spine/structural nodes — small grey circles connecting the hierarchy
+
+No per-city labels — the panel is global. The only distinction is
+OT (officially tracked) vs not.
 """
 from __future__ import annotations
 from collections import defaultdict
@@ -16,44 +17,13 @@ from collections import defaultdict
 import streamlit as st
 import streamlit.components.v1 as components
 
-# ── Visual config ─────────────────────────────────────────────────────────────
 C = {
     "panel_ot": "#185FA5",
     "panel":    "#185FA5",
-    "scanner":  "#F59E0B",
     "yaml":     "#185FA5",
-    "none":     "#C8C6BE",
     "spine":    "#C8C6BE",
 }
 
-BADGE = {
-    "panel_ot": ("OT", "#F1EFE8", "#5F5E5A"),
-    "panel":    ("", "", ""),
-    "scanner":  ("", "", ""),
-    "yaml":     ("OT", "#F1EFE8", "#5F5E5A"),
-    "none":     ("", "", ""),
-    "spine":    ("", "", ""),
-}
-
-# city color palette — consistent across UI
-CITY_COLORS = [
-    ("#FEF3C7", "#92400E", "#F59E0B"),  # amber  — Lugano
-    ("#EFF6FF", "#1E40AF", "#3B82F6"),  # blue   — Basel
-    ("#F0FDF4", "#166534", "#22C55E"),  # green  — Zürich
-    ("#F5F3FF", "#4C1D95", "#7C3AED"),  # purple
-    ("#FFF1F2", "#881337", "#F43F5E"),  # rose
-    ("#ECFEFF", "#164E63", "#06B6D4"),  # cyan
-]
-
-
-def _city_color(city: str, city_index: dict) -> tuple[str, str, str]:
-    """Return (bg, text, border) for a city, assigning a color on first use."""
-    if city not in city_index:
-        city_index[city] = len(city_index) % len(CITY_COLORS)
-    return CITY_COLORS[city_index[city]]
-
-
-# ── Ancestry helpers ──────────────────────────────────────────────────────────
 
 def _ancestors(v: str, parent_map: dict) -> list[str]:
     path = []
@@ -63,33 +33,19 @@ def _ancestors(v: str, parent_map: dict) -> list[str]:
     return path
 
 
-def _build_spine(
-    selected_set: set,
-    yaml_set: set,
-    scanner_added: dict,   # {variant: city_name}
-    parent_map: dict,
-):
-    if not selected_set and not scanner_added:
+def _build_spine(selected_set: set, yaml_set: set, parent_map: dict):
+    if not selected_set:
         return None
 
-    all_variants = selected_set | set(scanner_added.keys())
-
     needed: set = set()
-    for v in all_variants:
+    for v in selected_set:
         needed.add(v)
         for a in _ancestors(v, parent_map):
             needed.add(a)
     for v in yaml_set:
-        if any(a in all_variants for a in _ancestors(v, parent_map) + [v]):
+        if any(a in selected_set for a in _ancestors(v, parent_map) + [v]):
             needed.add(v)
-
     needed.add("B")
-
-    children: dict = defaultdict(list)
-    for v in needed:
-        p = parent_map.get(v)
-        if p and p in needed:
-            children[p].append(v)
 
     root = "B"
 
@@ -111,12 +67,8 @@ def _build_spine(
             children[p].append(v)
 
     def kind_of(v):
-        if v in scanner_added:
-            return "scanner"
         if v in selected_set:
-            if v in yaml_set:
-                return "panel_ot"
-            return "panel"
+            return "panel_ot" if v in yaml_set else "panel"
         if v in yaml_set:
             return "yaml"
         return "spine"
@@ -138,15 +90,8 @@ def _build_spine(
     return children, root, needed, kind_of, collapse
 
 
-# ── SVG renderer ──────────────────────────────────────────────────────────────
-
-def _build_svg(children, root, kind_of, collapse,
-               yaml_set: set, scanner_added: dict,
-               city_index: dict, width=340):
-    ROW_H  = 26
-    INDENT = 20
-    X0     = 16
-
+def _build_svg(children, root, kind_of, collapse, width=340):
+    ROW_H, INDENT, X0 = 26, 20, 16
     rows = []
     visited = set()
 
@@ -158,38 +103,30 @@ def _build_svg(children, root, kind_of, collapse,
         if kind == "spine" and depth > 0:
             label, real_v = collapse(v)
         else:
-            label = v.replace("_", " ")
-            real_v = v
+            label, real_v = v.replace("_", " "), v
         rows.append((v, label, real_v, depth, kind))
         ch = sorted(children.get(real_v, []), key=lambda x: (
             0 if kind_of(x) in ("panel", "panel_ot") else
-            1 if kind_of(x) == "scanner" else
-            2 if kind_of(x) == "yaml" else 3, x))
+            1 if kind_of(x) == "yaml" else 2, x))
         for c in ch:
             assign_rows(c, depth + 1)
 
     assign_rows(root, 0)
+    row_y = {rows[i][0]: i * ROW_H + ROW_H // 2 for i in range(len(rows))}
+    total_h = len(rows) * ROW_H + 60
 
-    row_y   = {rows[i][0]: i * ROW_H + ROW_H // 2 for i in range(len(rows))}
-    # legend: selected + not selected + scanner find + OT note + city pills
-    n_cities = len(city_index)
-    legend_h = 30 + 16 + max(0, (n_cities - 1)) * 0 + 14
-    total_h  = len(rows) * ROW_H + legend_h + 50
-
-    lines_svg = []
-    nodes_svg = []
+    lines_svg, nodes_svg = [], []
 
     for v, _, real_v, depth, kind in rows:
         ch = sorted(children.get(real_v, []), key=lambda x: (
             0 if kind_of(x) in ("panel", "panel_ot") else
-            1 if kind_of(x) == "scanner" else
-            2 if kind_of(x) == "yaml" else 3, x))
+            1 if kind_of(x) == "yaml" else 2, x))
         if not ch:
             continue
         x = X0 + depth * INDENT
-        r_parent = 5 if kind not in ("spine", "none") else 3
-        y_start  = row_y[v] + r_parent + 1
-        y_last   = row_y[ch[-1]]
+        r_parent = 5 if kind not in ("spine",) else 3
+        y_start = row_y[v] + r_parent + 1
+        y_last = row_y[ch[-1]]
         lines_svg.append(
             f'<line x1="{x}" y1="{y_start}" x2="{x}" y2="{y_last}" '
             f'stroke="#D3D1C7" stroke-width="1.5"/>'
@@ -199,9 +136,9 @@ def _build_svg(children, root, kind_of, collapse,
         x = X0 + depth * INDENT
         y = row_y[v]
         color = C[kind]
-        is_spine = kind in ("spine", "none")
-        filled = kind in ("panel", "panel_ot", "scanner")
-        fw = "600" if kind in ("panel", "panel_ot") else "400"
+        is_spine = kind == "spine"
+        filled = kind in ("panel", "panel_ot")
+        fw = "600" if filled else "400"
         fsize = "11" if is_spine else "13"
         fcolor = color if not is_spine else "#B4B2A9"
         r = 5 if not is_spine else 3
@@ -226,74 +163,36 @@ def _build_svg(children, root, kind_of, collapse,
 
         tx = x + r + 6
         nodes_svg.append(
-            f'<text x="{tx}" y="{y}" dy="0.35em" '
-            f'font-size="{fsize}" font-weight="{fw}" fill="{fcolor}" '
+            f'<text x="{tx}" y="{y}" dy="0.35em" font-size="{fsize}" '
+            f'font-weight="{fw}" fill="{fcolor}" '
             f'font-family="-apple-system,BlinkMacSystemFont,\'Segoe UI\',sans-serif">'
             f'{label}</text>'
         )
 
-        # OT badge (only for non-scanner variants)
-        cursor_x = tx + len(label) * (7 if not is_spine else 6) + 16
-        bdg, bbg, bfg = BADGE[kind]
-        if bdg:
-            bw = len(bdg) * 6.2 + 14
+        # OT badge only
+        if kind in ("panel_ot", "yaml"):
+            lw = len(label) * (7 if not is_spine else 6) + 16
+            bx = tx + lw
+            bw = 6.2 * 2 + 14
             bh = 15
             nodes_svg.append(
-                f'<rect x="{cursor_x}" y="{y - bh//2}" width="{bw}" height="{bh}" '
-                f'rx="7" fill="{bbg}"/>'
-                f'<text x="{cursor_x + bw/2:.1f}" y="{y}" dy="0.35em" '
-                f'text-anchor="middle" font-size="10" fill="{bfg}" '
-                f'font-family="-apple-system,BlinkMacSystemFont,\'Segoe UI\',sans-serif">'
-                f'{bdg}</text>'
-            )
-            cursor_x += bw + 4
-
-        # OT badge for scanner-added OT variants
-        if kind == "scanner" and v in yaml_set:
-            ot_bw = 6.2 * 2 + 14  # "OT"
-            bh = 15
-            nodes_svg.append(
-                f'<rect x="{cursor_x}" y="{y - bh//2}" width="{ot_bw}" height="{bh}" '
+                f'<rect x="{bx}" y="{y - bh//2}" width="{bw}" height="{bh}" '
                 f'rx="7" fill="#F1EFE8"/>'
-                f'<text x="{cursor_x + ot_bw/2:.1f}" y="{y}" dy="0.35em" '
+                f'<text x="{bx + bw/2:.1f}" y="{y}" dy="0.35em" '
                 f'text-anchor="middle" font-size="10" fill="#5F5E5A" '
                 f'font-family="-apple-system,BlinkMacSystemFont,\'Segoe UI\',sans-serif">'
                 f'OT</text>'
             )
-            cursor_x += ot_bw + 4
 
-        # city badge for scanner-added variants
-        if kind == "scanner" and v in scanner_added:
-            cities = scanner_added[v]
-            if isinstance(cities, str):
-                cities = [cities]
-            for city in cities:
-                bg, fg, border = _city_color(city, city_index)
-                short = city.split("(")[0].strip()  # "Lugano (TI)" → "Lugano"
-                cw = len(short) * 6.2 + 14
-                bh = 15
-                nodes_svg.append(
-                    f'<rect x="{cursor_x}" y="{y - bh//2}" width="{cw}" height="{bh}" '
-                    f'rx="7" fill="{bg}" stroke="{border}" stroke-width="0.5"/>'
-                    f'<text x="{cursor_x + cw/2:.1f}" y="{y}" dy="0.35em" '
-                    f'text-anchor="middle" font-size="10" font-weight="500" fill="{fg}" '
-                    f'font-family="-apple-system,BlinkMacSystemFont,\'Segoe UI\',sans-serif">'
-                    f'{short}</text>'
-                )
-                cursor_x += cw + 4
-
-    # ── legend ────────────────────────────────────────────────────────────────
-    leg_y = total_h - legend_h + 8
+    # legend
+    leg_y = total_h - 34
     leg_svg = [
-        f'<line x1="0" y1="{leg_y - 8}" x2="{width}" y2="{leg_y - 8}" '
+        f'<line x1="0" y1="{total_h - 48}" x2="{width}" y2="{total_h - 48}" '
         f'stroke="#E8E6E0" stroke-width="1"/>'
     ]
-
-    # row 1: selected · not selected · scanner find
     items = [
-        ("#185FA5", True,  "selected"),
+        ("#185FA5", True, "selected"),
         ("#185FA5", False, "not selected"),
-        ("#F59E0B", True,  "scanner find"),
     ]
     lx = 0
     for lc, lf, ltxt in items:
@@ -310,38 +209,28 @@ def _build_svg(children, root, kind_of, collapse,
             f'{ltxt}</text>'
         )
         lx += len(ltxt) * 6 + 26
-
-    # row 2: city pills
-    cy_y = leg_y + 18
-    lx = 0
-    for city, idx in sorted(city_index.items(), key=lambda x: x[1]):
-        bg, fg, border = CITY_COLORS[idx]
-        short = city.split("(")[0].strip()
-        cw = len(short) * 6.2 + 14
-        leg_svg.append(
-            f'<rect x="{lx}" y="{cy_y - 7}" width="{cw}" height="14" '
-            f'rx="7" fill="{bg}" stroke="{border}" stroke-width="0.5"/>'
-            f'<text x="{lx + cw/2:.1f}" y="{cy_y}" dy="0.35em" '
-            f'text-anchor="middle" font-size="10" font-weight="500" fill="{fg}" '
-            f'font-family="-apple-system,BlinkMacSystemFont,\'Segoe UI\',sans-serif">'
-            f'{short}</text>'
-        )
-        lx += cw + 6
-
-    # OT note
+    # OT chip in legend
     leg_svg.append(
-        f'<text x="0" y="{cy_y + 18}" font-size="10" fill="#B4B2A9" '
+        f'<rect x="{lx}" y="{leg_y-7}" width="26" height="14" rx="7" fill="#F1EFE8"/>'
+        f'<text x="{lx+13}" y="{leg_y}" dy="0.35em" text-anchor="middle" '
+        f'font-size="9" fill="#5F5E5A" '
+        f'font-family="-apple-system,BlinkMacSystemFont,\'Segoe UI\',sans-serif">OT</text>'
+    )
+    leg_svg.append(
+        f'<text x="{lx+32}" y="{leg_y}" dy="0.35em" font-size="10" fill="#888" '
+        f'font-family="-apple-system,BlinkMacSystemFont,\'Segoe UI\',sans-serif">'
+        f'officially tracked</text>'
+    )
+    leg_svg.append(
+        f'<text x="0" y="{total_h - 12}" font-size="10" fill="#B4B2A9" '
         f'font-family="-apple-system,BlinkMacSystemFont,\'Segoe UI\',sans-serif">'
         f'OT = Officially Tracked (cowwid surveillance panel)</text>'
     )
 
     svg = (
-        f'<svg xmlns="http://www.w3.org/2000/svg" '
-        f'width="{width}" height="{total_h}" style="display:block">'
-        + "".join(lines_svg)
-        + "".join(nodes_svg)
-        + "".join(leg_svg)
-        + "</svg>"
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" '
+        f'height="{total_h}" style="display:block">'
+        + "".join(lines_svg) + "".join(nodes_svg) + "".join(leg_svg) + "</svg>"
     )
     html = (
         f'<!DOCTYPE html><html><head>'
@@ -350,8 +239,6 @@ def _build_svg(children, root, kind_of, collapse,
     )
     return html, total_h
 
-
-# ── Public entry point ────────────────────────────────────────────────────────
 
 def render_panel_tree(
     selected_variants: list[str],
@@ -362,39 +249,15 @@ def render_panel_tree(
     scanner_added_for: dict | None = None,
 ):
     """
-    Render the phylogenetic variant tree.
-
-    Args:
-        selected_variants: Variants currently in the deconv panel.
-        yaml_variants: Officially tracked variants (cowwid OT list).
-        pango_loader: PangoLoader instance.
-        scanner_results: Unused (v1 forward-compat param).
-        cooc_only: Unused (v1 forward-compat param).
-        scanner_added_for: {variant: city_or_list_of_cities} for city badges.
+    Render the global variant tree. Only distinction: OT vs not-OT.
+    (scanner_results, cooc_only, scanner_added_for kept for signature
+    compatibility but unused.)
     """
-    selected_set  = set(selected_variants)
-    yaml_set      = set(yaml_variants)
-    scanner_added = scanner_added_for or {}
-
-    # normalize city values to lists
-    scanner_added = {
-        v: ([c] if isinstance(c, str) else c)
-        for v, c in scanner_added.items()
-        if v in selected_set  # only show badge if variant is in panel
-    }
-
-    # build city index for consistent color assignment
-    city_index: dict[str, int] = {}
-    for cities in scanner_added.values():
-        for city in cities:
-            _city_color(city, city_index)
+    selected_set = set(selected_variants)
+    yaml_set = set(yaml_variants)
 
     raw = pango_loader.get_raw_data()
-    parent_map = {
-        v: e.get("parent", "")
-        for v, e in raw.items()
-        if e.get("parent")
-    }
+    parent_map = {v: e.get("parent", "") for v, e in raw.items() if e.get("parent")}
 
     RECOMBINANT_PARENT = {
         "XDV": "JN.1", "XFG": "JN.1", "XEC": "JN.1",
@@ -405,10 +268,8 @@ def render_panel_tree(
             parent_map[alias] = par
 
     all_known = set(raw.keys())
-    for v in list(selected_set) + list(yaml_set) + list(scanner_added.keys()):
-        if v in parent_map:
-            continue
-        if "." not in v:
+    for v in list(selected_set) + list(yaml_set):
+        if v in parent_map or "." not in v:
             continue
         name_par = v.rsplit(".", 1)[0]
         if name_par in all_known:
@@ -424,18 +285,15 @@ def render_panel_tree(
                 parent_map[cur] = par
                 cur = par
 
-    if not selected_set and not scanner_added:
+    if not selected_set and not yaml_set:
         st.caption("Select at least one variant to build the tree.")
         return
 
-    result = _build_spine(selected_set, yaml_set, scanner_added, parent_map)
+    result = _build_spine(selected_set, yaml_set, parent_map)
     if not result:
         st.caption("Select at least one variant to build the tree.")
         return
 
     children, root, needed, kind_of, collapse = result
-    _html, _h = _build_svg(
-        children, root, kind_of, collapse,
-        yaml_set, scanner_added, city_index,
-    )
+    _html, _h = _build_svg(children, root, kind_of, collapse)
     components.html(_html, height=_h + 20, scrolling=True)
