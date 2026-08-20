@@ -141,15 +141,26 @@ def _step_label(n: int, label: str, done: bool = False, active: bool = False) ->
 
 
 def app():
-    # Apply any pending variant additions from the scanner BEFORE widgets render
+    # Apply any pending variant additions from the scanner BEFORE widgets render.
+    # Scanner-found variants may not be in the curated cowwid list, so they go
+    # into the manual-add multiselect (acooc_extra_variants), which accepts any
+    # pango lineage. Curated ones could go either way; extra_variants is safe.
+    _pending_added = False
     for key in list(st.session_state.keys()):
         if key.startswith("acooc_add_variant_pending_"):
             v = st.session_state.pop(key)
-            current = st.session_state.get("acooc_variant_multiselect", [])
-            if v not in current:
-                st.session_state["acooc_variant_multiselect"] = current + [v]
-            st.rerun()
-            break
+            _curated = cached_get_variant_names()
+            if v in _curated:
+                _cur = st.session_state.get("acooc_variant_multiselect", [])
+                if v not in _cur:
+                    st.session_state["acooc_variant_multiselect"] = _cur + [v]
+            else:
+                _cur = st.session_state.get("acooc_extra_variants", [])
+                if v not in _cur:
+                    st.session_state["acooc_extra_variants"] = _cur + [v]
+            _pending_added = True
+    if _pending_added:
+        st.rerun()
 
     st.session_state.setdefault("location_results", {})
     st.session_state.setdefault("acooc_location_tasks", {})
@@ -340,7 +351,7 @@ def app():
                     "Variants explaining unexplained reads, ranked by how many "
                     "cities need them. Adding applies to the whole panel."
                 )
-                for _var, _cities in _ranked[:8]:
+                for _var, _cities in _ranked:
                     _short_cities = [c.split("(")[0].strip() for c in _cities]
                     _n = len(_cities)
                     _cols_s = st.columns([3, 1])
@@ -356,9 +367,7 @@ def app():
                         )
                     with _cols_s[1]:
                         if st.button("＋ Add", key=f"acooc_add_sugg_{_var}", use_container_width=True):
-                            _cur = st.session_state.get("acooc_variant_multiselect", [])
-                            if _var not in _cur:
-                                st.session_state["acooc_variant_multiselect"] = _cur + [_var]
+                            st.session_state[f"acooc_add_variant_pending_{_var}"] = _var
                             st.rerun()
                 st.info("After adding, re-run analysis to apply to all locations.")
 
@@ -677,63 +686,53 @@ def app():
                             pango_loader=cached_get_pango_loader(),
                         )
 
-                # ── scanner (exploration) ─────────────────────────────────────
+                # scanner results shown in a combined summary below all city tabs
+                # (not per-tab) — see the "Scanner findings" section after the tabs
+
+            _active_loc = _selected.replace("📍 ", "")
+            if _active_loc in location_tasks:
+                _city_tab_content(_active_loc, location_tasks[_active_loc])
+
+            # ── Combined scanner findings (one summary, all cities) ────────────
+            _scan_res_all = st.session_state.get("acooc_scanner_results", {})
+            if _scan_res_all:
                 st.markdown("---")
-                _scan_badge = ""
-                if location in _cooc_results:
-                    _mm = sum(_cooc_results[location].get("matched_counts", []))
-                    _uu = sum(_cooc_results[location].get("unexplained_counts", []))
-                    _tt = _mm + _uu
-                    if _tt > 0:
-                        _pp = _mm / _tt
-                        _scan_badge = "✓ complete" if _pp >= 0.95 else "⚠ panel incomplete"
-                _scan_col_h, _scan_col_note = st.columns([2, 2])
-                with _scan_col_h:
-                    st.markdown(f"#### Scanner {_scan_badge}")
-                st.caption("Exploration — discover missing variants and emerging sublineages.")
-                with _scan_col_note:
-                    if location not in _scanner_results and location not in _scanner_tasks_map:
-                        st.caption("auto-runs after completeness")
-                    elif location in _scanner_tasks_map and location not in _scanner_results:
-                        st.caption("⟳ scanning…")
+                st.markdown("### Scanner findings")
+                st.caption(
+                    "Diagnostic across all cities — what's missing, emerging, or unexplained. "
+                    "To act, add variants via the suggestions panel on the left, then re-run."
+                )
+                # city selector for which city's detailed findings to view
+                _scanned_cities = [loc for loc in location_names if loc in _scan_res_all]
+                if _scanned_cities:
+                    _fcols = st.columns(len(_scanned_cities))
+                    if "acooc_scanner_view_city" not in st.session_state or \
+                       st.session_state["acooc_scanner_view_city"] not in _scanned_cities:
+                        st.session_state["acooc_scanner_view_city"] = _scanned_cities[0]
+                    for _fi, _floc in enumerate(_scanned_cities):
+                        with _fcols[_fi]:
+                            _nm = len(_scan_res_all[_floc].get("missing_from_panel", []))
+                            _fon = st.session_state["acooc_scanner_view_city"] == _floc
+                            if st.button(
+                                f"{_floc.split('(')[0].strip()} ({_nm})",
+                                key=f"acooc_scanview_{_floc}",
+                                use_container_width=True,
+                                type="primary" if _fon else "secondary",
+                            ):
+                                st.session_state["acooc_scanner_view_city"] = _floc
 
-                if location in _scanner_results:
-                    _stale2 = set(_scanner_panels.get(location, [])) != set(all_selected_variants)
-                    if _stale2:
-                        st.warning("Panel changed — re-run analysis to refresh scanner.")
-
-                    # scanner is read-only — no add button
+                    _view_city = st.session_state["acooc_scanner_view_city"]
                     render_scanner_results(
-                        _scanner_results[location],
+                        _scan_res_all[_view_city],
                         selected_variants=all_selected_variants,
                         client=wiseLoculus,
-                        location=location,
+                        location=_view_city,
                         date_range=(
                             datetime.combine(start_date, datetime.min.time()),
                             datetime.combine(end_date, datetime.min.time()),
                         ),
                         on_add_variant=None,
                     )
-
-                elif location in _scanner_tasks_map:
-                    _stt = celery_app.AsyncResult(_scanner_tasks_map[location])
-                    if _stt.state in ("PENDING", "STARTED", "RETRY"):
-                        st.info("⟳ Scanner running — auto-runs after completeness…")
-                    elif _stt.state == "FAILURE":
-                        st.error("Scanner failed — check worker logs.")
-                else:
-                    st.caption("Scanner will run automatically after completeness.")
-
-                # scanner is read-only — add missing variants via the suggestions
-                # panel in the left column (below the variant panel), then re-run
-                st.caption(
-                    "Scanner is a diagnostic — to act on missing variants, use the "
-                    "suggestions panel on the left, then re-run analysis."
-                )
-
-            _active_loc = _selected.replace("📍 ", "")
-            if _active_loc in location_tasks:
-                _city_tab_content(_active_loc, location_tasks[_active_loc])
 
 
             # ── Download report (triggered by button in progress header) ───────
