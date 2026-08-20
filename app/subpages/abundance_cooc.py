@@ -567,8 +567,13 @@ def app():
                                     st.rerun()
                     elif location in scanner_tasks_map:
                         _st = celery_app.AsyncResult(scanner_tasks_map[location])
-                        if _st.state in ("PENDING", "STARTED"):
-                            st.info("Scanner running…")
+                        if _st.state in ("PENDING", "STARTED", "RETRY"):
+                            with st.status("Scanner running…", expanded=True) as _scan_status:
+                                st.write(f"Classifying unexplained patterns for {location}…")
+                                st.write("Checking against known lineages and panel variants…")
+                            _scan_status.update(label="Scanner running…", state="running")
+                        elif _st.state == "FAILURE":
+                            st.error(f"Scanner failed — check worker logs.")
                     else:
                         st.caption("Run scanner to classify unexplained patterns.")
 
