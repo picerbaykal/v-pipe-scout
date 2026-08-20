@@ -465,15 +465,17 @@ def app():
                 _n_miss = len(_scan_res2.get(loc,{}).get("missing_from_panel",[])) if _scan_done else 0
                 return _pct, _n_miss, _scan_done, _scan_running, _deconv_done, _cooc_done, _deconv_running, _cooc_running
 
+            def _tid_running(tid):
+                return bool(tid) and celery_app.AsyncResult(tid).state in ("PENDING","STARTED","RETRY")
+
             _n_complete = sum(1 for loc in location_names
-                if loc in _scan_res2 and
-                sum(_cooc_res2.get(loc,{}).get("matched_counts",[]))/
-                max(1,sum(_cooc_res2.get(loc,{}).get("matched_counts",[]))+
-                    sum(_cooc_res2.get(loc,{}).get("unexplained_counts",[])))>=0.95)
+                if loc in st.session_state.get("location_results", {})
+                and loc in _cooc_res2
+                and loc in _scan_res2)
             _n_running = sum(1 for loc in location_names
-                if celery_app.AsyncResult(location_tasks.get(loc,"")).state in ("PENDING","STARTED","RETRY")
-                or celery_app.AsyncResult(st.session_state.get("acooc_cooc_tasks",{}).get(loc,"")).state in ("PENDING","STARTED","RETRY")
-                or celery_app.AsyncResult(st.session_state.get("acooc_scanner_tasks",{}).get(loc,"")).state in ("PENDING","STARTED","RETRY"))
+                if _tid_running(location_tasks.get(loc,""))
+                or _tid_running(st.session_state.get("acooc_cooc_tasks",{}).get(loc,""))
+                or _tid_running(st.session_state.get("acooc_scanner_tasks",{}).get(loc,"")))
             _n_pending = len(location_names) - _n_complete - _n_running
 
             with st.container():
