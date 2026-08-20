@@ -380,31 +380,27 @@ def app():
                     parent_map = get_panel_parent_map()
                     cowwid = get_cowwid_signatures()
 
-                    progress_bar = st.progress(0, text=f"Scanning {targets[0]}…")
-                    status_text = st.empty()
-
-                    for i, loc in enumerate(targets):
-                        progress_bar.progress(
-                            i / len(targets),
-                            text=f"Scanning {loc} ({i+1}/{len(targets)})…"
+                    with st.status(f"Scanning {len(targets)} location(s)…", expanded=True) as scan_status:
+                        for i, loc in enumerate(targets):
+                            st.write(f"Scanning {loc} ({i+1}/{len(targets)})…")
+                            patterns_df = pd.DataFrame(
+                                st.session_state["acooc_cooc_results"][loc]["unexplained_patterns"]
+                            )
+                            result = scan_unexplained_patterns(
+                                unexplained_patterns=patterns_df,
+                                panel_variants=all_selected_variants,
+                                cowwid_signatures=cowwid,
+                                all_lineage_signatures=all_sigs,
+                                panel_parent_map=parent_map,
+                                min_read_count=2,
+                            )
+                            scanner_results[loc] = result
+                            scanner_panels[loc] = list(all_selected_variants)
+                            st.write(f"✓ {loc} done")
+                        scan_status.update(
+                            label=f"Done — scanned {len(targets)} location(s).",
+                            state="complete"
                         )
-                        status_text.caption(f"Classifying unexplained patterns for {loc}…")
-                        patterns_df = pd.DataFrame(
-                            st.session_state["acooc_cooc_results"][loc]["unexplained_patterns"]
-                        )
-                        result = scan_unexplained_patterns(
-                            unexplained_patterns=patterns_df,
-                            panel_variants=all_selected_variants,
-                            cowwid_signatures=cowwid,
-                            all_lineage_signatures=all_sigs,
-                            panel_parent_map=parent_map,
-                            min_read_count=2,
-                        )
-                        scanner_results[loc] = result
-                        scanner_panels[loc] = list(all_selected_variants)
-
-                    progress_bar.progress(1.0, text=f"Done — scanned {len(targets)} location(s).")
-                    status_text.empty()
                     st.session_state["acooc_scanner_results"] = scanner_results
                     st.session_state["acooc_scanner_panels"] = scanner_panels
 
@@ -553,6 +549,11 @@ def app():
 
                         def _add_variant(v, _loc=loc):
                             st.session_state[f"acooc_add_variant_pending_{_loc}"] = v
+                            # track which location triggered this add
+                            # so step 7 can suggest re-running that location
+                            added = st.session_state.get("acooc_scanner_added_for", {})
+                            added[v] = _loc
+                            st.session_state["acooc_scanner_added_for"] = added
                             st.rerun()
 
                         render_scanner_results(
@@ -575,7 +576,24 @@ def app():
                     for item in missing[:2]:
                         suggestions.append((item["variant"], loc, item["total_reads"]))
 
-                if suggestions:
+                added_for = st.session_state.get("acooc_scanner_added_for", {})
+                if added_for:
+                    # group by location
+                    from collections import defaultdict
+                    by_loc = defaultdict(list)
+                    for variant, loc in added_for.items():
+                        if variant in all_selected_variants:
+                            by_loc[loc].append(variant)
+                    if by_loc:
+                        st.info(
+                            "**Step 7 — re-run affected locations.** "
+                            + " · ".join(
+                                f"**{loc}**: added {', '.join(variants)}"
+                                for loc, variants in by_loc.items()
+                            )
+                            + ". Go to step 4 and run analysis — only these locations need re-running."
+                        )
+                elif suggestions:
                     st.info(
                         "**Step 7 — refine your panel.** "
                         "Add missing variants from the scanner above, then re-run step 4. "
