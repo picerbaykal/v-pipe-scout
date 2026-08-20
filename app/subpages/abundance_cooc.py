@@ -499,7 +499,7 @@ def app():
                             _af = st.session_state.get("acooc_scanner_added_for", {})
                             _af[v] = _loc
                             st.session_state["acooc_scanner_added_for"] = _af
-                            st.rerun()
+                            # no st.rerun() — Streamlit's natural button rerun handles it
 
                         render_scanner_results(
                             scanner_results[location],
@@ -564,7 +564,7 @@ def app():
                                         v: l for v, l in added_for.items() if l != location
                                     }
                                     logger.info(f"Re-run submitted for {location} only")
-                                    st.rerun()
+                                    st.session_state["acooc_force_rerun"] = True
                     elif location in scanner_tasks_map:
                         _st = celery_app.AsyncResult(scanner_tasks_map[location])
                         if _st.state in ("PENDING", "STARTED", "RETRY"):
