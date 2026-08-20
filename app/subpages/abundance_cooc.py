@@ -156,6 +156,7 @@ def app():
     st.session_state.setdefault("acooc_cooc_results", {})
     st.session_state.setdefault("acooc_scanner_results", {})
     st.session_state.setdefault("acooc_scanner_panels", {})
+    st.session_state.setdefault("acooc_scanner_tasks", {})
 
     # ── Header ───────────────────────────────────────────────────────────────
     st.title("Abundance & Co-occurrence")
@@ -349,7 +350,6 @@ def app():
                 )
                 if not targets:
                     st.info("All ready locations already scanned with the current panel.")
-                    # show which ones were skipped so the user knows why
                     skipped = [
                         loc for loc in available_for_scan
                         if loc in scanner_results
@@ -361,48 +361,28 @@ def app():
                             "Change the panel or select a specific location to re-scan."
                         )
                 else:
-                    from process.scanner import scan_unexplained_patterns
-                    from api.signature_cache import (
-                        get_all_lineage_signatures,
-                        get_panel_parent_map,
-                        get_cowwid_signatures,
-                    )
-                    # show which are being skipped (already done) vs scanned
-                    already_done = [
-                        loc for loc in available_for_scan if loc not in targets
-                    ]
+                    already_done = [loc for loc in available_for_scan if loc not in targets]
                     if already_done:
-                        st.caption(
-                            f"Skipping (already scanned): {', '.join(already_done)}"
+                        st.caption(f"Skipping (already scanned): {', '.join(already_done)}")
+                    # submit as background Celery tasks — one per location
+                    new_scanner_tasks = st.session_state.get("acooc_scanner_tasks", {})
+                    for loc in targets:
+                        task = celery_app.send_task(
+                            "tasks.run_cooc_scanner_lapis",
+                            kwargs={
+                                "location": loc,
+                                "start_date": start_date.isoformat(),
+                                "end_date": end_date.isoformat(),
+                                "variants": all_selected_variants,
+                                "unexplained_patterns": st.session_state["acooc_cooc_results"][loc]["unexplained_patterns"],
+                            }
                         )
-
-                    all_sigs = get_all_lineage_signatures()
-                    parent_map = get_panel_parent_map()
-                    cowwid = get_cowwid_signatures()
-
-                    with st.status(f"Scanning {len(targets)} location(s)…", expanded=True) as scan_status:
-                        for i, loc in enumerate(targets):
-                            st.write(f"Scanning {loc} ({i+1}/{len(targets)})…")
-                            patterns_df = pd.DataFrame(
-                                st.session_state["acooc_cooc_results"][loc]["unexplained_patterns"]
-                            )
-                            result = scan_unexplained_patterns(
-                                unexplained_patterns=patterns_df,
-                                panel_variants=all_selected_variants,
-                                cowwid_signatures=cowwid,
-                                all_lineage_signatures=all_sigs,
-                                panel_parent_map=parent_map,
-                                min_read_count=2,
-                            )
-                            scanner_results[loc] = result
-                            scanner_panels[loc] = list(all_selected_variants)
-                            st.write(f"✓ {loc} done")
-                        scan_status.update(
-                            label=f"Done — scanned {len(targets)} location(s).",
-                            state="complete"
-                        )
-                    st.session_state["acooc_scanner_results"] = scanner_results
+                        new_scanner_tasks[loc] = task.id
+                        scanner_panels[loc] = list(all_selected_variants)
+                        logger.info(f"Submitted scanner task {task.id} for {loc}")
+                    st.session_state["acooc_scanner_tasks"] = new_scanner_tasks
                     st.session_state["acooc_scanner_panels"] = scanner_panels
+                    st.rerun()
 
         st.markdown("---")
 
@@ -469,7 +449,8 @@ def app():
             st.info("Complete steps 1–4 on the left to see results here.")
         else:
             cooc_task_ids = list(st.session_state.get("acooc_cooc_tasks", {}).values())
-            all_task_ids = list(location_tasks.values()) + cooc_task_ids
+            scanner_task_ids = list(st.session_state.get("acooc_scanner_tasks", {}).values())
+            all_task_ids = list(location_tasks.values()) + cooc_task_ids + scanner_task_ids
             states = {tid: celery_app.AsyncResult(tid).state for tid in all_task_ids}
             n_results = (
                 len(st.session_state.location_results)
@@ -482,6 +463,27 @@ def app():
             any_just_completed = (
                 any(s == "SUCCESS" for s in states.values())
                 and n_results < len(all_task_ids)
+            )
+            # collect any completed scanner task results
+            scanner_tasks_map = st.session_state.get("acooc_scanner_tasks", {})
+            for loc, tid in list(scanner_tasks_map.items()):
+                if loc not in scanner_results:
+                    task = celery_app.AsyncResult(tid)
+                    if task.ready():
+                        try:
+                            scanner_results[loc] = task.get()
+                            st.session_state["acooc_scanner_results"] = scanner_results
+                            logger.info(f"Scanner results collected for {loc}")
+                        except Exception as e:
+                            logger.error(f"Scanner task failed for {loc}: {e}")
+
+            deconv_or_cooc_running = any(
+                celery_app.AsyncResult(tid).state in ("PENDING", "STARTED", "RETRY")
+                for tid in all_task_ids
+            )
+            any_just_completed = (
+                    any(s == "SUCCESS" for s in states.values())
+                    and n_results < len(all_task_ids)
             )
             if deconv_or_cooc_running or any_just_completed:
                 from streamlit_autorefresh import st_autorefresh
