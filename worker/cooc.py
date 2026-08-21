@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 # Concurrency cap for parallel batch queries. Benchmarks (2026-08) show
 # near-linear scaling to 16 workers with no server-side rate-limiting;
 # 16 roughly halves wall time vs 8 for a full sweep.
-BATCH_CONCURRENCY = 16
+BATCH_CONCURRENCY = 8
 
 
 def _load_cowwid_variants() -> dict:
