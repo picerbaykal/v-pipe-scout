@@ -315,6 +315,10 @@ def app():
         scanner_panels = st.session_state.get("acooc_scanner_panels", {})
 
         # is anything currently running? (guards Run button)
+        # A task counts as "running" only if it's in a live state AND its result
+        # hasn't been collected yet. Celery reports expired/unknown task IDs as
+        # PENDING forever, so we cross-check against the results dicts to avoid
+        # a stale PENDING keeping the button disabled after everything finished.
         def _any_running():
             _lr = st.session_state.get("location_results", {})
             _cr = st.session_state.get("acooc_cooc_results", {})
@@ -331,7 +335,6 @@ def app():
                     if _t and celery_app.AsyncResult(_t).state in ("STARTED", "RETRY"):
                         return True
             return False
-
         _busy = _any_running()
 
         # ── Step 5: Run analysis ──────────────────────────────────────────────
@@ -353,16 +356,6 @@ def app():
         ):
             st.session_state["acooc_trigger_run"] = True
         st.caption("runs all cities with base panel" if not _busy else "⟳ analysis in progress…")
-
-        # scanner scanning status only (suggestions moved to right column)
-        _stasks_left = st.session_state.get("acooc_scanner_tasks", {})
-        _scanning = [
-            _sloc for _sloc, _stid in _stasks_left.items()
-            if celery_app.AsyncResult(_stid).state in ("PENDING", "STARTED", "RETRY")
-        ]
-        if _scanning:
-            st.markdown("---")
-            st.caption("⟳ Scanning: " + ", ".join(s.split("(")[0].strip() for s in _scanning))
     # ── Right column: all outputs ─────────────────────────────────────────────
     with col_results:
 
@@ -414,21 +407,6 @@ def app():
         if not location_tasks:
             st.info("Complete steps 1–5 on the left to see results here.")
         else:
-            cooc_task_ids = list(st.session_state.get("acooc_cooc_tasks", {}).values())
-            scanner_task_ids = list(st.session_state.get("acooc_scanner_tasks", {}).values())
-            all_task_ids = list(location_tasks.values()) + cooc_task_ids + scanner_task_ids
-
-            # autorefresh only while tasks are running — stops when all done
-            # using 3s interval to give render cycles enough time to complete
-            _all_tids = list(location_tasks.values()) + cooc_task_ids + scanner_task_ids
-            _running_tids = [
-                tid for tid in _all_tids
-                if tid and celery_app.AsyncResult(tid).state in ("PENDING", "STARTED", "RETRY")
-            ]
-            if _running_tids:
-                from streamlit_autorefresh import st_autorefresh
-                st_autorefresh(interval=3000, key="acooc_autorefresh")
-
             # collect completed results
             scanner_tasks_map = st.session_state.get("acooc_scanner_tasks", {})
             for _loc, _tid in list(scanner_tasks_map.items()):
@@ -477,6 +455,28 @@ def app():
 
             location_names = list(location_tasks.keys())
 
+            # ── Autorefresh decision — AFTER collection + scanner submission ───
+            # Base it on "is there outstanding work?" rather than raw task state,
+            # so newly-submitted scanner tasks keep the refresh alive and the bars
+            # update to green without needing a manual click.
+            _lr_now = st.session_state.get("location_results", {})
+            _cr_now = st.session_state.get("acooc_cooc_results", {})
+            _sr_now = st.session_state.get("acooc_scanner_results", {})
+            _outstanding = False
+            for _ln in location_names:
+                # deconv or completeness not yet collected → running
+                if _ln not in _lr_now or _ln not in _cr_now:
+                    _outstanding = True
+                    break
+                # completeness done but scanner not yet done → running
+                if (_cr_now.get(_ln, {}).get("unexplained_patterns")
+                        and _ln not in _sr_now):
+                    _outstanding = True
+                    break
+            if _outstanding:
+                from streamlit_autorefresh import st_autorefresh
+                st_autorefresh(interval=3000, key="acooc_autorefresh")
+
             # ── Progress header ───────────────────────────────────────────────
             _cooc_res2 = st.session_state.get("acooc_cooc_results", {})
             _scan_res2 = st.session_state.get("acooc_scanner_results", {})
@@ -505,83 +505,68 @@ def app():
             def _tid_running(tid):
                 return bool(tid) and celery_app.AsyncResult(tid).state in ("PENDING","STARTED","RETRY")
 
-            # "complete" = deconvolution done (the primary deliverable);
-            # completeness + scanner are secondary guiding tools
-            _n_complete = sum(1 for loc in location_names
-                if loc in st.session_state.get("location_results", {}))
-            _n_running = sum(1 for loc in location_names
-                if _tid_running(location_tasks.get(loc,""))
-                or _tid_running(st.session_state.get("acooc_cooc_tasks",{}).get(loc,""))
-                or _tid_running(st.session_state.get("acooc_scanner_tasks",{}).get(loc,"")))
-            _n_pending = len(location_names) - _n_complete - _n_running
+            def _dot_color(done, running):
+                return "#3B6D11" if done else ("#93C5FD" if running else "#E5E3DC")
+
+            # counts for the three stages
+            _lr = st.session_state.get("location_results", {})
+            _n_deconv = sum(1 for l in location_names if l in _lr)
+            _n_cooc = sum(1 for l in location_names if l in _cooc_res2)
+            _n_scan = sum(1 for l in location_names if l in _scan_res2)
+            _n_tot = len(location_names)
 
             with st.container():
-                _ph1, _ph2 = st.columns([3,1])
+                _ph1, _ph2 = st.columns([3, 1])
                 with _ph1:
-                    st.markdown(
-                        f"<div style='display:flex;gap:16px;align-items:center;padding:4px 0;'>"
-                        f"<span style='font-size:13px;font-weight:500;'>Analysis progress</span>"
-                        f"<span style='font-size:12px;color:#3B6D11;font-weight:500;'>✓ {_n_complete} complete</span>"
-                        f"<span style='font-size:12px;color:#185FA5;'>⟳ {_n_running} running</span>"
-                        f"<span style='font-size:12px;color:#898781;'>○ {_n_pending} pending</span>"
-                        f"</div>",
-                        unsafe_allow_html=True,
-                    )
+                    st.markdown("<div style='font-size:13px;font-weight:500;'>Analysis progress</div>",
+                                unsafe_allow_html=True)
                 with _ph2:
-                    # download report button
-                    _completed_locs = [loc for loc in location_names if loc in st.session_state.get("location_results",{})]
+                    _completed_locs = [loc for loc in location_names if loc in _lr]
                     if _completed_locs:
                         if st.button("⬇ Download report", key="acooc_dl_report", use_container_width=True):
                             st.session_state["acooc_show_report"] = True
 
-            # ── Compact progress rows ─────────────────────────────────────────
-            st.markdown(
-                "<div style='display:flex;gap:10px;margin-bottom:4px;font-size:10px;color:#898781;'>"
-                "<span style='display:flex;align-items:center;gap:3px;'>"
-                "<span style='width:12px;height:3px;border-radius:2px;background:#3B6D11;display:inline-block;'></span>done</span>"
-                "<span style='display:flex;align-items:center;gap:3px;'>"
-                "<span style='width:12px;height:3px;border-radius:2px;background:#93C5FD;display:inline-block;'></span>running</span>"
-                "<span style='display:flex;align-items:center;gap:3px;'>"
-                "<span style='width:12px;height:3px;border-radius:2px;background:#E5E3DC;display:inline-block;'></span>pending</span>"
-                "<span style='margin-left:6px;'>deconvolution · completeness · scanner</span></div>",
-                unsafe_allow_html=True,
-            )
-            def _dot_color(done, running):
-                return "#3B6D11" if done else ("#93C5FD" if running else "#E5E3DC")
-
-            for _loc in location_names:
-                _pct, _n_miss, _scan_done, _scan_running, _deconv_done, _cooc_done, _deconv_running, _cooc_running = _city_status(_loc)
-                _c1 = _dot_color(_deconv_done, _deconv_running)
-                _c2 = _dot_color(_cooc_done, _cooc_running)
-                _c3 = _dot_color(_scan_done, _scan_running)
-                _pct_str = f"{_pct}%" if _pct is not None else "—"
-                if _scan_done:
-                    _badge = f"⚠ {_n_miss} missing" if _n_miss > 0 else ("✓ complete" if _pct is not None and _pct >= 95 else "✓ scanned")
-                    _badge_bg, _badge_col = ("#FCEBEB","#A32D2D") if _n_miss > 0 else ("#EAF3DE","#3B6D11")
-                elif _scan_running:
-                    _badge, _badge_bg, _badge_col = "scanning…","#EFF6FF","#1E40AF"
-                elif _cooc_running or _deconv_running:
-                    _badge, _badge_bg, _badge_col = "running…","#EFF6FF","#1E40AF"
-                else:
-                    _badge, _badge_bg, _badge_col = "queued","#F1EFE8","#898781"
+            def _agg_bar(name, n_done, color):
+                _frac = n_done / _n_tot if _n_tot else 0
                 st.markdown(
-                    f"<div style='display:flex;align-items:center;gap:8px;padding:4px 0;"
-                    f"border-bottom:0.5px solid rgba(0,0,0,.06);'>"
-                    f"<span style='font-size:11px;font-weight:500;width:90px;flex:none;"
-                    f"overflow:hidden;text-overflow:ellipsis;white-space:nowrap;'>{_loc.split('(')[0].strip()}</span>"
-                    f"<div style='display:flex;gap:2px;flex:none;'>"
-                    f"<div style='width:14px;height:4px;border-radius:2px;background:{_c1};'></div>"
-                    f"<div style='width:14px;height:4px;border-radius:2px;background:{_c2};'></div>"
-                    f"<div style='width:14px;height:4px;border-radius:2px;background:{_c3};'></div>"
-                    f"</div>"
-                    f"<span style='font-size:10px;color:#898781;width:28px;flex:none;text-align:right;'>{_pct_str}</span>"
-                    f"<span style='font-size:10px;padding:1px 5px;border-radius:5px;"
-                    f"background:{_badge_bg};color:{_badge_col};flex:none;'>{_badge}</span>"
-                    f"</div>",
+                    f"<div style='margin-bottom:8px;'>"
+                    f"<div style='display:flex;justify-content:space-between;font-size:11px;margin-bottom:3px;'>"
+                    f"<span style='font-weight:500;'>{name}</span>"
+                    f"<span style='color:#898781;'>{n_done} / {_n_tot} cities</span></div>"
+                    f"<div style='height:8px;background:#F1EFE8;border-radius:4px;overflow:hidden;'>"
+                    f"<div style='height:100%;border-radius:4px;width:{_frac*100:.0f}%;background:{color};'></div>"
+                    f"</div></div>",
                     unsafe_allow_html=True,
                 )
 
-            st.markdown("<hr style='margin:8px 0 6px;opacity:.15;'>", unsafe_allow_html=True)
+            _agg_bar("Deconvolution", _n_deconv, "#185FA5")
+            _agg_bar("Completeness", _n_cooc, "#3B6D11")
+            _agg_bar("Scanner", _n_scan, "#EF9F27")
+
+            # per-city checklist
+            _chk_html = "<div style='display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;padding-top:8px;border-top:0.5px solid rgba(0,0,0,.06);'>"
+            for _loc in location_names:
+                _pct, _n_miss, _sd, _sr, _dd, _cd, _dr, _cr = _city_status(_loc)
+                # a city is "done" when deconv is done (primary deliverable)
+                if _dd:
+                    _icon, _ic = "✓", "#3B6D11"
+                elif _dr or _cr or _sr:
+                    _icon, _ic = "⟳", "#93C5FD"
+                else:
+                    _icon, _ic = "○", "#898781"
+                _chk_html += (
+                    f"<span style='display:flex;align-items:center;gap:5px;font-size:11px;"
+                    f"padding:3px 9px;border-radius:20px;background:#faf9f5;"
+                    f"border:0.5px solid rgba(0,0,0,.08);'>"
+                    f"<span style='width:14px;height:14px;border-radius:50%;background:{_ic};"
+                    f"color:#fff;display:flex;align-items:center;justify-content:center;"
+                    f"font-size:9px;flex:none;'>{_icon}</span>"
+                    f"{_loc.split('(')[0].strip()}</span>"
+                )
+            _chk_html += "</div>"
+            st.markdown(_chk_html, unsafe_allow_html=True)
+
+            st.markdown("<hr style='margin:10px 0 8px;opacity:.15;'>", unsafe_allow_html=True)
 
             # ── Tab strip ────────────────────────────────────────────────────
             _city_options = [f"📍 {loc}" for loc in location_names]
@@ -598,18 +583,11 @@ def app():
                 _dc2 = _dot_color(_sd2, _sr2)  # scanner
                 _is_on = st.session_state.get("acooc_selected_city","") == f"📍 {_loc}"
                 _sn = _loc.split("(")[0].strip()
+                _pct_t = _p2 if _p2 is not None else None
+                _tab_label = f"{_sn} · {_pct_t}%" if _pct_t is not None else _sn
                 with _tab_cols[_ti]:
-                    # colored bars above city name
-                    st.markdown(
-                        f"<div style='display:flex;gap:3px;justify-content:center;margin-bottom:3px;'>"
-                        f"<div style='width:12px;height:4px;border-radius:2px;background:{_dc0};'></div>"
-                        f"<div style='width:12px;height:4px;border-radius:2px;background:{_dc1};'></div>"
-                        f"<div style='width:12px;height:4px;border-radius:2px;background:{_dc2};'></div>"
-                        f"</div>",
-                        unsafe_allow_html=True,
-                    )
                     if st.button(
-                        _sn,
+                        _tab_label,
                         key=f"acooc_tab_{_loc}",
                         use_container_width=True,
                         type="primary" if _is_on else "secondary",
