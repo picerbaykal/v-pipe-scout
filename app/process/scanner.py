@@ -30,20 +30,6 @@ def _sig_explains(present: Set[str], sig: Set[str]) -> bool:
     return bool(present) and present.issubset(sig)
 
 
-def _jaccard(a: Set[str], b: Set[str]) -> float:
-    """Jaccard similarity between two signature sets. Empty-vs-anything -> 0.0.
-
-    Same formula as components.jaccard_heatmap.jaccard_sets — kept local because
-    this module is worker-side and must not import Streamlit (jaccard_heatmap
-    pulls in streamlit). If you ever move the formula to a streamlit-free shared
-    util, import it in both places.
-    """
-    if not a or not b:
-        return 0.0
-    union = len(a | b)
-    return len(a & b) / union if union else 0.0
-
-
 def _is_descendant_of_panel(
     lineage: str,
     panel_set: Set[str],
@@ -67,65 +53,43 @@ def _is_descendant_of_panel(
 
 def _cluster_missing_ot(
     missing_from_panel: List[dict],
-    candidate_signatures: Dict[str, Set[str]],
-    jaccard_threshold: float = 0.90,
+    candidate_names,
+    parent_map: Dict[str, str],
 ) -> List[dict]:
-    """Tag each missing OT variant with a stable cluster_key.
+    """Tag each missing OT variant with a stable cluster_key = its clade.
 
-    Several OT lineages can be matched by the SAME reads when their signatures
-    are near-identical (e.g. the XBB family — one signal counted many times).
-    Whether two lineages cluster is a property of their signatures alone
-    (definition Jaccard >= threshold AND neither signature contained in the
-    other), so it is INDEPENDENT of location: every city in a run shares the same panel, hence the same set of candidate
-    signatures, hence the same clustering. We therefore cluster over the full
-    candidate set (not just the variants that got hits here) and key each
-    cluster by its alphabetically-smallest member, giving a cluster_key that is
-    byte-identical across every city's scan. The UI groups aggregated findings
-    by cluster_key and picks the representative by summed reads across cities.
+    Siblings only: two missing variants group iff they share the SAME immediate
+    parent on the pango tree, and that shared parent is not itself a candidate
+    (so a broad ancestor never absorbs its own children). This keeps the clade
+    one step up from real lineages (e.g. XBB.1, never a basal catch-all like
+    BA.2), which is the only level where "add the clade" is a lineage worth
+    tracking in deconvolution. Cousins and ancestor/descendant pairs do NOT
+    group — their similarity, if any, is the Jaccard heatmap's job, not this.
+
+    Grouping is computed over the FULL candidate set (all cowwid-not-in-panel
+    variants), not just the ones that got hits here, so cluster_key is identical
+    across every city in a run (all cities share the panel -> same candidates).
+    The UI aggregates findings by cluster_key; a group of >= 2 renders as one
+    clade row headlined by the parent, a group of 1 renders as that lineage.
 
     Mutates and returns missing_from_panel, adding 'cluster_key' to each item.
-    Singletons key to their own name.
+    A variant with no qualifying sibling keys to its own name.
     """
-    names = sorted(candidate_signatures.keys())  # sorted -> deterministic
-    n = len(names)
-    index = {v: i for i, v in enumerate(names)}
+    cand_set = set(candidate_names)
 
-    parent = list(range(n))
-
-    def find(x: int) -> int:
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    for i in range(n):
-        si = candidate_signatures.get(names[i]) or set()
-        if not si:
-            continue
-        for j in range(i + 1, n):
-            sj = candidate_signatures.get(names[j]) or set()
-            if not sj:
-                continue
-            # Skip ancestor/descendant containment: if one signature is fully
-            # inside the other, that is a broad-ancestor vs descendant pair
-            # (e.g. BA.2 inside BA.2.12.1), NOT two near-identical twins. Their
-            # Jaccard can still be high, but presenting them as "the same signal,
-            # pick one" is wrong — the ancestor is a different, broader claim.
-            # (Mirrors scanner_results.py's "containment -> block" precedent.)
-            if si <= sj or sj <= si:
-                continue
-            if _jaccard(si, sj) >= jaccard_threshold:
-                parent[find(i)] = find(j)
-
-    groups: Dict[int, List[str]] = {}
-    for v in names:
-        groups.setdefault(find(index[v]), []).append(v)
+    by_parent: Dict[str, List[str]] = {}
+    for v in cand_set:
+        p = parent_map.get(v)
+        if p:
+            by_parent.setdefault(p, []).append(v)
 
     key_of: Dict[str, str] = {}
-    for members in groups.values():
-        k = min(members)
-        for v in members:
-            key_of[v] = k
+    for p, siblings in by_parent.items():
+        # a real sibling group: >= 2 candidates sharing a parent that is not
+        # itself a candidate finding
+        if len(siblings) >= 2 and p not in cand_set:
+            for v in siblings:
+                key_of[v] = p
 
     for item in missing_from_panel:
         item["cluster_key"] = key_of.get(item["variant"], item["variant"])
@@ -159,10 +123,11 @@ def scan_unexplained_patterns(
         Dict with keys:
             missing_from_panel:  list of {variant, total_reads, pattern_count,
                                  observed_mutations, cluster_key}
-                                 cluster_key groups near-identical OT lineages
-                                 matched by the same reads; it is identical
-                                 across every location in a run so the UI can
-                                 aggregate then collapse each cluster to one row.
+                                 cluster_key = the clade (shared immediate
+                                 parent) for sibling groups, else the variant's
+                                 own name. Identical across every location in a
+                                 run so the UI can aggregate then collapse each
+                                 2+-member clade to one row.
             emerging_sublineage: list of {lineage, parent, total_reads, pattern_count}
             possibly_new:        {total_reads, pattern_count, top_patterns}
             total_unexplained_reads: int
@@ -220,11 +185,13 @@ def scan_unexplained_patterns(
         key=lambda x: -x["total_reads"],
     )
 
-    # dedup near-identical OT variants matched by the same reads: tag each with a
-    # cluster_key (stable across all cities). The UI aggregates then collapses
-    # each cluster_key to one representative row (adding more than one member
-    # would destabilize deconvolution — Jaccard >= 0.90 with each other).
-    missing_from_panel = _cluster_missing_ot(missing_from_panel, cowwid_not_in_panel)
+    # group missing variants by clade (siblings sharing an immediate parent):
+    # tag each with a cluster_key stable across all cities. The UI aggregates
+    # then collapses each 2+-member clade to a single row headlined by the
+    # parent (adding the clade, not an unresolvable leaf).
+    missing_from_panel = _cluster_missing_ot(
+        missing_from_panel, cowwid_not_in_panel.keys(), panel_parent_map
+    )
 
     # ── Bucket 2: emerging sublineages ───────────────────────────────────────
     emerging_hits: Dict[str, dict] = {}
