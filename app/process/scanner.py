@@ -30,6 +30,20 @@ def _sig_explains(present: Set[str], sig: Set[str]) -> bool:
     return bool(present) and present.issubset(sig)
 
 
+def _jaccard(a: Set[str], b: Set[str]) -> float:
+    """Jaccard similarity between two signature sets. Empty-vs-anything -> 0.0.
+
+    Same formula as components.jaccard_heatmap.jaccard_sets — kept local because
+    this module is worker-side and must not import Streamlit (jaccard_heatmap
+    pulls in streamlit). If you ever move the formula to a streamlit-free shared
+    util, import it in both places.
+    """
+    if not a or not b:
+        return 0.0
+    union = len(a | b)
+    return len(a & b) / union if union else 0.0
+
+
 def _is_descendant_of_panel(
     lineage: str,
     panel_set: Set[str],
@@ -49,6 +63,63 @@ def _is_descendant_of_panel(
             return True, parent
         current = parent
     return False, ""
+
+
+def _cluster_missing_ot(
+    missing_from_panel: List[dict],
+    candidate_signatures: Dict[str, Set[str]],
+    jaccard_threshold: float = 0.90,
+) -> List[dict]:
+    """Tag each missing OT variant with a stable cluster_key.
+
+    Several OT lineages can be matched by the SAME reads when their signatures
+    are near-identical (e.g. the XBB family — one signal counted many times).
+    Whether two lineages cluster is a property of their signatures alone
+    (definition Jaccard >= threshold), so it is INDEPENDENT of location: every
+    city in a run shares the same panel, hence the same set of candidate
+    signatures, hence the same clustering. We therefore cluster over the full
+    candidate set (not just the variants that got hits here) and key each
+    cluster by its alphabetically-smallest member, giving a cluster_key that is
+    byte-identical across every city's scan. The UI groups aggregated findings
+    by cluster_key and picks the representative by summed reads across cities.
+
+    Mutates and returns missing_from_panel, adding 'cluster_key' to each item.
+    Singletons key to their own name.
+    """
+    names = sorted(candidate_signatures.keys())  # sorted -> deterministic
+    n = len(names)
+    index = {v: i for i, v in enumerate(names)}
+
+    parent = list(range(n))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for i in range(n):
+        si = candidate_signatures.get(names[i]) or set()
+        if not si:
+            continue
+        for j in range(i + 1, n):
+            sj = candidate_signatures.get(names[j]) or set()
+            if sj and _jaccard(si, sj) >= jaccard_threshold:
+                parent[find(i)] = find(j)
+
+    groups: Dict[int, List[str]] = {}
+    for v in names:
+        groups.setdefault(find(index[v]), []).append(v)
+
+    key_of: Dict[str, str] = {}
+    for members in groups.values():
+        k = min(members)
+        for v in members:
+            key_of[v] = k
+
+    for item in missing_from_panel:
+        item["cluster_key"] = key_of.get(item["variant"], item["variant"])
+    return missing_from_panel
 
 
 def scan_unexplained_patterns(
@@ -76,7 +147,12 @@ def scan_unexplained_patterns(
 
     Returns:
         Dict with keys:
-            missing_from_panel:  list of {variant, total_reads, pattern_count}
+            missing_from_panel:  list of {variant, total_reads, pattern_count,
+                                 observed_mutations, cluster_key}
+                                 cluster_key groups near-identical OT lineages
+                                 matched by the same reads; it is identical
+                                 across every location in a run so the UI can
+                                 aggregate then collapse each cluster to one row.
             emerging_sublineage: list of {lineage, parent, total_reads, pattern_count}
             possibly_new:        {total_reads, pattern_count, top_patterns}
             total_unexplained_reads: int
@@ -133,6 +209,12 @@ def scan_unexplained_patterns(
         } for v, s in missing_hits.items()],
         key=lambda x: -x["total_reads"],
     )
+
+    # dedup near-identical OT variants matched by the same reads: tag each with a
+    # cluster_key (stable across all cities). The UI aggregates then collapses
+    # each cluster_key to one representative row (adding more than one member
+    # would destabilize deconvolution — Jaccard >= 0.90 with each other).
+    missing_from_panel = _cluster_missing_ot(missing_from_panel, cowwid_not_in_panel)
 
     # ── Bucket 2: emerging sublineages ───────────────────────────────────────
     emerging_hits: Dict[str, dict] = {}
