@@ -819,17 +819,18 @@ def app():
                                         st.session_state["acooc_exp_missing"] = True
                                         st.rerun()
                             else:
-                                _fam = _rep["variant"].split(".")[0]
                                 _open_key = f"acooc_cluster_open_{_rep['variant']}"
                                 _names = ", ".join(_m["variant"] for _m in _cl["members"])
+                                _n_others = _cl["size"] - 1
                                 st.markdown(
                                     f"<div style='border:0.5px solid #FCA5A5;background:#FEF2F2;"
                                     f"border-radius:8px;padding:8px 11px;margin:6px 0;'>"
                                     f"<div style='font-size:13px;font-weight:600;color:#991B1B;'>"
-                                    f"{_fam} family <span style='font-weight:400;color:#92400E;'>"
-                                    f"({_cl['size']} similar lineages)</span></div>"
+                                    f"{_rep['variant']} <span style='font-weight:400;color:#92400E;'>"
+                                    f"+ {_n_others} near-identical lineage{'s' if _n_others != 1 else ''}"
+                                    f"</span></div>"
                                     f"<div style='font-size:11px;color:#6b7280;margin-top:1px;'>"
-                                    f"best match <b>{_rep['variant']}</b> · {_badge}</div>"
+                                    f"best match · {_badge}</div>"
                                     f"<div style='margin-top:3px;'>{_chip_html(_cl['cities'])}</div>"
                                     f"</div>",
                                     unsafe_allow_html=True,
