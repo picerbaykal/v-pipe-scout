@@ -750,11 +750,10 @@ def app():
 
                 # ---- Bucket 1 (reframed): Missing variants WITH SIGNAL ----
                 # Aggregate each missing variant across cities (sum reads, collect
-                # cities), then group by the scanner's stable cluster_key so
-                # near-identical OT lineages matched by the same reads collapse to
-                # ONE representative row. cluster_key is identical across cities
-                # (see scanner._cluster_missing_ot), so grouping is consistent;
-                # the representative is picked here by summed reads across cities.
+                # cities), then group by the scanner's stable cluster_key. A group
+                # of 2+ siblings collapses to ONE clade row headlined by their
+                # shared parent (cluster_key) — you add the clade, not an
+                # unresolvable leaf. A group of 1 renders as that lineage.
                 def _human_reads(_n):
                     if _n >= 1_000_000:
                         return f"{_n/1_000_000:.1f}M".replace(".0M", "M")
@@ -780,19 +779,21 @@ def app():
                     _by_cluster[_rec["cluster_key"]].append(_rec)
 
                 _clusters = []
-                for _members in _by_cluster.values():
-                    # representative = most summed reads, tie-break most specific
-                    # (deepest pango), then name — stable across cities.
-                    _rep = max(_members, key=lambda r: (r["reads"], len(r["variant"].split(".")), r["variant"]))
+                for _ckey, _members in _by_cluster.items():
                     _cl_cities = []
                     for _m in _members:
                         for _c in _m["cities"]:
                             if _c not in _cl_cities:
                                 _cl_cities.append(_c)
+                    _is_clade = len(_members) >= 2
+                    # clade row -> headline & add the shared parent; else the
+                    # single lineage. Reads = magnitude of the shared signal
+                    # (max member, not a sum — members share the same reads).
+                    _head = _ckey if _is_clade else _members[0]["variant"]
                     _clusters.append({
-                        "rep": _rep, "members": _members,
-                        "cities": _cl_cities, "reads": _rep["reads"],
-                        "size": len(_members),
+                        "head": _head, "members": _members, "cities": _cl_cities,
+                        "reads": max(_m["reads"] for _m in _members),
+                        "size": len(_members), "is_clade": _is_clade,
                     })
                 _clusters.sort(key=lambda c: -c["reads"])
 
@@ -802,52 +803,51 @@ def app():
                     else:
                         st.caption("Officially tracked variants not in your panel that show real co-occurrence signal. Ranked by supporting reads.")
                         for _cl in _clusters:
-                            _rep = _cl["rep"]
+                            _head = _cl["head"]
                             _badge = f"{_human_reads(_cl['reads'])} reads"
-                            if _cl["size"] == 1:
+                            if not _cl["is_clade"]:
                                 _m1, _m2 = st.columns([4, 1])
                                 with _m1:
                                     st.markdown(
-                                        f"<div style='font-size:13px;font-weight:600;color:#dc2626;'>{_rep['variant']} "
+                                        f"<div style='font-size:13px;font-weight:600;color:#dc2626;'>{_head} "
                                         f"<span style='font-size:10px;font-weight:400;color:#92400E;'>· {_badge}</span></div>"
                                         f"<div style='margin-top:2px;'>{_chip_html(_cl['cities'])}</div>",
                                         unsafe_allow_html=True,
                                     )
                                 with _m2:
-                                    if st.button("＋ Add", key=f"acooc_addmiss_{_rep['variant']}", use_container_width=True):
-                                        st.session_state[f"acooc_add_variant_pending_{_rep['variant']}"] = _rep["variant"]
+                                    if st.button("＋ Add", key=f"acooc_addmiss_{_head}", use_container_width=True):
+                                        st.session_state[f"acooc_add_variant_pending_{_head}"] = _head
                                         st.session_state["acooc_exp_missing"] = True
                                         st.rerun()
                             else:
-                                _open_key = f"acooc_cluster_open_{_rep['variant']}"
-                                _names = ", ".join(_m["variant"] for _m in _cl["members"])
-                                _n_others = _cl["size"] - 1
+                                _open_key = f"acooc_cluster_open_{_head}"
+                                _n = _cl["size"]
                                 st.markdown(
                                     f"<div style='border:0.5px solid #FCA5A5;background:#FEF2F2;"
                                     f"border-radius:8px;padding:8px 11px;margin:6px 0;'>"
                                     f"<div style='font-size:13px;font-weight:600;color:#991B1B;'>"
-                                    f"{_rep['variant']} <span style='font-weight:400;color:#92400E;'>"
-                                    f"+ {_n_others} near-identical lineage{'s' if _n_others != 1 else ''}"
-                                    f"</span></div>"
+                                    f"{_head} <span style='font-weight:400;color:#92400E;'>"
+                                    f"clade · {_n} sibling lineage{'s' if _n != 1 else ''}</span></div>"
                                     f"<div style='font-size:11px;color:#6b7280;margin-top:1px;'>"
-                                    f"best match · {_badge}</div>"
+                                    f"most-recent common ancestor · {_badge}</div>"
                                     f"<div style='margin-top:3px;'>{_chip_html(_cl['cities'])}</div>"
                                     f"</div>",
                                     unsafe_allow_html=True,
                                 )
                                 st.caption(
-                                    f"⚠ {_names} all matched by the same ~{_human_reads(_cl['reads'])} reads "
-                                    f"(Jaccard >0.9). Counted once — adding more than one would destabilize deconvolution."
+                                    f"⚠ {_n} siblings under {_head}, matched by the same reads. Their "
+                                    f"leaf-level mutations aren't resolvable at this coverage — add the "
+                                    f"clade, not a single leaf."
                                 )
                                 _a1, _a2 = st.columns([2, 3])
                                 with _a1:
-                                    if st.button(f"＋ Add {_rep['variant']}", key=f"acooc_addclust_{_rep['variant']}", use_container_width=True):
-                                        st.session_state[f"acooc_add_variant_pending_{_rep['variant']}"] = _rep["variant"]
+                                    if st.button(f"＋ Add {_head}", key=f"acooc_addclade_{_head}", use_container_width=True):
+                                        st.session_state[f"acooc_add_variant_pending_{_head}"] = _head
                                         st.session_state["acooc_exp_missing"] = True
                                         st.rerun()
                                 with _a2:
-                                    _lbl = "▾ hide cluster" if st.session_state.get(_open_key) else f"▸ show all {_cl['size']} lineages"
-                                    if st.button(_lbl, key=f"acooc_clustbtn_{_rep['variant']}", use_container_width=True):
+                                    _lbl = "▾ hide siblings" if st.session_state.get(_open_key) else f"▸ show all {_n} siblings"
+                                    if st.button(_lbl, key=f"acooc_cladebtn_{_head}", use_container_width=True):
                                         st.session_state[_open_key] = not st.session_state.get(_open_key, False)
                                         st.session_state["acooc_exp_missing"] = True
                                         st.rerun()
