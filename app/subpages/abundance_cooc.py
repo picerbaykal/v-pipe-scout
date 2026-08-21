@@ -23,7 +23,6 @@ from utils.config import get_wiseloculus_url
 
 from components.abundance_cooc_tree import render_panel_tree
 from components.jaccard_heatmap import render_jaccard_heatmap
-from components.scanner_results import render_scanner_results
 
 from datetime import datetime
 import pandas as pd
@@ -729,6 +728,18 @@ def app():
                     "and add variants. Adding applies to the whole panel; re-run to apply."
                 )
 
+                # coverage caption (instant, no scan needed): panel ∩ OT vs all OT
+                _ot_set = set(cached_get_variant_names())
+                _n_panel_ot = sum(1 for _v in all_selected_variants if _v in _ot_set)
+                st.markdown(
+                    f"<div style='border:0.5px solid #BFD9F2;background:#EFF6FF;border-radius:8px;"
+                    f"padding:8px 12px;margin:2px 0 10px;font-size:12px;color:#1E3A5F;'>"
+                    f"<b>Panel coverage:</b> {_n_panel_ot} of {len(_ot_set)} officially tracked "
+                    f"variants selected. The scanner ranks the missing ones by how much "
+                    f"co-occurrence signal they actually have in your samples.</div>",
+                    unsafe_allow_html=True,
+                )
+
                 def _chip_html(cities):
                     return "".join(
                         f"<span style='display:inline-block;font-size:10px;padding:1px 6px;"
@@ -737,35 +748,117 @@ def app():
                         for c in cities
                     )
 
-                # ---- Bucket 1: Missing from panel (aggregated) ----
-                _agg_miss = _ddict(list)
+                # ---- Bucket 1 (reframed): Missing variants WITH SIGNAL ----
+                # Aggregate each missing variant across cities (sum reads, collect
+                # cities), then group by the scanner's stable cluster_key so
+                # near-identical OT lineages matched by the same reads collapse to
+                # ONE representative row. cluster_key is identical across cities
+                # (see scanner._cluster_missing_ot), so grouping is consistent;
+                # the representative is picked here by summed reads across cities.
+                def _human_reads(_n):
+                    if _n >= 1_000_000:
+                        return f"{_n/1_000_000:.1f}M".replace(".0M", "M")
+                    if _n >= 1_000:
+                        return f"{_n/1_000:.0f}K"
+                    return str(_n)
+
+                _agg_miss = {}
                 for _loc, _res in _scan_res_all.items():
                     for _item in _res.get("missing_from_panel", []):
                         _v = _item["variant"]
-                        if _v not in all_selected_variants:
-                            _agg_miss[_v].append(_loc)
-                _ranked_miss = sorted(_agg_miss.items(), key=lambda x: -len(x[1]))
+                        if _v in all_selected_variants:
+                            continue
+                        _slot = _agg_miss.setdefault(_v, {
+                            "variant": _v, "reads": 0, "cities": [],
+                            "cluster_key": _item.get("cluster_key", _v),
+                        })
+                        _slot["reads"] += int(_item.get("total_reads", 0))
+                        _slot["cities"].append(_loc)
 
-                with st.expander(f"🔴 Missing from panel ({len(_ranked_miss)} variants)", expanded=st.session_state.get("acooc_exp_missing", False)):
-                    if not _ranked_miss:
-                        st.caption("No missing tracked variants.")
+                _by_cluster = _ddict(list)
+                for _rec in _agg_miss.values():
+                    _by_cluster[_rec["cluster_key"]].append(_rec)
+
+                _clusters = []
+                for _members in _by_cluster.values():
+                    # representative = most summed reads, tie-break most specific
+                    # (deepest pango), then name — stable across cities.
+                    _rep = max(_members, key=lambda r: (r["reads"], len(r["variant"].split(".")), r["variant"]))
+                    _cl_cities = []
+                    for _m in _members:
+                        for _c in _m["cities"]:
+                            if _c not in _cl_cities:
+                                _cl_cities.append(_c)
+                    _clusters.append({
+                        "rep": _rep, "members": _members,
+                        "cities": _cl_cities, "reads": _rep["reads"],
+                        "size": len(_members),
+                    })
+                _clusters.sort(key=lambda c: -c["reads"])
+
+                with st.expander(f"🔴 Missing variants with signal ({len(_clusters)} distinct)", expanded=st.session_state.get("acooc_exp_missing", False)):
+                    if not _clusters:
+                        st.caption("No missing tracked variants with signal.")
                     else:
-                        st.caption("Officially tracked variants not in your panel. Ranked by how many cities need them.")
-                        for _var, _cities in _ranked_miss:
-                            _n = len(_cities)
-                            _m1, _m2 = st.columns([4, 1])
-                            with _m1:
+                        st.caption("Officially tracked variants not in your panel that show real co-occurrence signal. Ranked by supporting reads.")
+                        for _cl in _clusters:
+                            _rep = _cl["rep"]
+                            _badge = f"{_human_reads(_cl['reads'])} reads"
+                            if _cl["size"] == 1:
+                                _m1, _m2 = st.columns([4, 1])
+                                with _m1:
+                                    st.markdown(
+                                        f"<div style='font-size:13px;font-weight:600;color:#dc2626;'>{_rep['variant']} "
+                                        f"<span style='font-size:10px;font-weight:400;color:#92400E;'>· {_badge}</span></div>"
+                                        f"<div style='margin-top:2px;'>{_chip_html(_cl['cities'])}</div>",
+                                        unsafe_allow_html=True,
+                                    )
+                                with _m2:
+                                    if st.button("＋ Add", key=f"acooc_addmiss_{_rep['variant']}", use_container_width=True):
+                                        st.session_state[f"acooc_add_variant_pending_{_rep['variant']}"] = _rep["variant"]
+                                        st.session_state["acooc_exp_missing"] = True
+                                        st.rerun()
+                            else:
+                                _fam = _rep["variant"].split(".")[0]
+                                _open_key = f"acooc_cluster_open_{_rep['variant']}"
+                                _names = ", ".join(_m["variant"] for _m in _cl["members"])
                                 st.markdown(
-                                    f"<div style='font-size:13px;font-weight:600;color:#dc2626;'>{_var} "
-                                    f"<span style='font-size:10px;font-weight:400;color:#92400E;'>· {_n} cit{'ies' if _n!=1 else 'y'}</span></div>"
-                                    f"<div style='margin-top:2px;'>{_chip_html(_cities)}</div>",
+                                    f"<div style='border:0.5px solid #FCA5A5;background:#FEF2F2;"
+                                    f"border-radius:8px;padding:8px 11px;margin:6px 0;'>"
+                                    f"<div style='font-size:13px;font-weight:600;color:#991B1B;'>"
+                                    f"{_fam} family <span style='font-weight:400;color:#92400E;'>"
+                                    f"({_cl['size']} similar lineages)</span></div>"
+                                    f"<div style='font-size:11px;color:#6b7280;margin-top:1px;'>"
+                                    f"best match <b>{_rep['variant']}</b> · {_badge}</div>"
+                                    f"<div style='margin-top:3px;'>{_chip_html(_cl['cities'])}</div>"
+                                    f"</div>",
                                     unsafe_allow_html=True,
                                 )
-                            with _m2:
-                                if st.button("＋ Add", key=f"acooc_addmiss_{_var}", use_container_width=True):
-                                    st.session_state[f"acooc_add_variant_pending_{_var}"] = _var
-                                    st.session_state["acooc_exp_missing"] = True
-                                    st.rerun()
+                                st.caption(
+                                    f"⚠ {_names} all matched by the same ~{_human_reads(_cl['reads'])} reads "
+                                    f"(Jaccard >0.9). Counted once — adding more than one would destabilize deconvolution."
+                                )
+                                _a1, _a2 = st.columns([2, 3])
+                                with _a1:
+                                    if st.button(f"＋ Add {_rep['variant']}", key=f"acooc_addclust_{_rep['variant']}", use_container_width=True):
+                                        st.session_state[f"acooc_add_variant_pending_{_rep['variant']}"] = _rep["variant"]
+                                        st.session_state["acooc_exp_missing"] = True
+                                        st.rerun()
+                                with _a2:
+                                    _lbl = "▾ hide cluster" if st.session_state.get(_open_key) else f"▸ show all {_cl['size']} lineages"
+                                    if st.button(_lbl, key=f"acooc_clustbtn_{_rep['variant']}", use_container_width=True):
+                                        st.session_state[_open_key] = not st.session_state.get(_open_key, False)
+                                        st.session_state["acooc_exp_missing"] = True
+                                        st.rerun()
+                                if st.session_state.get(_open_key):
+                                    _rows = "".join(
+                                        f"<div style='padding:1px 0;'>• <b>{_m['variant']}</b> · {_human_reads(_m['reads'])} reads</div>"
+                                        for _m in sorted(_cl["members"], key=lambda r: -r["reads"])
+                                    )
+                                    st.markdown(
+                                        f"<div style='font-size:11px;color:#5F5E5A;margin:2px 0 6px 4px;'>{_rows}</div>",
+                                        unsafe_allow_html=True,
+                                    )
 
                 # ---- Bucket 2: Emerging sublineages (aggregated) ----
                 _agg_sub = {}  # lineage -> {parent, reads, cities, obs_muts}
