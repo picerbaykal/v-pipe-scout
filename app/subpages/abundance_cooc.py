@@ -332,7 +332,15 @@ def app():
                 for _loc, _t in _tasks.items():
                     if _loc in _results:
                         continue  # result already collected — not running
-                    if _t and celery_app.AsyncResult(_t).state in ("STARTED", "RETRY"):
+                    if not _t:
+                        continue
+                    _state = celery_app.AsyncResult(_t).state
+                    # only genuinely in-flight states count as busy.
+                    # SUCCESS/FAILURE = done. PENDING = ambiguous (Celery
+                    # returns it for expired/unknown IDs too), so we treat a
+                    # PENDING task whose result we don't have as NOT busy —
+                    # the autorefresh will collect it if it's real.
+                    if _state in ("STARTED", "RETRY"):
                         return True
             return False
         _busy = _any_running()
@@ -344,6 +352,7 @@ def app():
             and end_date > start_date
             and not _busy
         )
+        st.caption(f"debug: vars={len(all_selected_variants)} locs={len(selected_locations)} dates={end_date > start_date} busy={_busy}")
         _step_label(5, "Run analysis", done=has_run, active=not has_run and can_run)
         if st.button(
             "▶ Run analysis",
@@ -407,7 +416,23 @@ def app():
         if not location_tasks:
             st.info("Complete steps 1–5 on the left to see results here.")
         else:
-            # collect completed results
+            # collect completed results — track if anything new arrives this cycle
+            _new_collected = False
+
+            # deconvolution results
+            _loc_res = st.session_state.get("location_results", {})
+            for _loc, _tid in list(location_tasks.items()):
+                if _loc not in _loc_res:
+                    _t = celery_app.AsyncResult(_tid)
+                    if _t.ready():
+                        try:
+                            _loc_res[_loc] = _t.get()
+                            st.session_state["location_results"] = _loc_res
+                            _new_collected = True
+                        except Exception:
+                            pass
+
+            # scanner results
             scanner_tasks_map = st.session_state.get("acooc_scanner_tasks", {})
             for _loc, _tid in list(scanner_tasks_map.items()):
                 if _loc not in scanner_results:
@@ -416,11 +441,12 @@ def app():
                         try:
                             scanner_results[_loc] = _t.get()
                             st.session_state["acooc_scanner_results"] = scanner_results
+                            _new_collected = True
                             logger.info(f"Scanner results collected for {_loc}")
                         except Exception as _e:
                             logger.error(f"Scanner task failed for {_loc}: {_e}")
 
-            # collect completed cooc results + auto-submit scanner
+            # cooc results + auto-submit scanner
             _cooc_res = st.session_state.get("acooc_cooc_results", {})
             _scanner_tasks = st.session_state.get("acooc_scanner_tasks", {})
             for _loc, _tid in list(st.session_state.get("acooc_cooc_tasks", {}).items()):
@@ -430,6 +456,7 @@ def app():
                         try:
                             _cooc_res[_loc] = _t.get()
                             st.session_state["acooc_cooc_results"] = _cooc_res
+                            _new_collected = True
                         except Exception:
                             pass
                 # auto-submit scanner when completeness is ready and scanner not yet run
@@ -476,6 +503,11 @@ def app():
             if _outstanding:
                 from streamlit_autorefresh import st_autorefresh
                 st_autorefresh(interval=3000, key="acooc_autorefresh")
+            elif _new_collected:
+                # final result(s) just arrived and nothing is left running —
+                # force one full-page rerun so the left column (Run button) and
+                # the progress bars reflect the completed state without a click.
+                st.rerun()
 
             # ── Progress header ───────────────────────────────────────────────
             _cooc_res2 = st.session_state.get("acooc_cooc_results", {})
@@ -682,7 +714,7 @@ def app():
                             _agg_miss[_v].append(_loc)
                 _ranked_miss = sorted(_agg_miss.items(), key=lambda x: -len(x[1]))
 
-                with st.expander(f"🔴 Missing from panel ({len(_ranked_miss)} variants)", expanded=False):
+                with st.expander(f"🔴 Missing from panel ({len(_ranked_miss)} variants)", expanded=st.session_state.get("acooc_exp_missing", True)):
                     if not _ranked_miss:
                         st.caption("No missing tracked variants.")
                     else:
@@ -700,6 +732,7 @@ def app():
                             with _m2:
                                 if st.button("＋ Add", key=f"acooc_addmiss_{_var}", use_container_width=True):
                                     st.session_state[f"acooc_add_variant_pending_{_var}"] = _var
+                                    st.session_state["acooc_exp_missing"] = True
                                     st.rerun()
 
                 # ---- Bucket 2: Emerging sublineages (aggregated) ----
@@ -717,7 +750,7 @@ def app():
                         _agg_sub[_lin]["cities"].append(_loc)
                 _sub_list = sorted(_agg_sub.items(), key=lambda x: -x[1]["reads"])
 
-                with st.expander(f"🟡 Emerging sublineages ({len(_sub_list)} found)", expanded=False):
+                with st.expander(f"🟡 Emerging sublineages ({len(_sub_list)} found)", expanded=st.session_state.get("acooc_exp_sub", False)):
                     if not _sub_list:
                         st.caption("No emerging sublineages detected.")
                     else:
@@ -746,13 +779,14 @@ def app():
                                 _b1, _b2, _b3 = st.columns([2, 2, 3])
                                 with _b1:
                                     if _parent_in and st.button(f"⇄ Track instead of {_parent}", key=f"acooc_swap_{_lin}", use_container_width=True):
-                                        # remove parent, add sublineage (both via pending mechanism)
                                         st.session_state[f"acooc_remove_variant_pending_{_parent}"] = _parent
                                         st.session_state[f"acooc_add_variant_pending_{_lin}"] = _lin
+                                        st.session_state["acooc_exp_sub"] = True
                                         st.rerun()
                                 with _b2:
                                     if st.button("＋ Add anyway", key=f"acooc_addsub_{_lin}", use_container_width=True):
                                         st.session_state[f"acooc_add_variant_pending_{_lin}"] = _lin
+                                        st.session_state["acooc_exp_sub"] = True
                                         st.rerun()
 
                 # ---- Bucket 3: Possibly new (aggregated reads) ----
