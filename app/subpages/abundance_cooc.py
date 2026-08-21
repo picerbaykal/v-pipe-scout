@@ -56,6 +56,13 @@ def cached_get_variant_names() -> list:
     return get_variant_names()
 
 
+@st.cache_data(ttl=3600)
+def cached_fetch_locations() -> list:
+    """Cache locations for an hour so transient LAPIS failures or reruns don't
+    empty the options list (which would silently drop the user's selection)."""
+    return wiseLoculus.fetch_locations()
+
+
 def _render_completeness(result: dict) -> None:
     """Plot per-date panel completeness with read-weighted smoothed line."""
     import numpy as np
@@ -230,7 +237,16 @@ def app():
         with st.expander("Add lineage manually", expanded=False):
             pango_loader = cached_get_pango_loader()
             available_lineages = sorted(pango_loader.get_raw_data().keys())
-            extra_options = [v for v in available_lineages if v not in selected_variants]
+            # options must ALWAYS include whatever is currently in session state,
+            # otherwise Streamlit silently drops a value not in options — which is
+            # exactly what happens when the scanner adds a variant: it lands in
+            # session state, but if it's filtered out of options the widget drops
+            # it and the panel count doesn't grow (breaking the Run button).
+            _current_extras = st.session_state.get("acooc_extra_variants", [])
+            extra_options = sorted(set(
+                [v for v in available_lineages if v not in selected_variants]
+                + list(_current_extras)
+            ))
             extra_variants = st.multiselect(
                 "Search pango lineage",
                 options=extra_options,
@@ -239,7 +255,8 @@ def app():
                 key="acooc_extra_variants",
             )
 
-        all_selected_variants = selected_variants + extra_variants
+        # dedup: a scanner variant routed to extras might also be curated
+        all_selected_variants = list(dict.fromkeys(selected_variants + extra_variants))
         if len(all_selected_variants) >= 2:
             st.caption(f"{len(all_selected_variants)} variants in panel")
         else:
@@ -259,7 +276,11 @@ def app():
 
         # ── Step 3: Locations ─────────────────────────────────────────────────
         _step_label(3, "Locations", done=has_locations)
-        available_locations = wiseLoculus.fetch_locations()
+        available_locations = cached_fetch_locations()
+        # guard: if the fetch transiently returned empty, fall back to whatever
+        # the user already selected so their choice isn't silently dropped
+        if not available_locations:
+            available_locations = st.session_state.get("acooc_location_multiselect", [])
         col_loc_all, col_loc_clear = st.columns(2)
         with col_loc_all:
             if st.button("Select all", key="acooc_loc_select_all", use_container_width=True):
@@ -274,6 +295,14 @@ def app():
             key="acooc_location_multiselect",
             label_visibility="collapsed",
         )
+        # Persist a stable copy of the selection. On a mid-rerun (e.g. right
+        # after adding a scanner variant), the widget can transiently return
+        # empty if its options briefly mismatch; recover from the stable copy
+        # so can_run / re-run don't see locs=0 and disable the Run button.
+        if selected_locations:
+            st.session_state["acooc_locations_stable"] = list(selected_locations)
+        elif st.session_state.get("acooc_locations_stable"):
+            selected_locations = st.session_state["acooc_locations_stable"]
 
         st.markdown("---")
 
@@ -335,12 +364,12 @@ def app():
                     if not _t:
                         continue
                     _state = celery_app.AsyncResult(_t).state
-                    # only genuinely in-flight states count as busy.
-                    # SUCCESS/FAILURE = done. PENDING = ambiguous (Celery
-                    # returns it for expired/unknown IDs too), so we treat a
-                    # PENDING task whose result we don't have as NOT busy —
-                    # the autorefresh will collect it if it's real.
-                    if _state in ("STARTED", "RETRY"):
+                    # PENDING/STARTED/RETRY without a collected result = running.
+                    # The results cross-check above already skipped tasks whose
+                    # results we have, so a stale expired-PENDING that already
+                    # produced a result won't reach here. This keeps the Run
+                    # button disabled while work is genuinely in flight.
+                    if _state in ("PENDING", "STARTED", "RETRY"):
                         return True
             return False
         _busy = _any_running()
@@ -352,7 +381,6 @@ def app():
             and end_date > start_date
             and not _busy
         )
-        st.caption(f"debug: vars={len(all_selected_variants)} locs={len(selected_locations)} dates={end_date > start_date} busy={_busy}")
         _step_label(5, "Run analysis", done=has_run, active=not has_run and can_run)
         if st.button(
             "▶ Run analysis",
@@ -401,10 +429,14 @@ def app():
             st.session_state["acooc_location_tasks"] = location_tasks
             st.session_state["location_results"] = {}
             st.session_state["acooc_cooc_tasks"] = cooc_tasks
-            existing_cooc = st.session_state.get("acooc_cooc_results", {})
-            for loc in cooc_tasks:
-                existing_cooc.pop(loc, None)
-            st.session_state["acooc_cooc_results"] = existing_cooc
+            st.session_state["acooc_cooc_results"] = {}
+            # clear scanner state too so it re-scans fresh (was showing stale 6/6)
+            st.session_state["acooc_scanner_results"] = {}
+            st.session_state["acooc_scanner_tasks"] = {}
+            st.session_state["acooc_scanner_panels"] = {}
+            # reset bucket expand flags so scanner starts collapsed on a new run
+            st.session_state["acooc_exp_missing"] = False
+            st.session_state["acooc_exp_sub"] = False
 
         from components.multi_location_results import (
             render_single_location_result,
@@ -714,7 +746,7 @@ def app():
                             _agg_miss[_v].append(_loc)
                 _ranked_miss = sorted(_agg_miss.items(), key=lambda x: -len(x[1]))
 
-                with st.expander(f"🔴 Missing from panel ({len(_ranked_miss)} variants)", expanded=st.session_state.get("acooc_exp_missing", True)):
+                with st.expander(f"🔴 Missing from panel ({len(_ranked_miss)} variants)", expanded=st.session_state.get("acooc_exp_missing", False)):
                     if not _ranked_miss:
                         st.caption("No missing tracked variants.")
                     else:
