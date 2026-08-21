@@ -75,8 +75,8 @@ def _cluster_missing_ot(
     Several OT lineages can be matched by the SAME reads when their signatures
     are near-identical (e.g. the XBB family — one signal counted many times).
     Whether two lineages cluster is a property of their signatures alone
-    (definition Jaccard >= threshold), so it is INDEPENDENT of location: every
-    city in a run shares the same panel, hence the same set of candidate
+    (definition Jaccard >= threshold AND neither signature contained in the
+    other), so it is INDEPENDENT of location: every city in a run shares the same panel, hence the same set of candidate
     signatures, hence the same clustering. We therefore cluster over the full
     candidate set (not just the variants that got hits here) and key each
     cluster by its alphabetically-smallest member, giving a cluster_key that is
@@ -104,7 +104,17 @@ def _cluster_missing_ot(
             continue
         for j in range(i + 1, n):
             sj = candidate_signatures.get(names[j]) or set()
-            if sj and _jaccard(si, sj) >= jaccard_threshold:
+            if not sj:
+                continue
+            # Skip ancestor/descendant containment: if one signature is fully
+            # inside the other, that is a broad-ancestor vs descendant pair
+            # (e.g. BA.2 inside BA.2.12.1), NOT two near-identical twins. Their
+            # Jaccard can still be high, but presenting them as "the same signal,
+            # pick one" is wrong — the ancestor is a different, broader claim.
+            # (Mirrors scanner_results.py's "containment -> block" precedent.)
+            if si <= sj or sj <= si:
+                continue
+            if _jaccard(si, sj) >= jaccard_threshold:
                 parent[find(i)] = find(j)
 
     groups: Dict[int, List[str]] = {}
