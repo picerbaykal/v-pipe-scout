@@ -1013,7 +1013,25 @@ def app():
     st.caption("Reference: NC_045512.2 (Wuhan, 29,903 bp) — loaded automatically")
 
     # ── Primer/probe FASTA ─────────────────────────────────────────────
+    # ── Primer/probe FASTA ─────────────────────────────────────────────
     st.subheader("Upload primer/probe FASTA")
+
+    # Check URL query params for demo auto-load
+    # ?demo=cdc  → load bundled CDC N1/N2 example
+    # ?fasta=... → load FASTA content passed directly in the URL
+    query_params = st.query_params
+    demo_content = None
+
+    if query_params.get("fasta"):
+        demo_content = query_params["fasta"]
+    elif query_params.get("demo") == "cdc":
+        demo_path = os.path.join(
+            os.path.dirname(__file__), "..", "data", "cdc_n1_n2.fasta"
+        )
+        if os.path.exists(demo_path):
+            with open(demo_path) as f:
+                demo_content = f.read()
+
     primer_file = st.file_uploader(
         "Primer/probe FASTA",
         type=["fasta", "fa"],
@@ -1021,12 +1039,26 @@ def app():
         key="ppc_fasta_upload",
     )
 
-    if primer_file is None:
-        st.info("👆 Now upload your primer/probe FASTA file.")
+    # "Try an example" button — loads bundled CDC N1/N2 file
+    load_example = st.button("Try an example (CDC N1/N2)")
+    if load_example:
+        demo_path = os.path.join(
+            os.path.dirname(__file__), "..", "data", "cdc_n1_n2.fasta"
+        )
+        if os.path.exists(demo_path):
+            with open(demo_path) as f:
+                demo_content = f.read()
+
+    # Decide the source of the FASTA content
+    if demo_content is not None:
+        raw_content = demo_content
+    elif primer_file is not None:
+        raw_content = primer_file.read().decode("utf-8")
+    else:
+        st.info("👆 Upload a primer/probe FASTA file, or click **Try an example** above.")
         return
 
     # ── Parse primers ──────────────────────────────────────────────────────────
-    raw_content = primer_file.read().decode("utf-8")
     sequences = {}
     for record in SeqIO.parse(io.StringIO(raw_content), "fasta"):
         sequences[record.id] = str(record.seq).upper()
