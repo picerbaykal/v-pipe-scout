@@ -24,3 +24,4 @@ dependencies:
       - redis==5.0.1
       - streamlit-autorefresh
       - st-theme
+      - biopython

@@ -2,13 +2,10 @@ __pycache__
 .DS_Store
 deployment.log
 *.lock
-
 # Environment variables with sensitive information
 .env
-
 # VsCode settings
 .vscode/
-
 # Exclude data files that shouldn't be committed
 data/known_variants/*.yaml
 .envrc
