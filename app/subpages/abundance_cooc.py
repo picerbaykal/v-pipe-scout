@@ -279,6 +279,7 @@ def app():
         # guard: if the fetch transiently returned empty, fall back to whatever
         # the user already selected so their choice isn't silently dropped
         if not available_locations:
+            st.warning("Could not fetch locations from the API; using your current selection.")
             available_locations = st.session_state.get("acooc_location_multiselect", [])
         col_loc_all, col_loc_clear = st.columns(2)
         with col_loc_all:
