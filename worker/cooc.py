@@ -12,12 +12,20 @@ completeness by:
 Returns a dict shaped for JSON serialization back through Celery.
 
 Note (2026-08): the LAPIS co-occurrence endpoint (PR #1768, `[position]`
-bracket fields in /aggregated) is now deployed on WASAP. Benchmarks show
-~0.1s per co-occurrence query regardless of position count (to 12+), and a
-full multi-amplicon sweep of all sampling dates runs in ~5s at 16-way
-concurrency. There is therefore no longer any need to truncate the date
-range for speed — the `scope.weeks` clamp has been removed from the default
-path.
+bracket fields in /aggregated) is deployed on WASAP, and query cost is
+confirmed independent of position count. The `scope.weeks` clamp has been
+removed from the default path on that basis.
+
+CAVEAT (2026-08-26, unverified): the "~5s full sweep" figure above has NOT
+been reproduced end-to-end. Measured cold benchmarks for a full BED-based
+sweep (this file's code path, one city, ~421 positions) were 11.7-17.9s,
+not ~5s — see cooc_investigation_summary.md. Separately, this file's
+_fetch_cooccurrence_for_date calls now use the `date` field instead of
+`samplingDate` (temporary LAPIS-side hack, see api/wiseloculus.py), which
+should help, but the combined fetch+classify wall time with this change has
+not yet been measured for a full sweep. Treat "~5s" as aspirational until
+re-benchmarked; do not assume the scope.weeks clamp removal is safe for the
+worst-case scenario (all variants, all cities, 6 months) without testing it.
 """
 
 import asyncio
