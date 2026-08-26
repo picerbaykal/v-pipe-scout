@@ -2,35 +2,21 @@ __pycache__
 .DS_Store
 deployment.log
 *.lock
-
 # Environment variables with sensitive information
 .env
-
 # VsCode settings
 .vscode/
-
+# PyCharm project settings
+.idea/
+# direnv local environment
+.envrc
+# Pango summary runtime cache
+.cache/
+app/.cache/
 # Exclude data files that shouldn't be committed
 data/known_variants/*.yaml
-
-# PyCharm project settings
-.idea/
-
-# direnv local environment
-.envrc
-
-# Pango summary runtime cache
-.cache/
-app/.cache/
-# PyCharm project settings
-.idea/
-
-# direnv local environment
-.envrc
-
-# Pango summary runtime cache
-.cache/
-app/.cache/
-
 # Worker runtime cache (cowwid YAMLs downloaded by api/signatures.py)
-worker/data/app/body_*.json
+worker/data/known_variants/*.yaml
+# Local LAPIS test request bodies
+app/body_*.json
 app/post_body*.json
