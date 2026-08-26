@@ -372,7 +372,7 @@ def app():
                     if _state in ("PENDING", "STARTED", "RETRY"):
                         return True
             return False
-        _busy = _any_running()
+        _busy = _any_running() or bool(st.session_state.get("acooc_trigger_run"))
 
         # ── Step 5: Run analysis ──────────────────────────────────────────────
         can_run = (
