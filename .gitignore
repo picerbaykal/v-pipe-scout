@@ -32,4 +32,5 @@ app/.cache/
 app/.cache/
 
 # Worker runtime cache (cowwid YAMLs downloaded by api/signatures.py)
-worker/data/
+worker/data/app/body_*.json
+app/post_body*.json
