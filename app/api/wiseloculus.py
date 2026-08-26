@@ -475,11 +475,20 @@ class WiseLoculusLapis(Lapis):
             List of dicts, one per unique base combination:
                 {"date": date_str, "[241]": "T", "[297]": "G", "count": 15000}
         """
-        fields = [f"[{p}]" for p in positions]
+        # HACK (2026-08, temporary): filter/group by the string-typed `date`
+        # field instead of `samplingDate`. The LAPIS devs confirmed the real
+        # bottleneck is server-side grouping+filtering on the date-typed
+        # `samplingDate` column and are prototyping `date` as a fast-path
+        # workaround on their end (see cooc_investigation_summary.md).
+        # Benchmarked 2026-08-26: samplingDate ~16-18s vs date ~0.1-0.8s for
+        # an identical single-date query (421-position panel, Lugano).
+        # REVERT to samplingDate once LAPIS resolves the underlying
+        # date-typed grouping bottleneck server-side — confirm with devs
+        # whether `date` is being kept permanently or removed once fixed.
+        fields = [f"[{p}]" for p in positions] + ["date"]
         params = {
             "locationName": locationName,
-            "samplingDateFrom": date_str,
-            "samplingDateTo": date_str,
+            "date": date_str,
             "fields": ",".join(fields),
         }
         try:
