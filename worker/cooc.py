@@ -167,7 +167,7 @@ def run_cooc_panel_completeness(
         location: Location name e.g. "Lugano (TI)"
         start_date, end_date: Datetime bounds (inclusive).
         variants: Panel variant names.
-        bed_path: Path to amplicon BED. Defaults to /app_shared/data/SARS-CoV-2.insert.bed.
+        bed_path: Path to amplicon BED. Defaults to /app_shared/data/ArticV542inserts.bed.
         progress_callback: Optional callback(step, message) for progress reporting.
 
     Returns:
@@ -175,7 +175,7 @@ def run_cooc_panel_completeness(
         All list values are aligned by index (one entry per date).
     """
     if bed_path is None:
-        bed_path = "/app_shared/data/SARS-CoV-2.insert.bed"
+        bed_path = "/app_shared/data/ArticV542inserts.bed"
 
     from utils.config import get_cooc_setting
 
