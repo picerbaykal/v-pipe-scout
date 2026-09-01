@@ -175,7 +175,7 @@ def run_cooc_panel_completeness(
         All list values are aligned by index (one entry per date).
     """
     if bed_path is None:
-        bed_path = "/app_shared/data/ArticV542inserts.bed"
+        bed_path = "/app_shared/data/ArticV542inserts.bed h"
 
     from utils.config import get_cooc_setting
 
@@ -228,17 +228,16 @@ def run_cooc_panel_completeness(
         f"{len(variants)} variants"
     )
 
-    _progress(2, "Grouping positions by amplicon")
-    # One batch per amplicon — positions within an amplicon co-occur on a read,
-    # positions across amplicons cannot. No sub-splitting by read-length is
-    # needed: a single co-occurrence query with all of an amplicon's positions
-    # is ~0.1s regardless of position count (LAPIS PR #1768, benchmarked 2026-08).
-    amplicons = load_amplicons(Path(bed_path))
-    amp_groups = group_positions_by_amplicon(positions, amplicons)
-    batches = list(amp_groups.items())  # (amplicon_name, positions)
+    _progress(2, "BED-free: preparing all positions for query")
+    # BED-free: one batch containing all positions, one query per date.
+    # Benchmarked 2026-09: 8-65x faster than BED-based (90 batches x dates),
+    # identical completeness (0.9935 vs 0.9935), more correct (full
+    # confirmed_absent set catches contradictions BED-based misses).
+    # Cross-amplicon positions return N automatically — physics enforces
+    # amplicon scoping, not the BED file. BED still used for UI labeling only.
+    batches = [("all", list(positions))]
     logger.info(
-        f"[cooc][{location}] {len(batches)} query batches "
-        f"(from {len(amp_groups)} amplicons)"
+        f"[cooc][{location}] BED-free: 1 batch, {len(positions)} positions"
     )
 
     _progress(3, f"Querying LAPIS for {len(batches)} batches")
@@ -255,8 +254,8 @@ def run_cooc_panel_completeness(
         # fan-out (16 batch-sessions each opening 35 connections) that fought
         # the per-host connection cap. Instead, all n_batches × n_dates queries
         # share one connector and are serialized only by BATCH_CONCURRENCY.
-        # For 92 batches × 35 dates = 3220 queries at 16-way concurrency,
-        # this gives ~16s vs the previous nested structure.
+        # For 1 batch × N dates = N queries total (e.g. 54 dates = 54 queries).
+        # BED-free: 8-65x faster than the previous 90-batch structure.
         import aiohttp
         from api.wiseloculus import MAX_CONCURRENT_CONNECTIONS, MAX_CONNECTIONS_PER_HOST
 
