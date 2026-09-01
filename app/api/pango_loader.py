@@ -272,6 +272,60 @@ PANGO_SUMMARY_URL = (
     "https://raw.githubusercontent.com/corneliusroemer/pango-sequences"
     "/refs/heads/main/data/pango-consensus-sequences_summary.json"
 )
+FREYJA_BARCODES_URL = (
+    "https://raw.githubusercontent.com/andersen-lab/Freyja"
+    "/main/freyja/data/usher_barcodes.feather"
+)
+
+def _get_pango_source() -> str:
+    """Read pango.source from config.yaml, default to cornelius."""
+    try:
+        import yaml
+        config_path = Path(__file__).parent.parent / "config.yaml"
+        with open(config_path) as f:
+            cfg = yaml.safe_load(f)
+        return cfg.get("pango", {}).get("source", "cornelius")
+    except Exception:
+        return "cornelius"
+
+def _download_from_freyja(local_path: Path, old_data: dict) -> dict:
+    """Download Freyja barcodes and merge with existing pango_summary."""
+    import io
+    try:
+        import pyarrow.feather as feather
+    except ImportError:
+        return {"success": False, "error": "pyarrow not installed",
+                "new_variants": 0, "old_variants": len(old_data), "added": []}
+    try:
+        with urllib.request.urlopen(FREYJA_BARCODES_URL, timeout=120) as resp:
+            raw = resp.read()
+        df = feather.read_feather(io.BytesIO(raw))
+        if df.index.name is None:
+            df = df.set_index(df.columns[0])
+        # vectorized conversion — O(n) not O(n²)
+        freyja_sigs = {
+            lin: df.columns[df.loc[lin].astype(bool)].tolist()
+            for lin in df.index
+        }
+        new_data = dict(old_data)
+        added = []
+        for lin, nuc_muts in freyja_sigs.items():
+            if lin in new_data:
+                new_data[lin]["nucSubstitutions"] = nuc_muts
+            else:
+                new_data[lin] = {"nucSubstitutions": nuc_muts, "aaSubstitutions": []}
+                added.append(lin)
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = local_path.with_suffix(".tmp")
+        with tmp.open("w", encoding="utf-8") as f:
+            json.dump(new_data, f)
+        shutil.move(str(tmp), str(local_path))
+        return {"success": True, "new_variants": len(new_data),
+                "old_variants": len(old_data), "added": added, "error": None}
+    except Exception as exc:
+        return {"success": False, "error": str(exc),
+                "new_variants": 0, "old_variants": len(old_data), "added": []}
+
 
 def download_pango_summary(local_path: str | Path) -> dict:
     """
@@ -286,6 +340,21 @@ def download_pango_summary(local_path: str | Path) -> dict:
             "error": str | None,
         }
     """
+
+    # dispatch to Freyja or Cornelius based on config
+    source = _get_pango_source()
+    local = Path(local_path)
+    old_data: dict = {}
+    if local.exists():
+        try:
+            with local.open("r", encoding="utf-8") as f:
+                old_data = json.load(f)
+        except Exception:
+            pass
+    if source == "freyja":
+        logging.info("pango_loader: downloading from Freyja (UShER/NCBI, daily updated)")
+        return _download_from_freyja(local, old_data)
+    logging.info("pango_loader: downloading from corneliusroemer/pango-sequences")
 
     local = Path(local_path)
 

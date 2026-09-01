@@ -5,3 +5,8 @@ server:
 curated_variant_definitions:
   # Full GitHub repository URL (e.g., https://github.com/cbg-ethz/cowwid)
   github_url: "https://github.com/cbg-ethz/cowwid/tree/master/voc"
+pango:
+  # Source for pango lineage signatures. Options:
+  #   "cornelius" — frozen June 2025, 4976 lineages (default, stable)
+  #   "freyja"    — daily updated via UShER/NCBI, 5975 lineages (more current)
+  source: "freyja"
