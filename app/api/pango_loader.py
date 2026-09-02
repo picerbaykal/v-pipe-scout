@@ -65,13 +65,15 @@ class PangoLoader:
                 json.load(handle),
             )
 
-        # initialize processed containers
+        # initialize processed containers — signatures built lazily on first access
         self._signatures = {}
         self._private_mutations = {}
         self._designation_dates = {}
-        self._reconstructed_signatures: set[str] = set()  # empty-node parents filled from children
-        self._process()
-        self._fill_empty_node_signatures()
+        self._reconstructed_signatures: set[str] = set()
+        # pre-process only designation dates (lightweight, needed for sorting/display)
+        # signatures are built lazily in get_signature() to avoid loading all 6,007
+        # lineages into memory when only 2-29 are needed for a given panel
+        self._process_dates()
 
 
     @staticmethod
@@ -91,6 +93,59 @@ class PangoLoader:
         """
         return mutation[1:]
 
+
+    def _process_dates(self) -> None:
+        """Lightweight pass — only extract designation dates (needed for display/sorting)."""
+        for lineage, entry in self.raw_data.items():
+            designation_date = entry.get("designationDate")
+            self._designation_dates[lineage] = (
+                designation_date if isinstance(designation_date, str) else None
+            )
+
+    def _process_lineage(self, lineage: str) -> None:
+        """Process one lineage on demand — called lazily from get_signature()."""
+        if lineage in self._signatures:
+            return  # already processed
+        entry = self.raw_data.get(lineage, {})
+        substitutions = entry.get("nucSubstitutions", [])
+        if not isinstance(substitutions, list):
+            substitutions = []
+        private_substitutions = entry.get("nucSubstitutionsNew", [])
+        if not isinstance(private_substitutions, list):
+            private_substitutions = []
+        signature: set[str] = set()
+        for mutation in substitutions:
+            if isinstance(mutation, str) and len(mutation) > 1:
+                signature.add(self._normalize_substitution(mutation))
+        private_mutations: set[str] = set()
+        for mutation in private_substitutions:
+            if isinstance(mutation, str) and len(mutation) > 1:
+                private_mutations.add(self._normalize_substitution(mutation))
+        # handle deletions
+        nuc_deletions = entry.get("nucDeletions", [])
+        if not isinstance(nuc_deletions, list):
+            nuc_deletions = []
+        for deletion in nuc_deletions:
+            if isinstance(deletion, str) and "-" in deletion:
+                try:
+                    start, end = deletion.split("-")
+                    for pos in range(int(start), int(end) + 1):
+                        signature.add(f"{pos}-")
+                except (ValueError, IndexError):
+                    pass
+        nuc_deletions_new = entry.get("nucDeletionsNew", [])
+        if not isinstance(nuc_deletions_new, list):
+            nuc_deletions_new = []
+        for deletion in nuc_deletions_new:
+            if isinstance(deletion, str) and "-" in deletion:
+                try:
+                    start, end = deletion.split("-")
+                    for pos in range(int(start), int(end) + 1):
+                        private_mutations.add(f"{pos}-")
+                except (ValueError, IndexError):
+                    pass
+        self._signatures[lineage] = signature
+        self._private_mutations[lineage] = private_mutations
 
     def _process(self) -> None:
         """
@@ -230,24 +285,31 @@ class PangoLoader:
             )
 
     def get_signature(self, lineage: str) -> set[str]:
-        if lineage in self._signatures:
-            return self._signatures[lineage]
-        # Lineage absent from pango_summary (e.g. BA.3.2) — try to reconstruct
-        # from sub-lineages present in pango_summary via prefix matching.
-        # Equivalent to querying CovSpectrum with "BA.3.2*".
-        prefix = lineage + "."
-        child_sigs = [
-            sig for name, sig in self._signatures.items()
-            if name.startswith(prefix) and sig
-        ]
-        if not child_sigs:
-            self._signatures[lineage] = set()
-            return set()
-        intersection = child_sigs[0].intersection(*child_sigs[1:])
-        self._signatures[lineage] = intersection
-        if intersection:
-            self._reconstructed_signatures.add(lineage)
-        return intersection
+        # lazy: process this lineage if not yet done
+        if lineage not in self._signatures:
+            if lineage in self.raw_data:
+                self._process_lineage(lineage)
+            else:
+                # lineage absent from file — reconstruct from children via prefix match
+                prefix = lineage + "."
+                # ensure all candidate children are processed
+                for name in self.raw_data:
+                    if name.startswith(prefix) and name not in self._signatures:
+                        self._process_lineage(name)
+                child_sigs = [
+                    self._signatures[name]
+                    for name in self._signatures
+                    if name.startswith(prefix) and self._signatures[name]
+                ]
+                if not child_sigs:
+                    self._signatures[lineage] = set()
+                    return set()
+                intersection = child_sigs[0].intersection(*child_sigs[1:])
+                self._signatures[lineage] = intersection
+                if intersection:
+                    self._reconstructed_signatures.add(lineage)
+                return intersection
+        return self._signatures[lineage]
 
     def get_private_mutations(self, lineage: str) -> set[str]:
         return self._private_mutations.get(lineage, set())

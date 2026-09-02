@@ -26,6 +26,7 @@ services:
       - "${STREAMLIT_PORT:-9001}:8000"
     volumes:
       - ./app:/app
+      - pango-cache:/app/.cache/pango
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -44,9 +45,12 @@ services:
       context: ./worker
       dockerfile: Dockerfile
     restart: unless-stopped
+    mem_limit: 4g
+    memswap_limit: 4g
     volumes:
       - ./worker:/app
       - ./app:/app_shared
+      - pango-cache:/app/.cache/pango
     depends_on:
       redis:
         condition: service_healthy
@@ -61,3 +65,4 @@ services:
 
 volumes:
   redis-data:
+  pango-cache:
