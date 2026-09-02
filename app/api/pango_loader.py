@@ -406,13 +406,22 @@ def download_pango_summary(local_path: str | Path) -> dict:
     # dispatch to Freyja or Cornelius based on config
     source = _get_pango_source()
     local = Path(local_path)
+    # always use the static checked-in file as the metadata base for merging
+    # this ensures parent/children/designationDate are preserved even when
+    # the cache is empty (e.g. after a docker volume reset)
     old_data: dict = {}
-    if local.exists():
-        try:
-            with local.open("r", encoding="utf-8") as f:
-                old_data = json.load(f)
-        except Exception:
-            pass
+    try:
+        with PANGO_SUMMARY_DEFAULT.open("r", encoding="utf-8") as f:
+            old_data = json.load(f)
+        logging.info(f"pango_loader: loaded {len(old_data)} lineages from default as merge base")
+    except Exception:
+        # fallback to cache if default is unavailable
+        if local.exists():
+            try:
+                with local.open("r", encoding="utf-8") as f:
+                    old_data = json.load(f)
+            except Exception:
+                pass
     if source == "freyja":
         logging.info("pango_loader: downloading from Freyja (UShER/NCBI, daily updated)")
         return _download_from_freyja(local, old_data)
