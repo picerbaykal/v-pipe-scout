@@ -37,4 +37,5 @@ dependencies:
   
   - pip
   - pip:
+    - pyarrow
       - redis==5.0.1
