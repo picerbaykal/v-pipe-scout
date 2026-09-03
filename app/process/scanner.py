@@ -194,7 +194,15 @@ def scan_unexplained_patterns(
     )
 
     # ── Bucket 2: emerging sublineages ───────────────────────────────────────
-    # pre-compute private signatures per lineage once (vs direct panel parent)
+    # pre-compute cowwid union — mutations in any known tracked variant
+    # subtracting this from private_sig prevents reads from untracked but
+    # known variants (e.g. XFG when not in panel) inflating sublineage counts
+    cowwid_union_sig = set().union(*cowwid_signatures.values()) if cowwid_signatures else set()
+    panel_union_sig = set().union(
+        *(all_lineage_signatures.get(p, set()) for p in panel_set)
+    )
+    # pre-compute private signatures per lineage once
+    # private = mutations unique to this lineage vs panel AND all known cowwid variants
     lineage_private_sigs: Dict[str, set] = {}
     emerging_hits: Dict[str, dict] = {}
 
@@ -211,10 +219,11 @@ def scan_unexplained_patterns(
             )
             if not is_desc:
                 continue
-            # private = mutations this lineage has that its panel parent doesn't
+            # private = mutations unique to this lineage vs panel AND cowwid
+            # using cowwid_union prevents reads from untracked known variants
+            # (e.g. XFG not in panel) being attributed to sublineages
             if lineage not in lineage_private_sigs:
-                parent_sig = all_lineage_signatures.get(panel_parent, set())
-                lineage_private_sigs[lineage] = sig - parent_sig
+                lineage_private_sigs[lineage] = sig - panel_union_sig - cowwid_union_sig
             private_sig = lineage_private_sigs[lineage]
             private_observed = present & private_sig
             # require >=2 co-occurring private mutations

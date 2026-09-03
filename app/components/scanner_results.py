@@ -178,6 +178,8 @@ def render_scanner_results(
     location: str = "",
     date_range: tuple = None,
     on_add_variant=None,
+    all_lineage_signatures: dict = None,
+    cowwid_signatures: dict = None,
 ) -> None:
     """
     Render the scanner classification results with expandable sections.
@@ -276,6 +278,10 @@ def render_scanner_results(
                             location=location,
                             date_range=date_range,
                             max_mutations=20,
+                            panel_variants=panel_variants,
+                            all_lineage_signatures=all_lineage_signatures,
+                            cowwid_signatures=cowwid_signatures,
+                            lineage_sig=all_lineage_signatures.get(variant, set()) if all_lineage_signatures else None,
                         )
 
     # ── Bucket 2: emerging sublineages ───────────────────────────────────────
@@ -345,6 +351,10 @@ def render_scanner_results(
                                     location=location,
                                     date_range=date_range,
                                     max_mutations=20,
+                                    panel_variants=panel_variants,
+                                    all_lineage_signatures=all_lineage_signatures,
+                                    cowwid_signatures=cowwid_signatures,
+                                    lineage_sig=all_lineage_signatures.get(lineage, set()) if all_lineage_signatures else None,
                                 )
 
                 if len(items) > 10:

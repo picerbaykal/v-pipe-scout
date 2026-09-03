@@ -915,6 +915,29 @@ def app():
                                         st.session_state[f"acooc_add_variant_pending_{_lin}"] = _lin
                                         st.session_state["acooc_exp_sub"] = True
                                         st.rerun()
+                            # heatmap — show per-city signal over time
+                            _obs_muts = _d.get("obs", [])
+                            if _obs_muts and client:
+                                for _hloc in _d["cities"]:
+                                    with st.expander(f"Signal over time — {_hloc} — {_lin}", expanded=False):
+                                        from components.scanner_heatmap import render_scanner_heatmap
+                                        from api.pango_loader import PangoLoader, get_pango_summary_path
+                                        from api.wiseloculus import get_variant_list
+                                        _pl = cached_get_pango_loader()
+                                        _all_sigs = {lin: _pl.get_signature(lin) for lin in _pl.raw_data}
+                                        _cowwid_sigs = {v.name: {m[1:] for m in v.signature_mutations if len(m) > 1} for v in get_variant_list().variants}
+                                        render_scanner_heatmap(
+                                            variant=_lin,
+                                            mutations=_obs_muts,
+                                            client=client,
+                                            location=_hloc,
+                                            date_range=date_range,
+                                            max_mutations=20,
+                                            panel_variants=all_selected_variants,
+                                            all_lineage_signatures=_all_sigs,
+                                            cowwid_signatures=_cowwid_sigs,
+                                            lineage_sig=_all_sigs.get(_lin, set()) if _all_sigs else None,
+                                        )
 
                 # ---- Bucket 3: Possibly new (aggregated reads) ----
                 _pn_total = sum(
