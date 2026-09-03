@@ -404,7 +404,7 @@ def run_cooc_scanner_lapis(self, location: str, start_date: str, end_date: str,
             cowwid_signatures=cowwid_variants,
             all_lineage_signatures=all_sigs,
             panel_parent_map=panel_parent_map,
-            min_read_count=2,
+            min_read_count=500,
         )
 
         redis_client.set(progress_key, json.dumps({

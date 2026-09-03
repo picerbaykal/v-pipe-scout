@@ -194,6 +194,8 @@ def scan_unexplained_patterns(
     )
 
     # ── Bucket 2: emerging sublineages ───────────────────────────────────────
+    # pre-compute private signatures per lineage once (vs direct panel parent)
+    lineage_private_sigs: Dict[str, set] = {}
     emerging_hits: Dict[str, dict] = {}
 
     for idx, row in patterns.iterrows():
@@ -209,14 +211,13 @@ def scan_unexplained_patterns(
             )
             if not is_desc:
                 continue
-            parent_sig = all_lineage_signatures.get(panel_parent, set())
-            private_sig = sig - parent_sig
+            # private = mutations this lineage has that its panel parent doesn't
+            if lineage not in lineage_private_sigs:
+                parent_sig = all_lineage_signatures.get(panel_parent, set())
+                lineage_private_sigs[lineage] = sig - parent_sig
+            private_sig = lineage_private_sigs[lineage]
             private_observed = present & private_sig
-            # require >=2 co-occurring private mutations — matches the
-            # process/cooc.py uninformative cutoff and eliminates single-
-            # position sublineages that cannot be distinguished from noise
-            # (e.g. a sublineage whose only private mutation is one position
-            # appearing at high frequency — indistinguishable from drift)
+            # require >=2 co-occurring private mutations
             if len(private_observed) < 2:
                 continue
             if lineage not in emerging_hits:
