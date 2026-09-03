@@ -1,9 +1,9 @@
 #!/bin/bash
 set -e
 
-echo "=== Updating pango signatures ==="
+echo "=== Skipping pango update — using static pango_summary.json from pango-tree-builder ==="
 
-conda run -n v-pipe-scout-worker python3 -c "
+# conda run -n v-pipe-scout-worker python3 -c "
 import sys
 sys.path.insert(0, '/app_shared')
 sys.path.insert(0, '/app')
