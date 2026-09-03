@@ -267,64 +267,52 @@ def run_cooc_panel_completeness(
         sem = asyncio.Semaphore(BATCH_CONCURRENCY)
 
         # Accumulate per-batch results keyed by batch index
-        batch_rows: dict = {i: [] for i in range(len(batches))}
+        # BED-free: one batch, process each date immediately to avoid
+        # accumulating all dates in memory before classification.
+        _, batch_positions = batches[0]
+        per_date_results = []
+        per_date_unexplained = []
 
         async def _one_query(session, batch_idx, batch_positions, date_str):
             async with sem:
                 rows = await client._fetch_cooccurrence_for_date(
                     session, location, date_str, batch_positions
                 )
-            batch_rows[batch_idx].extend(rows)
+            if not rows:
+                return
+            import pandas as _pd
+            df = _pd.DataFrame(rows)
+            annotated = annotate_cooc_dataframe(
+                df, batch_positions, amp_dict, variant_signatures
+            )
+            per_date = panel_completeness_by_date(annotated)
+            if not per_date.empty:
+                per_date_results.append(per_date)
+            if "classification" in annotated.columns:
+                unexp = annotated[annotated["classification"] == "unexplained"][
+                    ["date", "count", "confirmed_present"]
+                ].copy()
+                if not unexp.empty:
+                    per_date_unexplained.append(unexp)
+            del df, rows, annotated
 
         async with aiohttp.ClientSession(
             timeout=timeout, connector=connector
         ) as session:
             tasks = [
-                _one_query(session, i, pos, d)
-                for i, (_, pos) in enumerate(batches)
+                _one_query(session, 0, batch_positions, d)
                 for d in dates
             ]
             done = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Log errors
         n_errors = sum(1 for r in done if isinstance(r, Exception))
         if n_errors:
             logger.error(f"[cooc][{location}] {n_errors}/{len(tasks)} queries failed")
-
-        # Process each batch's accumulated rows
-        completeness_results = []
-        pattern_results = []
-        for i, (_, batch_positions) in enumerate(batches):
-            rows = batch_rows[i]
-            if not rows:
-                continue
-            df = pd.DataFrame(rows)
-            logger.info(
-                f"[cooc][{location}] batch {i+1}/{len(batches)} — {len(df)} rows"
-            )
-            annotated = annotate_cooc_dataframe(
-                df, batch_positions, amp_dict, variant_signatures
-            )
-            if "classification" in annotated.columns:
-                logger.info(
-                    f"[cooc][{location}] batch {i+1} "
-                    f"rows={annotated['classification'].value_counts().to_dict()} "
-                    f"reads={annotated.groupby('classification')['count'].sum().to_dict()}"
-                )
-            per_date = panel_completeness_by_date(annotated)
-            unexplained = (
-                annotated[annotated["classification"] == "unexplained"][
-                    ["date", "count", "confirmed_present"]
-                ].copy()
-                if "classification" in annotated.columns
-                else pd.DataFrame()
-            )
-            if not per_date.empty:
-                completeness_results.append(per_date)
-            if not unexplained.empty:
-                pattern_results.append(unexplained)
-
-        return completeness_results, pattern_results
+        logger.info(
+            f"[cooc][{location}] processed {len(per_date_results)} dates, "
+            f"{len(per_date_unexplained)} with unexplained patterns"
+        )
+        return per_date_results, per_date_unexplained
 
     try:
         loop = asyncio.get_event_loop()
