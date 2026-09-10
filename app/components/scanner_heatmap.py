@@ -44,41 +44,52 @@ def _fetch_frequencies(
     date_range: tuple,
     mutations: List[str],
 ) -> pd.DataFrame:
-    """Fetch mutation frequencies over time. Returns DataFrame with columns:
-    mutation, dateFrom, dateTo, frequency, count, coverage."""
-    queries = _build_queries(mutations)
+    """Fetch mutation frequencies over time via /sample/aggregated — the SAME
+    endpoint the co-occurrence pipeline uses, so the heatmap and the scanner
+    see identical data. For each real sampling date we query all positions at
+    once; frequency = reads with the mutation / reads covering that position
+    (non-N). Returns columns: mutation, dateFrom, dateTo, frequency, count,
+    coverage."""
+    import re as _re
+    positions = sorted({int(_re.match(r'^(\d+)', m).group(1))
+                        for m in mutations if _re.match(r'^(\d+)', m)})
+    alt_of = {int(_re.match(r'^(\d+)', m).group(1)): m[-1]
+              for m in mutations if _re.match(r'^(\d+)', m)}
 
     async def _run():
-        return await client.get_queries_over_time(
-            locationName=location,
-            date_range=date_range,
-            queries=queries,
-            date_granularity="week",
-        )
+        import aiohttp
+        start, end = date_range
+        dates = await client._get_sampling_dates(location, (start, end))
+        dates = sorted(dates)
+        out = []
+        async with aiohttp.ClientSession() as session:
+            for d in dates:
+                rows = await client._fetch_cooccurrence_for_date(
+                    session, location, d, positions)
+                # per position: total covered (non-N) and mutation count
+                cov = {p: 0 for p in positions}
+                mut = {p: 0 for p in positions}
+                for row in (rows or []):
+                    c = row.get('count', 0)
+                    for p in positions:
+                        b = row.get(f'[{p}]')
+                        if b is not None and b != 'N':
+                            cov[p] += c
+                            if b == alt_of[p]:
+                                mut[p] += c
+                for m in mutations:
+                    mm = _re.match(r'^(\d+)', m)
+                    if not mm:
+                        continue
+                    p = int(mm.group(1))
+                    freq = mut[p] / cov[p] if cov[p] > 0 else 0.0
+                    out.append({
+                        'mutation': m, 'dateFrom': d, 'dateTo': d,
+                        'frequency': freq, 'count': mut[p], 'coverage': cov[p],
+                    })
+        return out
 
-    result = asyncio.run(_run())
-    if not result:
-        return pd.DataFrame()
-
-    query_labels = result.get("queries", [])
-    date_ranges = result.get("dateRanges", [])
-    data = result.get("data", [])
-
-    rows = []
-    for q_idx, label in enumerate(query_labels):
-        for d_idx, dr in enumerate(date_ranges):
-            cell = data[q_idx][d_idx] if q_idx < len(data) and d_idx < len(data[q_idx]) else {}
-            count = cell.get("count", 0)
-            coverage = cell.get("coverage", 0)
-            freq = count / coverage if coverage > 0 else 0.0
-            rows.append({
-                "mutation": label,
-                "dateFrom": dr["dateFrom"],
-                "dateTo": dr["dateTo"],
-                "frequency": freq,
-                "count": count,
-                "coverage": coverage,
-            })
+    rows = asyncio.run(_run())
     return pd.DataFrame(rows)
 
 
@@ -339,134 +350,103 @@ def render_clade_heatmap(
     client,
     location: str,
     date_range: tuple,
-    max_members: int = 5,
-    max_muts_per_block: int = 4,
+    max_members: int = 12,
+    max_muts_per_block: int = 6,
 ) -> None:
-    """Clustered heatmap: mutations grouped by clade member.
+    """Signal-over-time for a clade: one small heatmap per family block.
 
-    Rows are grouped into blocks — first the shared (clade-defining) mutations,
-    then each member's discriminating mutations. A member is present when its
-    own block lights up alongside the shared block. No-coverage cells are shown
-    hatched (grey) so gaps aren't mistaken for absence.
-
-    Args:
-        clade_node:        the clade label, e.g. "LF.7".
-        shared_mutations:  muts all members share (the clade fingerprint).
-        member_blocks:     [{"member": name, "discriminating": [muts]}].
-        client:            WiseLoculusLapis instance.
-        location:          location name.
-        date_range:        (start, end) datetimes.
+    The shared block confirms the clade is present. Each member/family block
+    below shows that family's discriminating co-occurrence group — when its
+    block lights up alongside shared, that family is driving the signal.
+    Each block is a separate small heatmap with its own title, so labels are
+    always clear and different-amplicon groups aren't misread as one.
     """
     import numpy as np
     import plotly.graph_objects as go
     from datetime import datetime
 
-    # assemble the row groups: shared first, then up to max_members blocks.
-    # dedup across groups — a mutation shown in an earlier block is not repeated.
-    _seen = set()
-    groups = []
+    # blocks to render: shared first, then each family block
+    render_blocks = []
     if shared_mutations:
-        _sh = [m for m in list(shared_mutations)[:max_muts_per_block] if m not in _seen]
-        _seen.update(_sh)
-        if _sh:
-            groups.append(("shared (clade)", _sh))
+        render_blocks.append(("shared (clade)",
+                              "present in all members — confirms the clade",
+                              list(shared_mutations)[:max_muts_per_block]))
     for b in member_blocks[:max_members]:
-        muts = [m for m in list(b.get("discriminating", []))[:max_muts_per_block]
-                if m not in _seen]
-        _seen.update(muts)
-        if muts:
-            groups.append((f"{b['member']}-specific", muts))
+        name = b.get("member", "?")
+        mc = b.get("member_count", 1)
+        subtitle = (f"{mc} indistinguishable lineages" if mc > 1
+                    else "distinguishable lineage")
+        render_blocks.append((name, subtitle,
+                              list(b.get("discriminating", []))[:max_muts_per_block]))
 
-    if not groups:
-        st.caption("No mutations to display for this clade.")
+    if not render_blocks:
+        st.caption("No co-occurrence groups to display for this clade.")
         return
 
-    # all muts to query (dedup — a mut can appear in shared and a block)
-    all_muts = list(dict.fromkeys(m for _, muts in groups for m in muts))
+    # fetch all muts once
+    all_muts = list(dict.fromkeys(
+        m for _, _, muts in render_blocks for m in muts))
     with st.spinner(f"Fetching {clade_node} signal over time…"):
         df = _fetch_frequencies(client, location, date_range, all_muts)
-    # drop duplicate (mutation,dateFrom) rows before pivoting
-    if not df.empty:
-        df = df.drop_duplicates(subset=["mutation", "dateFrom"], keep="first")
     if df.empty:
         st.caption("No frequency data returned.")
         return
-
-    # pivot: freq and coverage
+    df = df.drop_duplicates(subset=["mutation", "dateFrom"], keep="first")
     freq = df.pivot(index="mutation", columns="dateFrom", values="frequency")
     cov = df.pivot(index="mutation", columns="dateFrom", values="coverage")
     cols = list(freq.columns)
     col_labels = [datetime.strptime(c, "%Y-%m-%d").strftime("%b %d") for c in cols]
 
-    # build ordered rows. Each row label is prefixed with its group so the
-    # block membership is unambiguous and labels never overlap.
-    row_labels, z, hatch_mask, sep_after = [], [], [], []
-    for gi, (gname, muts) in enumerate(groups):
-        block = gname.replace("-specific", "").replace(" (clade)", "")
-        added = 0
-        for m in muts:
-            if m not in freq.index:
-                continue
-            row_labels.append(f"{block} · {m}")
-            frow, crow = [], []
+    st.caption(
+        "Each block is a discriminating co-occurrence group for this clade, in "
+        "a different amplicon region. A dark block means that group co-occurs on "
+        "reads — positive evidence. More blocks lit = stronger confirmation. "
+        "Hatched = no coverage that week (not absence)."
+    )
+
+    def _one_block(title, subtitle, muts, key):
+        rows = [m for m in muts if m in freq.index]
+        if not rows:
+            return
+        z, hatch = [], []
+        for m in rows:
+            frow, hrow = [], []
             for c in cols:
                 fv = freq.loc[m, c]
                 cvv = cov.loc[m, c] if m in cov.index else 0
                 if cvv is None or cvv == 0 or (isinstance(cvv, float) and np.isnan(cvv)):
-                    frow.append(np.nan)
-                    crow.append(True)
+                    frow.append(np.nan); hrow.append(True)
                 else:
-                    frow.append(float(fv) if fv == fv else 0.0)
-                    crow.append(False)
-            z.append(frow)
-            hatch_mask.append(crow)
-            added += 1
-        if added and gi < len(groups) - 1:
-            sep_after.append(len(row_labels) - 1)
+                    frow.append(float(fv) if fv == fv else 0.0); hrow.append(False)
+            z.append(frow); hatch.append(hrow)
 
-    if not z:
-        st.caption("No covered mutations to display.")
-        return
-
-    fig = go.Figure()
-    # main heatmap (covered cells) — Blues, NaN shows as gap
-    fig.add_trace(go.Heatmap(
-        z=z, x=col_labels, y=row_labels,
-        colorscale="Blues", zmin=0, zmax=1,
-        hoverongaps=False,
-        colorbar=dict(title="freq", tickformat=".0%"),
-        xgap=1, ygap=1,
-    ))
-    # hatched overlay for no-coverage cells (light grey squares)
-    hz = [[1 if hatch_mask[i][j] else np.nan for j in range(len(cols))]
-          for i in range(len(row_labels))]
-    fig.add_trace(go.Heatmap(
-        z=hz, x=col_labels, y=row_labels,
-        colorscale=[[0, "#e5e7eb"], [1, "#e5e7eb"]],
-        showscale=False, hoverongaps=False,
-        hovertemplate="no coverage<extra></extra>",
-        xgap=1, ygap=1,
-    ))
-
-    # horizontal separator lines between member blocks
-    shapes = []
-    for yidx in sep_after:
-        shapes.append(dict(
-            type="line", xref="paper", x0=0, x1=1,
-            yref="y", y0=yidx + 0.5, y1=yidx + 0.5,
-            line=dict(color="#9ca3af", width=1),
+        fig = go.Figure()
+        fig.add_trace(go.Heatmap(
+            z=z, x=col_labels, y=rows, colorscale="Blues", zmin=0, zmax=1,
+            hoverongaps=False, showscale=False, xgap=1, ygap=1,
         ))
+        hz = [[1 if hatch[i][j] else np.nan for j in range(len(cols))]
+              for i in range(len(rows))]
+        fig.add_trace(go.Heatmap(
+            z=hz, x=col_labels, y=rows,
+            colorscale=[[0, "#e5e7eb"], [1, "#e5e7eb"]],
+            showscale=False, hoverongaps=False,
+            hovertemplate="no coverage<extra></extra>", xgap=1, ygap=1,
+        ))
+        fig.update_layout(
+            height=max(90, 24 * len(rows) + 40),
+            margin=dict(l=90, r=10, t=6, b=24),
+            template="plotly_white",
+            yaxis=dict(autorange="reversed", tickfont=dict(size=10)),
+            xaxis=dict(tickfont=dict(size=9)),
+        )
+        st.markdown(
+            f"<div style='font-size:13px;font-weight:500;margin:8px 0 0;'>{title}"
+            f"<span style='font-size:11px;color:#6b7280;font-weight:400;'> · {subtitle}</span></div>",
+            unsafe_allow_html=True,
+        )
+        st.plotly_chart(fig, use_container_width=True, key=key)
 
-    fig.update_layout(
-        height=max(220, 26 * len(row_labels) + 60),
-        margin=dict(l=140, r=20, t=10, b=30),
-        template="plotly_white",
-        yaxis=dict(autorange="reversed", tickfont=dict(size=10)),
-        shapes=shapes,
-    )
-    st.plotly_chart(fig, use_container_width=True)
-    st.caption(
-        "Read top-down: the shared block confirms the clade is present. "
-        "A member is driving the signal when its own block lights up alongside "
-        "the shared block. Hatched = no coverage that week (not absence)."
-    )
+    for i, (title, subtitle, muts) in enumerate(render_blocks):
+        _one_block(title, subtitle, muts,
+                   key=f"clade_hm_{clade_node}_{location}_{i}")

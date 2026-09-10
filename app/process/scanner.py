@@ -228,12 +228,19 @@ def scan_unexplained_patterns(
     novel_patterns: List[dict] = []
     total_unexplained = 0
 
+    # collect all observed co-occurrence patterns (mut-sets) for member
+    # filtering — a member is only plotted if its specific amplicon combo
+    # actually appears co-occurring in the data.
+    observed_patterns: List[frozenset] = []
+
     for _, row in patterns.iterrows():
         present = set(row["confirmed_present"])
         count = int(row["count"])
         if count < min_read_count:
             continue
         total_unexplained += count
+        if len(present) >= 2:
+            observed_patterns.append(frozenset(present))
 
         fingerprint = present - panel_union
         if len(fingerprint) < MIN_FINGERPRINT:
@@ -289,10 +296,63 @@ def scan_unexplained_patterns(
         slot["candidates"].update(candidates)
 
     # ── build output lists ────────────────────────────────────────────────
-    resolved_clade = sorted(
-        [_finalize_clade(s, tree, all_lineage_signatures) for s in clade_hits.values()],
-        key=lambda x: -x["total_reads"],
-    )
+    _all_clades = [
+        _finalize_clade(s, tree, all_lineage_signatures, observed_patterns)
+        for s in clade_hits.values()
+    ]
+
+    # nest clades that are inside another reported clade. e.g. PY.1.1 sits
+    # inside LF.7 — show it as a sub-finding of LF.7, not a separate top-level
+    # entry, so the same branch isn't reported multiple times.
+    _by_node = {c["node"]: c for c in _all_clades}
+    _nodes = set(_by_node)
+    for c in _all_clades:
+        c["sub_findings"] = []
+        c["parent_clade"] = None
+        cur = tree.parent.get(c["node"], "")
+        seen = set()
+        while cur and cur not in seen:
+            seen.add(cur)
+            if cur in _nodes:
+                c["parent_clade"] = cur
+                break
+            cur = tree.parent.get(cur, "")
+
+    top_level = []
+    for c in _all_clades:
+        if c["parent_clade"]:
+            _by_node[c["parent_clade"]]["sub_findings"].append(c)
+        else:
+            top_level.append(c)
+
+    # flag whether each clade resolved to a specific member (has blocks) or
+    # is only the clade backbone (panel-worthy at clade level, member unknown)
+    for c in _all_clades:
+        c["member_resolved"] = len(c.get("member_blocks", [])) > 0
+
+    # A clade is a confirmed finding only if it has at least one discriminating
+    # co-occurrence block (a specific + observed amplicon group). Clades that
+    # were assigned only by a fingerprint match but have no discriminating
+    # block (e.g. KW.1.2, PA.1 — flagged by a couple of broad mutations) are
+    # NOT co-occurrence-confirmed. Drop them from the confident findings and
+    # record them as unresolved so their reads aren't silently lost.
+    confirmed = []
+    for c in top_level:
+        # a clade counts if it, OR any of its sub-findings, has a block
+        has_block = bool(c.get("member_blocks")) or any(
+            sf.get("member_blocks") for sf in c.get("sub_findings", []))
+        if has_block:
+            confirmed.append(c)
+        else:
+            unresolved_hits[frozenset(c["observed_mutations"])] = {
+                "fingerprint": c["observed_mutations"][:6],
+                "candidate_count": c.get("member_count", 1),
+                "common_ancestor": c["node"],
+                "total_reads": c["total_reads"],
+                "pattern_count": c.get("pattern_count", 0),
+            }
+
+    resolved_clade = sorted(confirmed, key=lambda x: -x["total_reads"])
     unresolved = sorted(
         unresolved_hits.values(), key=lambda x: -x["total_reads"]
     )
@@ -339,60 +399,184 @@ def scan_unexplained_patterns(
     return result
 
 
-def _finalize_clade(s: dict, tree: "_Tree", all_sigs: Dict[str, Set[str]]) -> dict:
-    """Build the clade finding, including per-member discriminating-mutation
-    blocks for the drill-down heatmap.
+def _clade_root_of(members: List[str], tree: "_Tree") -> str:
+    """Tightest single label for a set of members: the deepest node that is an
+    ancestor of (or equal to) all of them. Falls back to the shortest name
+    when they don't share a common ancestor (e.g. recombinants)."""
+    if len(members) == 1:
+        return members[0]
+    common = None
+    for m in members:
+        anc = tree.ancestors(m) | {m}
+        common = anc if common is None else (common & anc)
+    if not common:
+        return sorted(members, key=lambda x: (len(x), x))[0]
+    return max(common, key=tree.depth)
 
-    members = candidates that are descendants of the clade node, PLUS
-    recombinant candidates (no parent chain) that share the clade fingerprint —
-    e.g. XFG shares LF.7's spike mutations through recombination, so it's
-    consistent with an LF.7-clade signal even though it's not phylogenetically
-    under LF.7. These "associated" members matter: XFG is often the dominant
-    variant driving the signal.
 
-    For each member we compute its discriminating muts so the UI can show
-    which member's block lights up.
+def _finalize_clade(s: dict, tree: "_Tree", all_sigs: Dict[str, Set[str]],
+                    observed_patterns: List = None) -> dict:
+    """Build the clade finding with per-member co-occurrence blocks.
+
+    Selection rule for which members to plot:
+      1. specific  — the member has an amplicon-local mutation combination
+         carried by few other lineages (discriminating).
+      2. observed  — that specific combination actually appears co-occurring
+         in the data (is a subset of some observed co-occurrence pattern).
+      3. collapse  — members sharing the same observed combination can't be
+         told apart, so they're grouped into one "family" block.
+
+    This reduces a clade of 100+ candidates to the handful of distinguishable
+    groups the co-occurrence data can actually confirm.
     """
+    observed_patterns = observed_patterns or []
     node = s["node"]
     candidates = sorted(s["candidates"])
-    # phylogenetic members (descend from the clade node)
     phylo = [c for c in candidates
              if c == node or tree.is_descendant(c, node)]
-    # associated members: recombinants (no parent) sharing the fingerprint,
-    # e.g. XFG under an LF.7 clade. These are consistent with the signal.
     associated = [c for c in candidates
                   if c not in phylo and not tree.parent.get(c, "")]
     members = phylo + associated
     if not members:
         members = candidates
 
-    # shared muts = intersection of all member sigs (the clade fingerprint)
     member_sigs = {m: all_sigs.get(m, set()) for m in members}
     shared = set.intersection(*member_sigs.values()) if member_sigs else set()
 
-    # discriminating block per member (unique vs other members).
-    # prioritise associated recombinants (XFG etc.) — they're the ones the
-    # user most needs to see — then the largest phylo members.
-    ordered = associated + phylo
+    def _pos(m):
+        mm = re.match(r"^(\d+)", m)
+        return int(mm.group(1)) if mm else -1
+
+    def _amplicon_groups(member_sig):
+        """Amplicon-local mutation groups (positions within ~350bp)."""
+        positions = sorted(_pos(m) for m in member_sig if _pos(m) >= 0)
+        clusters, cur = [], []
+        for p in positions:
+            if cur and p - cur[-1] > 350:
+                clusters.append(cur)
+                cur = []
+            cur.append(p)
+        if cur:
+            clusters.append(cur)
+        out = []
+        for cl in clusters:
+            pos_set = set(cl)
+            g = frozenset(m for m in member_sig if _pos(m) in pos_set)
+            if len(g) >= 2:
+                out.append(g)
+        return out
+
+    def _is_observed(group):
+        # fractional: the group is "observed" if a single read/pattern shows
+        # most of it (>= 80%), not necessarily all. Dense discriminating groups
+        # (e.g. NB.1.8.1's 24-mut spike) rarely appear in full on one pattern
+        # due to coverage/variation, but a strong partial match is real signal.
+        g = set(group)
+        best = 0.0
+        for op in observed_patterns:
+            inter = len(g & op)
+            if inter >= 2:
+                best = max(best, inter / len(g))
+        return best >= 0.8
+
+    # for each member, find its best specific+observed amplicon group(s)
+    # keyed by the observed combination so identical combos collapse.
+    # Specificity counts carriers OUTSIDE the clade family — sibling
+    # descendants (PQ.* for NB.1.8.1) sharing the group are the same family,
+    # not "other" variants, so they don't count against specificity.
+    family = set(members)
+    combo_to_members = {}   # frozenset(group) -> {members, n_other}
+    for m in members:
+        for g in _amplicon_groups(member_sigs[m]):
+            carriers = [l for l, sg in all_sigs.items() if g.issubset(sg)]
+            n_outside = sum(1 for l in carriers if l not in family)
+            if n_outside > 15:
+                continue          # not specific (many non-family carriers)
+            if not _is_observed(g):
+                continue          # not seen co-occurring
+            slot = combo_to_members.setdefault(
+                g, {"members": [], "n_other": n_outside})
+            slot["members"].append(m)
+
+    # build blocks: one per distinguishable observed amplicon group. Each is a
+    # piece of discriminating co-occurrence evidence for this clade — no region
+    # is privileged, all observed discriminating groups are shown. Groups are
+    # labelled by the clade family + a region index (the amplicon they're in).
+    # For each block we also compute ABSENT markers: mutations from competing
+    # variants in the SAME amplicon window that the family lacks (present +
+    # absent gives sharper discrimination than present-only).
+    _raw_blocks = []
+    for g, info in sorted(combo_to_members.items(),
+                          key=lambda kv: (min(_pos(m) for m in kv[0]))):
+        fam = sorted(info["members"], key=lambda x: (len(x), x))
+        gpos = sorted(_pos(m) for m in g)
+        lo, hi = gpos[0] - 20, gpos[-1] + 20
+        fam_sig = set().union(*(all_sigs.get(m, set()) for m in fam))
+        absent = set()
+        for l, sl in all_sigs.items():
+            if l in fam:
+                continue
+            for mm in sl:
+                p = _pos(mm)
+                if lo <= p <= hi and mm not in fam_sig:
+                    n_car = sum(1 for x in all_sigs.values() if mm in x)
+                    if n_car <= 60:
+                        absent.add(mm)
+        _raw_blocks.append({
+            "members": fam,
+            "n_outside": info["n_other"],
+            "discriminating": sorted(g, key=_pos)[:8],
+            "absent_markers": sorted(absent, key=_pos)[:6],
+            "region_start": gpos[0],
+        })
+
+    # label: name each region by the tightest family its discriminating group
+    # points to (the lineages carrying that exact group), not a generic index.
+    # This surfaces the actual driver — XFG, XFP, PY.1.1 etc. — per region.
     blocks = []
-    for m in ordered[:8]:
-        others = set().union(*(member_sigs[o] for o in members if o != m)) \
-            if len(members) > 1 else set()
-        disc = sorted(member_sigs[m] - others)
-        if disc:
-            blocks.append({"member": m, "discriminating": disc[:6]})
+    for b in _raw_blocks:
+        fam = b["members"]
+        # tightest label: if all carriers share one clade root, use it;
+        # if it's a single lineage, name it; if broad, say "<clade> general"
+        if len(fam) == 1:
+            label = f"{fam[0]} @ {b['region_start']}"
+        else:
+            root = _clade_root_of(fam, tree)
+            n = len(fam)
+            if n <= 15:
+                label = f"{root} family @ {b['region_start']}"
+            else:
+                label = f"{root} (general) @ {b['region_start']}"
+        blocks.append({
+            "member": label,
+            "family_root": (fam[0] if len(fam) == 1
+                            else _clade_root_of(fam, tree)),
+            "members": fam[:10],
+            "member_count": len(fam),
+            "discriminating": b["discriminating"],
+            "absent_markers": b["absent_markers"],
+        })
+
+    # plottable members = union of all collapsed families
+    plottable = sorted({m for info in combo_to_members.values()
+                        for m in info["members"]})
+
+    # no separate "shared/backbone" block — the discriminating groups ARE the
+    # evidence. Keep shared_mutations empty so the UI doesn't show backbone.
+    clade_block_muts = []
 
     return {
         "node": node,
         "relationship": s["relationship"],
         "panel_ancestor": s["panel_ancestor"],
         "member_count": len(members),
-        "members": (associated + phylo)[:30],  # show recombinants first
+        "members": (associated + phylo)[:30],
         "associated_members": associated[:10],
+        "plottable_members": plottable,
         "total_reads": s["total_reads"],
         "pattern_count": s["pattern_count"],
         "observed_mutations": sorted(s["observed_mutations"]),
-        "shared_mutations": sorted(shared)[:10],
+        "shared_mutations": clade_block_muts,
         "member_blocks": blocks,
         "designation": s["designation"],
     }
