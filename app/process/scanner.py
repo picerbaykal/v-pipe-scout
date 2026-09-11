@@ -309,11 +309,10 @@ def scan_unexplained_patterns(
 
         if kind == "novel":
             novel_reads += count
-            if len(novel_patterns) < 10:
-                novel_patterns.append(
-                    {"count": count, "date": row.get("date", ""),
-                     "mutations": sorted(fingerprint)[:8]}
-                )
+            novel_patterns.append(
+                {"count": count, "date": row.get("date", ""),
+                 "mutations": sorted(fingerprint)[:12]}
+            )
             continue
 
         if kind == "unresolved":
@@ -740,6 +739,7 @@ def _finalize_clade(s: dict, tree: "_Tree", all_sigs: Dict[str, Set[str]],
         "associated_members": associated[:10],
         "plottable_members": plottable,
         "total_reads": s["total_reads"],
+        "signal_reads": top_reads,
         "pattern_count": s["pattern_count"],
         "observed_mutations": sorted(s["observed_mutations"]),
         "shared_mutations": clade_block_muts,

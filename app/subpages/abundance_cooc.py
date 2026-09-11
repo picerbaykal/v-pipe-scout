@@ -833,7 +833,8 @@ def app():
                         _bucket = _agg_new if _c.get("relationship") == "new_lineage" else _agg_sub
                         _node = _c["node"]
                         _slot = _bucket.setdefault(_node, {
-                            "node": _node, "reads": 0, "cities": [],
+                            "node": _node, "reads": 0, "signal_reads": 0,
+                            "cities": [],
                             "member_count": _c.get("member_count", 1),
                             "members": _c.get("members", []),
                             "designation": _c.get("designation", ""),
@@ -845,10 +846,21 @@ def app():
                             "confidence": _c.get("confidence", "weak"),
                             "verdict": _c.get("verdict", ""),
                             "trend": _c.get("trend", "flat"),
-                            "trend_series": _c.get("trend_series", []),
+                            "trend_series": list(_c.get("trend_series", [])),
+                            "trend_by_city": {},
                         })
                         _slot["reads"] += int(_c.get("total_reads", 0))
+                        # signal_reads is the strongest discriminating region's
+                        # reads; across cities take the MAX (summing would
+                        # double-count the same discriminating reads and can
+                        # exceed the total). Capped at total as a safety net.
+                        _slot["signal_reads"] = max(
+                            _slot.get("signal_reads", 0),
+                            int(_c.get("signal_reads", 0)))
                         _slot["cities"].append(_loc)
+                        # keep each city's own series so trend can be shown
+                        # per-city or aggregated (summed element-wise)
+                        _slot["trend_by_city"][_loc] = list(_c.get("trend_series", []))
                     for _u in _res.get("unresolved", []):
                         _k = tuple(_u["fingerprint"])
                         _s = _agg_unres.setdefault(_k, {
@@ -874,7 +886,11 @@ def app():
 
                 def _render_finding(_slot, _accent, _bg, _border, _is_sub=False):
                     _label = _clade_label(_slot)
-                    _reads = _slot["reads"]
+                    _sig_reads = _slot.get("signal_reads", 0)
+                    _tot_reads = _slot["reads"]
+                    # headline = discriminating co-occurrence reads (the real
+                    # signal); the broad fingerprint total is shown as context.
+                    _reads = _sig_reads if _sig_reads > 0 else _tot_reads
                     _mc = _slot["member_count"]
                     _desig = _slot["designation"]
                     _members = _slot["members"]
@@ -897,9 +913,33 @@ def app():
                         f"font-size:0.72rem;font-weight:600;padding:1px 8px;border-radius:10px;"
                         f"margin-left:8px;'>{_conf_style[2]}</span>"
                     )
-                    # trend chip + inline sparkline
-                    _trend = _slot.get("trend", "flat")
-                    _series = _slot.get("trend_series", [])
+                    # trend chip + inline sparkline — aggregate across cities by
+                    # summing each city's series element-wise (aligned by bucket),
+                    # then recompute the direction from the aggregate. This makes
+                    # the trend a true multi-city aggregate, not just one city's.
+                    _by_city = _slot.get("trend_by_city", {})
+                    if len(_by_city) > 1:
+                        _maxlen = max((len(v) for v in _by_city.values()), default=0)
+                        _series = [0] * _maxlen
+                        for _cs in _by_city.values():
+                            # align to the right (most recent) end
+                            _off = _maxlen - len(_cs)
+                            for _i, _v in enumerate(_cs):
+                                _series[_off + _i] += _v
+                    else:
+                        _series = _slot.get("trend_series", [])
+                    # recompute direction from the (aggregated) series
+                    _trend = "flat"
+                    if len(_series) >= 3:
+                        _third = max(1, len(_series) // 3)
+                        _early = sum(_series[:_third]) / _third
+                        _late = sum(_series[-_third:]) / _third
+                        if _late > _early * 1.5:
+                            _trend = "rising"
+                        elif _late < _early * 0.5:
+                            _trend = "declining"
+                        else:
+                            _trend = "stable"
                     _tr_map = {
                         "rising":    ("↑ rising", "#0f6e56"),
                         "declining": ("↓ declining", "#ba7517"),
@@ -909,9 +949,10 @@ def app():
                     _tr_txt, _tr_col = _tr_map.get(_trend, ("", "#6b7280"))
                     _trend_chip = ""
                     if _tr_txt:
+                        _multi = " (all cities)" if len(_by_city) > 1 else ""
                         _trend_chip = (
                             f"<span style='color:{_tr_col};font-size:0.72rem;"
-                            f"font-weight:600;margin-left:8px;'>{_tr_txt}</span>"
+                            f"font-weight:600;margin-left:8px;'>{_tr_txt}{_multi}</span>"
                         )
                     _spark = ""
                     if len(_series) >= 2:
@@ -930,7 +971,7 @@ def app():
                         f"<span style='font-weight:600;color:{_accent};'>{_label}</span>"
                         f"{_badge}{_trend_chip}{_spark}"
                         f"<span style='color:#6b7280;font-size:0.82rem;margin-left:8px;'>"
-                        f"{_reads:,} reads{_desig_txt}</span>"
+                        f"{_reads:,} co-occurrence reads{_desig_txt}</span>"
                         f"<div style='color:#374151;font-size:0.76rem;margin-top:3px;'>"
                         f"{_verdict}</div>"
                         f"<div style='color:#9ca3af;font-size:0.72rem;margin-top:2px;'>"
@@ -1072,12 +1113,14 @@ def app():
                     else:
                         st.caption(
                             f"{_novel_total:,} reads in {_novel_pats} pattern(s) match "
-                            "no known lineage. Could be novel, recombinant, or artifact."
+                            "no known lineage. Could be novel, recombinant, or artifact. "
+                            "A rising pattern is the most worth investigating."
                         )
                         for _loc, _res in _scan_res_all.items():
                             _pn = _res.get("novel", {}) or _res.get("possibly_new", {})
-                            for _pat in _pn.get("top_patterns", [])[:3]:
-                                _muts = ", ".join(_pat.get("mutations", []))
+                            for _pi, _pat in enumerate(_pn.get("top_patterns", [])[:5]):
+                                _pmuts = _pat.get("mutations", [])
+                                _muts = ", ".join(_pmuts)
                                 st.markdown(
                                     f"<div style='background:#eff6ff;border:1px solid #bfdbfe;"
                                     f"border-radius:6px;padding:6px 10px;margin:3px 0;font-size:0.8rem;'>"
@@ -1086,6 +1129,28 @@ def app():
                                     f"{_pat.get('count',0):,} · {_loc.split('(')[0].strip()}</span></div>",
                                     unsafe_allow_html=True,
                                 )
+                                # trend heatmap for this novel pattern — is it rising?
+                                if _pmuts and wiseLoculus and len(_pmuts) >= 2:
+                                    with st.expander(
+                                        f"Trend over time — {_loc.split('(')[0].strip()} — "
+                                        f"{_muts[:40]}",
+                                        expanded=False,
+                                    ):
+                                        from components.scanner_heatmap import render_clade_heatmap
+                                        render_clade_heatmap(
+                                            clade_node=f"novel_{_loc}_{_pi}",
+                                            shared_mutations=[],
+                                            member_blocks=[{
+                                                "member": "novel pattern",
+                                                "discriminating": _pmuts,
+                                                "member_count": 1,
+                                                "reads": _pat.get("count", 0),
+                                            }],
+                                            client=wiseLoculus,
+                                            location=_loc,
+                                            reads_threshold=0,
+                                            date_range=(start_date, end_date),
+                                        )
 
 
             # ── Download report (triggered by button in progress header) ───────
