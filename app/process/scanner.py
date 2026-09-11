@@ -41,6 +41,24 @@ MIN_CLADE_DEPTH = 6
 # Minimum fingerprint size for co-occurrence (2 = haplotype, 1 = allele freq).
 MIN_FINGERPRINT = 2
 
+# Cached position parser: extract the integer position from a mutation string
+# like "22599C" -> 22599. Called millions of times, so cache aggressively and
+# avoid regex (plain scan of leading digits is far faster).
+_POS_CACHE: Dict[str, int] = {}
+
+
+def _mut_pos(m: str) -> int:
+    p = _POS_CACHE.get(m)
+    if p is not None:
+        return p
+    i = 0
+    n = len(m)
+    while i < n and m[i].isdigit():
+        i += 1
+    p = int(m[:i]) if i else -1
+    _POS_CACHE[m] = p
+    return p
+
 
 def _sig_explains(present: Set[str], sig: Set[str]) -> bool:
     return bool(present) and present.issubset(sig)
@@ -129,6 +147,7 @@ def _assign(
     fingerprint: Set[str],
     all_sigs: Dict[str, Set[str]],
     tree: _Tree,
+    candidates_fn=None,
 ) -> Tuple[Optional[str], str, List[str]]:
     """Assign a fingerprint to the tightest clade it supports.
 
@@ -144,7 +163,10 @@ def _assign(
     to clades; which member drives the signal is shown in the drill-down
     discriminating-mutation heatmap, not claimed as a label.
     """
-    candidates = [l for l, s in all_sigs.items() if fingerprint.issubset(s)]
+    if candidates_fn is not None:
+        candidates = list(candidates_fn(fingerprint))
+    else:
+        candidates = [l for l, s in all_sigs.items() if fingerprint.issubset(s)]
     if not candidates:
         return None, "novel", []
 
@@ -230,6 +252,29 @@ def scan_unexplained_patterns(
     if patterns is None or patterns.empty:
         return _empty_result()
 
+    # ── performance: build a mutation -> set(lineages) index ONCE, and a
+    # mutation -> carrier-count map. All candidate/carrier lookups then use
+    # fast set intersection instead of scanning all ~5000 signatures each time
+    # (the pattern loop alone is ~26k patterns, so per-pattern full scans were
+    # the bottleneck). ─────────────────────────────────────────────────────
+    _mut_index: Dict[str, Set[str]] = {}
+    for _lin, _s in all_lineage_signatures.items():
+        for _m in _s:
+            _mut_index.setdefault(_m, set()).add(_lin)
+    _carrier_count = {m: len(ls) for m, ls in _mut_index.items()}
+
+    def _candidates_for(muts):
+        """Lineages whose signature contains ALL of muts — via index."""
+        muts = list(muts)
+        if not muts:
+            return []
+        acc = set(_mut_index.get(muts[0], ()))
+        for m in muts[1:]:
+            acc &= _mut_index.get(m, set())
+            if not acc:
+                break
+        return acc
+
     # aggregate per assigned clade
     clade_hits: Dict[str, dict] = {}
     unresolved_hits: Dict[frozenset, dict] = {}
@@ -242,6 +287,7 @@ def scan_unexplained_patterns(
     # actually appears co-occurring in the data. Stored WITH read counts so we
     # can report per-region co-occurrence strength for the UI threshold slider.
     observed_patterns: List = []   # list of (frozenset(muts), count)
+    observed_dated: List = []      # list of (frozenset(muts), count, date)
 
     for _, row in patterns.iterrows():
         present = set(row["confirmed_present"])
@@ -251,13 +297,14 @@ def scan_unexplained_patterns(
         total_unexplained += count
         if len(present) >= 2:
             observed_patterns.append((frozenset(present), count))
+            observed_dated.append((frozenset(present), count, row.get("date", "")))
 
         fingerprint = present - panel_union
         if len(fingerprint) < MIN_FINGERPRINT:
             continue  # not co-occurrence beyond panel
 
         node, kind, candidates = _assign(
-            fingerprint, all_lineage_signatures, tree
+            fingerprint, all_lineage_signatures, tree, _candidates_for
         )
 
         if kind == "novel":
@@ -307,7 +354,8 @@ def scan_unexplained_patterns(
 
     # ── build output lists ────────────────────────────────────────────────
     _all_clades = [
-        _finalize_clade(s, tree, all_lineage_signatures, observed_patterns)
+        _finalize_clade(s, tree, all_lineage_signatures, observed_patterns,
+                        observed_dated, _carrier_count, _candidates_for)
         for s in clade_hits.values()
     ]
 
@@ -347,6 +395,11 @@ def scan_unexplained_patterns(
     # NOT co-occurrence-confirmed. Drop them from the confident findings and
     # record them as unresolved so their reads aren't silently lost.
     confirmed = []
+    matched_no_haplotype = []   # resolved to a lineage but no discriminating
+                                # co-occurrence block (like KW.1.2, PA.1) — the
+                                # variant may be present but co-occurrence can't
+                                # confirm it (its distinguishing muts don't
+                                # co-occur). Distinct from "too broad".
     for c in top_level:
         # a clade counts if it, OR any of its sub-findings, has a block
         has_block = bool(c.get("member_blocks")) or any(
@@ -354,15 +407,16 @@ def scan_unexplained_patterns(
         if has_block:
             confirmed.append(c)
         else:
-            unresolved_hits[frozenset(c["observed_mutations"])] = {
-                "fingerprint": c["observed_mutations"][:6],
-                "candidate_count": c.get("member_count", 1),
-                "common_ancestor": c["node"],
+            matched_no_haplotype.append({
+                "node": c["node"],
+                "relationship": c.get("relationship", ""),
+                "member_count": c.get("member_count", 1),
                 "total_reads": c["total_reads"],
-                "pattern_count": c.get("pattern_count", 0),
-            }
+                "observed_mutations": c["observed_mutations"][:8],
+            })
 
     resolved_clade = sorted(confirmed, key=lambda x: -x["total_reads"])
+    matched_no_haplotype.sort(key=lambda x: -x["total_reads"])
     unresolved = sorted(
         unresolved_hits.values(), key=lambda x: -x["total_reads"]
     )
@@ -374,13 +428,15 @@ def scan_unexplained_patterns(
         )[:10],
     }
     novel["pattern_count"] = _count_novel(
-        patterns, panel_union, all_lineage_signatures, tree, min_read_count
+        patterns, panel_union, all_lineage_signatures, tree, min_read_count,
+        _candidates_for
     )
 
     summary = _summary(resolved_clade, unresolved, novel)
 
     result = {
         "resolved_clade": resolved_clade,
+        "matched_no_haplotype": matched_no_haplotype,
         "unresolved": unresolved,
         "novel": novel,
         "total_unexplained_reads": total_unexplained,
@@ -425,7 +481,10 @@ def _clade_root_of(members: List[str], tree: "_Tree") -> str:
 
 
 def _finalize_clade(s: dict, tree: "_Tree", all_sigs: Dict[str, Set[str]],
-                    observed_patterns: List = None) -> dict:
+                    observed_patterns: List = None,
+                    observed_dated: List = None,
+                    carrier_count: Dict[str, int] = None,
+                    candidates_fn=None) -> dict:
     """Build the clade finding with per-member co-occurrence blocks.
 
     Selection rule for which members to plot:
@@ -440,6 +499,8 @@ def _finalize_clade(s: dict, tree: "_Tree", all_sigs: Dict[str, Set[str]],
     groups the co-occurrence data can actually confirm.
     """
     observed_patterns = observed_patterns or []
+    observed_dated = observed_dated or []
+    carrier_count = carrier_count or {}
     node = s["node"]
     candidates = sorted(s["candidates"])
     phylo = [c for c in candidates
@@ -454,24 +515,27 @@ def _finalize_clade(s: dict, tree: "_Tree", all_sigs: Dict[str, Set[str]],
     shared = set.intersection(*member_sigs.values()) if member_sigs else set()
 
     def _pos(m):
-        mm = re.match(r"^(\d+)", m)
-        return int(mm.group(1)) if mm else -1
+        return _mut_pos(m)
 
     def _amplicon_groups(member_sig):
         """Amplicon-local mutation groups (positions within ~350bp)."""
-        positions = sorted(_pos(m) for m in member_sig if _pos(m) >= 0)
+        # position each mutation ONCE
+        posmap = [(m, _mut_pos(m)) for m in member_sig]
+        posmap = [(m, p) for m, p in posmap if p >= 0]
+        posmap.sort(key=lambda mp: mp[1])
+        positions = [p for _, p in posmap]
+        # cluster positions
         clusters, cur = [], []
         for p in positions:
             if cur and p - cur[-1] > 350:
-                clusters.append(cur)
+                clusters.append(set(cur))
                 cur = []
             cur.append(p)
         if cur:
-            clusters.append(cur)
+            clusters.append(set(cur))
         out = []
         for cl in clusters:
-            pos_set = set(cl)
-            g = frozenset(m for m in member_sig if _pos(m) in pos_set)
+            g = frozenset(m for m, p in posmap if p in cl)
             if len(g) >= 2:
                 out.append(g)
         return out
@@ -509,7 +573,10 @@ def _finalize_clade(s: dict, tree: "_Tree", all_sigs: Dict[str, Set[str]],
     combo_to_members = {}   # frozenset(group) -> {members, n_other, n_total}
     for m in members:
         for g in _amplicon_groups(member_sigs[m]):
-            carriers = [l for l, sg in all_sigs.items() if g.issubset(sg)]
+            if candidates_fn is not None:
+                carriers = candidates_fn(g)
+            else:
+                carriers = [l for l, sg in all_sigs.items() if g.issubset(sg)]
             n_outside = sum(1 for l in carriers if l not in family)
             if n_outside > 15:
                 continue          # not specific (many non-family carriers)
@@ -539,10 +606,9 @@ def _finalize_clade(s: dict, tree: "_Tree", all_sigs: Dict[str, Set[str]],
             if l in fam:
                 continue
             for mm in sl:
-                p = _pos(mm)
+                p = _mut_pos(mm)
                 if lo <= p <= hi and mm not in fam_sig:
-                    n_car = sum(1 for x in all_sigs.values() if mm in x)
-                    if n_car <= 60:
+                    if carrier_count.get(mm, 999) <= 60:
                         absent.add(mm)
         _raw_blocks.append({
             "members": fam,
@@ -583,7 +649,7 @@ def _finalize_clade(s: dict, tree: "_Tree", all_sigs: Dict[str, Set[str]],
             "reads": b["reads"],
             # per-mutation carrier count so the UI can show which rows are
             # discriminating (few carriers) vs backbone (many carriers)
-            "mut_carriers": {m: sum(1 for s in all_sigs.values() if m in s)
+            "mut_carriers": {m: carrier_count.get(m, 0)
                              for m in b["discriminating"]},
         })
     # strongest regions first (by co-occurrence reads) for the UI slider
@@ -596,6 +662,74 @@ def _finalize_clade(s: dict, tree: "_Tree", all_sigs: Dict[str, Set[str]],
     # no separate "shared/backbone" block — the discriminating groups ARE the
     # evidence. Keep shared_mutations empty so the UI doesn't show backbone.
     clade_block_muts = []
+
+    # ── trend: co-occurrence signal of this clade's discriminating groups
+    # over time, as a sparkline + direction. Uses the dated observed patterns
+    # that match any of the clade's discriminating groups. ─────────────────
+    _group_sets = [set(b["discriminating"]) for b in blocks]
+    trend_series = []
+    if _group_sets and observed_dated:
+        from collections import defaultdict
+        by_date = defaultdict(int)
+        for muts, cnt, date in observed_dated:
+            if not date:
+                continue
+            # does this pattern match any discriminating group (>=80%)?
+            for g in _group_sets:
+                inter = len(g & muts)
+                if inter >= 2 and inter / len(g) >= 0.8:
+                    by_date[date] += cnt
+                    break
+        if by_date:
+            dates_sorted = sorted(by_date)
+            # bucket into up to 8 points for a compact sparkline
+            vals = [by_date[d] for d in dates_sorted]
+            n = len(vals)
+            if n > 8:
+                # aggregate into 8 buckets
+                import math
+                bucket = math.ceil(n / 8)
+                vals = [sum(vals[i:i+bucket]) for i in range(0, n, bucket)]
+            trend_series = vals
+
+    # direction: compare first third vs last third of the series
+    trend = "flat"
+    if len(trend_series) >= 3:
+        third = max(1, len(trend_series) // 3)
+        early = sum(trend_series[:third]) / third
+        late = sum(trend_series[-third:]) / third
+        if late > early * 1.5:
+            trend = "rising"
+        elif late < early * 0.5:
+            trend = "declining"
+        else:
+            trend = "stable"
+
+    # ── confidence + one-line verdict for a readable summary ──────────────
+    # confidence combines: strongest region's reads, how many independent
+    # regions have real signal, and whether the discriminating combos are tight.
+    strong_regions = [b for b in blocks if b.get("reads", 0) >= 5000]
+    top_reads = max((b.get("reads", 0) for b in blocks), default=0)
+    n_strong = len(strong_regions)
+    tightest = min((b.get("member_count", 999) for b in blocks), default=999)
+
+    if top_reads >= 50000 and n_strong >= 1:
+        confidence = "strong"
+    elif top_reads >= 5000:
+        confidence = "medium"
+    else:
+        confidence = "weak"
+
+    # human verdict
+    if not blocks:
+        verdict = "no discriminating co-occurrence signal"
+    elif confidence == "strong":
+        verdict = (f"{n_strong} discriminating region(s) co-occur strongly "
+                   f"({top_reads:,} reads)")
+    elif confidence == "medium":
+        verdict = f"discriminating signal present ({top_reads:,} reads)"
+    else:
+        verdict = f"weak signal ({top_reads:,} reads)"
 
     return {
         "node": node,
@@ -611,12 +745,19 @@ def _finalize_clade(s: dict, tree: "_Tree", all_sigs: Dict[str, Set[str]],
         "shared_mutations": clade_block_muts,
         "member_blocks": blocks,
         "designation": s["designation"],
+        "confidence": confidence,
+        "verdict": verdict,
+        "strong_region_count": n_strong,
+        "top_region_reads": top_reads,
+        "trend": trend,
+        "trend_series": trend_series,
     }
 
 
-def _count_novel(patterns, panel_union, all_sigs, tree, min_read_count) -> int:
+def _count_novel(patterns, panel_union, all_sigs, tree, min_read_count,
+                 candidates_fn=None) -> int:
     n = 0
-    all_sig_list = list(all_sigs.values())
+    all_sig_list = list(all_sigs.values()) if candidates_fn is None else None
     for _, row in patterns.iterrows():
         count = int(row["count"])
         if count < min_read_count:
@@ -624,7 +765,10 @@ def _count_novel(patterns, panel_union, all_sigs, tree, min_read_count) -> int:
         fp = set(row["confirmed_present"]) - panel_union
         if len(fp) < MIN_FINGERPRINT:
             continue
-        if not any(fp.issubset(s) for s in all_sig_list):
+        if candidates_fn is not None:
+            if not candidates_fn(fp):
+                n += 1
+        elif not any(fp.issubset(s) for s in all_sig_list):
             n += 1
     return n
 
@@ -647,7 +791,7 @@ def _summary(clade, unresolved, novel) -> str:
 
 def _empty_result() -> dict:
     return {
-        "resolved_clade": [], "unresolved": [],
+        "resolved_clade": [], "matched_no_haplotype": [], "unresolved": [],
         "novel": {"total_reads": 0, "pattern_count": 0, "top_patterns": []},
         "total_unexplained_reads": 0,
         "summary": "No unexplained patterns.",

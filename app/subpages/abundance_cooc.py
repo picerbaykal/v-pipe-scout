@@ -824,6 +824,7 @@ def app():
                 _agg_new = {}      # node -> {reads, cities, member_count, members, designation, muts}
                 _agg_sub = {}
                 _agg_unres = {}    # frozenset(fp) -> {reads, cand, anc}
+                _agg_mnh = {}      # node -> matched-but-no-haplotype
                 _novel_total = 0
                 _novel_pats = 0
 
@@ -841,6 +842,10 @@ def app():
                             "member_blocks": _c.get("member_blocks", []),
                             "shared_mutations": _c.get("shared_mutations", []),
                             "associated": _c.get("associated_members", []),
+                            "confidence": _c.get("confidence", "weak"),
+                            "verdict": _c.get("verdict", ""),
+                            "trend": _c.get("trend", "flat"),
+                            "trend_series": _c.get("trend_series", []),
                         })
                         _slot["reads"] += int(_c.get("total_reads", 0))
                         _slot["cities"].append(_loc)
@@ -852,6 +857,14 @@ def app():
                             "anc": _u.get("common_ancestor", ""),
                         })
                         _s["reads"] += int(_u.get("total_reads", 0))
+                    for _mnh in _res.get("matched_no_haplotype", []):
+                        _k = _mnh["node"]
+                        _s = _agg_mnh.setdefault(_k, {
+                            "node": _mnh["node"], "reads": 0,
+                            "member_count": _mnh.get("member_count", 1),
+                            "muts": _mnh.get("observed_mutations", []),
+                        })
+                        _s["reads"] += int(_mnh.get("total_reads", 0))
                     _nv = _res.get("novel", {})
                     _novel_total += int(_nv.get("total_reads", 0))
                     _novel_pats += int(_nv.get("pattern_count", 0))
@@ -871,12 +884,55 @@ def app():
                         _more = f" +{_mc-4}" if _mc > 4 else ""
                         _member_txt = f" · {_mc} members: {_samp}{_more}"
                     _desig_txt = f" · designated {_desig}" if _desig else ""
+                    # confidence badge + one-line verdict for quick reading
+                    _conf = _slot.get("confidence", "weak")
+                    _verdict = _slot.get("verdict", "")
+                    _conf_style = {
+                        "strong": ("#0f6e56", "#e6f4ef", "✓ strong"),
+                        "medium": ("#ba7517", "#fdf6e9", "~ medium"),
+                        "weak":   ("#6b7280", "#f3f4f6", "· weak"),
+                    }.get(_conf, ("#6b7280", "#f3f4f6", "· weak"))
+                    _badge = (
+                        f"<span style='background:{_conf_style[1]};color:{_conf_style[0]};"
+                        f"font-size:0.72rem;font-weight:600;padding:1px 8px;border-radius:10px;"
+                        f"margin-left:8px;'>{_conf_style[2]}</span>"
+                    )
+                    # trend chip + inline sparkline
+                    _trend = _slot.get("trend", "flat")
+                    _series = _slot.get("trend_series", [])
+                    _tr_map = {
+                        "rising":    ("↑ rising", "#0f6e56"),
+                        "declining": ("↓ declining", "#ba7517"),
+                        "stable":    ("→ stable", "#6b7280"),
+                        "flat":      ("", "#6b7280"),
+                    }
+                    _tr_txt, _tr_col = _tr_map.get(_trend, ("", "#6b7280"))
+                    _trend_chip = ""
+                    if _tr_txt:
+                        _trend_chip = (
+                            f"<span style='color:{_tr_col};font-size:0.72rem;"
+                            f"font-weight:600;margin-left:8px;'>{_tr_txt}</span>"
+                        )
+                    _spark = ""
+                    if len(_series) >= 2:
+                        _mx = max(_series) or 1
+                        _w, _h = 80, 18
+                        _pts = " ".join(
+                            f"{(i/(len(_series)-1))*_w:.1f},{_h-(v/_mx)*_h:.1f}"
+                            for i, v in enumerate(_series))
+                        _spark = (
+                            f"<svg width='{_w}' height='{_h}' style='vertical-align:middle;"
+                            f"margin-left:8px;'><polyline points='{_pts}' fill='none' "
+                            f"stroke='{_tr_col}' stroke-width='1.5'/></svg>")
                     st.markdown(
                         f"<div style='background:{_bg};border:1px solid {_border};"
                         f"border-radius:6px;padding:8px 12px;margin:4px 0;'>"
                         f"<span style='font-weight:600;color:{_accent};'>{_label}</span>"
+                        f"{_badge}{_trend_chip}{_spark}"
                         f"<span style='color:#6b7280;font-size:0.82rem;margin-left:8px;'>"
                         f"{_reads:,} reads{_desig_txt}</span>"
+                        f"<div style='color:#374151;font-size:0.76rem;margin-top:3px;'>"
+                        f"{_verdict}</div>"
                         f"<div style='color:#9ca3af;font-size:0.72rem;margin-top:2px;'>"
                         f"{_chip_html(_slot['cities'])}{_member_txt}</div></div>",
                         unsafe_allow_html=True,
@@ -941,6 +997,33 @@ def app():
                         )
                         for _slot in _sub_list:
                             _render_finding(_slot, "#92400e", "#fffbeb", "#fde68a", _is_sub=True)
+
+                # ---- Matched a lineage but no discriminating co-occurrence ----
+                _mnh_list = sorted(_agg_mnh.values(), key=lambda x: -x["reads"])
+                if _mnh_list:
+                    _mnh_reads = sum(m["reads"] for m in _mnh_list)
+                    with st.expander(
+                        f"🟣 Matched but not co-occurrence-confirmed — "
+                        f"{len(_mnh_list)} lineage(s) · {_mnh_reads:,} reads",
+                        expanded=False,
+                    ):
+                        st.caption(
+                            "These lineages match some observed mutations, but their "
+                            "distinguishing mutations don't co-occur on reads — so "
+                            "co-occurrence can't confirm them (they may still be present; "
+                            "deconvolution is the tool to quantify them)."
+                        )
+                        for _m in _mnh_list[:15]:
+                            _lbl = f"{_m['node']} clade" if _m["member_count"] > 1 else _m["node"]
+                            _muts = ", ".join(_m["muts"][:5])
+                            st.markdown(
+                                f"<div style='background:#faf5ff;border:1px solid #e9d5ff;"
+                                f"border-radius:6px;padding:6px 10px;margin:3px 0;font-size:0.82rem;'>"
+                                f"<span style='font-weight:600;color:#7c3aed;'>{_lbl}</span>"
+                                f"<span style='color:#6b7280;margin-left:8px;'>"
+                                f"{_m['reads']:,} reads · matched: {_muts}</span></div>",
+                                unsafe_allow_html=True,
+                            )
 
                 # ---- Unresolved ----
                 _unres_list = sorted(_agg_unres.values(), key=lambda x: -x["reads"])
