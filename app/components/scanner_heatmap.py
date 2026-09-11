@@ -44,6 +44,30 @@ def _fetch_frequencies(
     date_range: tuple,
     mutations: List[str],
 ) -> pd.DataFrame:
+    """Fetch mutation frequencies over time, cached in session_state so that
+    Streamlit re-runs (expanding, slider, city switch) don't re-query LAPIS
+    for the same location/dates/mutations."""
+    try:
+        import streamlit as _st
+        _key = (location, str(date_range[0]), str(date_range[1]),
+                tuple(sorted(mutations)))
+        _cache = _st.session_state.setdefault("_scanner_freq_cache", {})
+        if _key in _cache:
+            return _cache[_key]
+        _df = _fetch_frequencies_uncached(client, location, date_range, mutations)
+        _cache[_key] = _df
+        return _df
+    except Exception:
+        # if streamlit/session unavailable (e.g. worker), fetch directly
+        return _fetch_frequencies_uncached(client, location, date_range, mutations)
+
+
+def _fetch_frequencies_uncached(
+    client,
+    location: str,
+    date_range: tuple,
+    mutations: List[str],
+) -> pd.DataFrame:
     """Fetch mutation frequencies over time via /sample/aggregated — the SAME
     endpoint the co-occurrence pipeline uses, so the heatmap and the scanner
     see identical data. For each real sampling date we query all positions at

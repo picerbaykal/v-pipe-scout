@@ -951,10 +951,23 @@ def app():
                         _addkey = f"acooc_addc_{_slot['node']}"
                         if st.button(f"+ Add {_slot['node']}", key=_addkey):
                             st.session_state[f"acooc_add_variant_pending_{_slot['node']}"] = _slot["node"]
-                    # drill-down heatmap (first city with data)
+                    # drill-down heatmap — let the user pick which city when the
+                    # finding spans several (the finding's reads are summed across
+                    # cities, but a heatmap shows one city's signal at a time).
                     if _slot["muts"] and wiseLoculus and _slot["cities"]:
-                        _hloc = _slot["cities"][0]
-                        with st.expander(f"Signal over time — {_hloc} — {_label}", expanded=False):
+                        _cities = _slot["cities"]
+                        with st.expander(f"Signal over time — {_label}", expanded=False):
+                            if len(_cities) > 1:
+                                _hloc = st.selectbox(
+                                    "City",
+                                    _cities,
+                                    key=f"acooc_hmcity_{_slot['node']}",
+                                    help="This finding was seen in several cities; "
+                                         "pick which city's signal to display.",
+                                )
+                            else:
+                                _hloc = _cities[0]
+                            st.caption(f"Showing {_hloc}")
                             from components.scanner_heatmap import render_clade_heatmap
                             render_clade_heatmap(
                                 clade_node=_slot["node"],
