@@ -147,14 +147,23 @@ def _assign(
     candidates = [l for l, s in all_sigs.items() if fingerprint.issubset(s)]
     if not candidates:
         return None, "novel", []
-    if len(candidates) == 1:
-        # single candidate: label it as a clade-of-one at that node, but only
-        # if it's deep enough to be meaningful; else unresolved.
-        node = candidates[0]
-        if tree.depth(node) >= MIN_CLADE_DEPTH:
-            return node, "clade", candidates
-        return None, "unresolved", candidates
 
+    # Few candidates (<= 15) → the fingerprint is specific → resolve to the
+    # tightest clade containing them, REGARDLESS of tree depth. (Depth is not a
+    # good proxy for specificity: some real lineages like BA.3.2.2 sit on a
+    # shallow reconstruction branch but are matched by only 1-2 candidates —
+    # they must not be dumped into "unresolved".)
+    if len(candidates) <= 15:
+        if len(candidates) == 1:
+            return candidates[0], "clade", candidates
+        clade = tree.dominant_clade(candidates)
+        if clade is None:
+            # no common ancestor (recombinants) → label by tightest name
+            clade = sorted(candidates, key=lambda x: (len(x), x))[0]
+        return clade, "clade", candidates
+
+    # Many candidates (> 15) → only meaningful if they collapse to a
+    # reasonably deep common clade; otherwise it's genuinely too broad.
     clade = tree.dominant_clade(candidates)
     if clade is None or tree.depth(clade) < MIN_CLADE_DEPTH:
         return None, "unresolved", candidates
