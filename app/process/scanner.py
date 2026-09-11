@@ -230,8 +230,9 @@ def scan_unexplained_patterns(
 
     # collect all observed co-occurrence patterns (mut-sets) for member
     # filtering — a member is only plotted if its specific amplicon combo
-    # actually appears co-occurring in the data.
-    observed_patterns: List[frozenset] = []
+    # actually appears co-occurring in the data. Stored WITH read counts so we
+    # can report per-region co-occurrence strength for the UI threshold slider.
+    observed_patterns: List = []   # list of (frozenset(muts), count)
 
     for _, row in patterns.iterrows():
         present = set(row["confirmed_present"])
@@ -240,7 +241,7 @@ def scan_unexplained_patterns(
             continue
         total_unexplained += count
         if len(present) >= 2:
-            observed_patterns.append(frozenset(present))
+            observed_patterns.append((frozenset(present), count))
 
         fingerprint = present - panel_union
         if len(fingerprint) < MIN_FINGERPRINT:
@@ -473,11 +474,22 @@ def _finalize_clade(s: dict, tree: "_Tree", all_sigs: Dict[str, Set[str]],
         # due to coverage/variation, but a strong partial match is real signal.
         g = set(group)
         best = 0.0
-        for op in observed_patterns:
+        for op, _cnt in observed_patterns:
             inter = len(g & op)
             if inter >= 2:
                 best = max(best, inter / len(g))
         return best >= 0.8
+
+    def _group_reads(group):
+        # total co-occurrence reads where this group appears (fractional >=80%)
+        # — the region's signal strength, used for the UI threshold slider.
+        g = set(group)
+        total = 0
+        for op, cnt in observed_patterns:
+            inter = len(g & op)
+            if inter >= 2 and inter / len(g) >= 0.8:
+                total += cnt
+        return total
 
     # for each member, find its best specific+observed amplicon group(s)
     # keyed by the observed combination so identical combos collapse.
@@ -485,7 +497,7 @@ def _finalize_clade(s: dict, tree: "_Tree", all_sigs: Dict[str, Set[str]],
     # descendants (PQ.* for NB.1.8.1) sharing the group are the same family,
     # not "other" variants, so they don't count against specificity.
     family = set(members)
-    combo_to_members = {}   # frozenset(group) -> {members, n_other}
+    combo_to_members = {}   # frozenset(group) -> {members, n_other, n_total}
     for m in members:
         for g in _amplicon_groups(member_sigs[m]):
             carriers = [l for l, sg in all_sigs.items() if g.issubset(sg)]
@@ -495,7 +507,8 @@ def _finalize_clade(s: dict, tree: "_Tree", all_sigs: Dict[str, Set[str]],
             if not _is_observed(g):
                 continue          # not seen co-occurring
             slot = combo_to_members.setdefault(
-                g, {"members": [], "n_other": n_outside})
+                g, {"members": [], "n_other": n_outside,
+                    "n_total": len(carriers)})
             slot["members"].append(m)
 
     # build blocks: one per distinguishable observed amplicon group. Each is a
@@ -525,9 +538,11 @@ def _finalize_clade(s: dict, tree: "_Tree", all_sigs: Dict[str, Set[str]],
         _raw_blocks.append({
             "members": fam,
             "n_outside": info["n_other"],
-            "discriminating": sorted(g, key=_pos)[:8],
+            "n_total": info["n_total"],
+            "discriminating": sorted(g, key=_pos)[:25],
             "absent_markers": sorted(absent, key=_pos)[:6],
             "region_start": gpos[0],
+            "reads": _group_reads(g),
         })
 
     # label: name each region by the tightest family its discriminating group
@@ -536,26 +551,34 @@ def _finalize_clade(s: dict, tree: "_Tree", all_sigs: Dict[str, Set[str]],
     blocks = []
     for b in _raw_blocks:
         fam = b["members"]
-        # tightest label: if all carriers share one clade root, use it;
-        # if it's a single lineage, name it; if broad, say "<clade> general"
-        if len(fam) == 1:
-            label = f"{fam[0]} @ {b['region_start']}"
+        ntot = b["n_total"]   # total lineages carrying this group (specificity)
+        # label each region by the tightest family it points to, with the
+        # lineage count so the user can judge specificity directly:
+        #   1 carrier          -> "XFG @ 4184"              (specific variant)
+        #   small (<=15)       -> "XFG family @ 4184 [9 lineages]"
+        #   broad (>15)        -> "NB.1.8.1 clade @ 8299 [68 lineages]"
+        root = fam[0] if len(fam) == 1 else _clade_root_of(fam, tree)
+        if ntot == 1:
+            label = f"{root} @ {b['region_start']}"
+        elif ntot <= 15:
+            label = f"{root} family @ {b['region_start']} [{ntot} lineages]"
         else:
-            root = _clade_root_of(fam, tree)
-            n = len(fam)
-            if n <= 15:
-                label = f"{root} family @ {b['region_start']}"
-            else:
-                label = f"{root} (general) @ {b['region_start']}"
+            label = f"{root} clade @ {b['region_start']} [{ntot} lineages]"
         blocks.append({
             "member": label,
-            "family_root": (fam[0] if len(fam) == 1
-                            else _clade_root_of(fam, tree)),
+            "family_root": root,
             "members": fam[:10],
             "member_count": len(fam),
             "discriminating": b["discriminating"],
             "absent_markers": b["absent_markers"],
+            "reads": b["reads"],
+            # per-mutation carrier count so the UI can show which rows are
+            # discriminating (few carriers) vs backbone (many carriers)
+            "mut_carriers": {m: sum(1 for s in all_sigs.values() if m in s)
+                             for m in b["discriminating"]},
         })
+    # strongest regions first (by co-occurrence reads) for the UI slider
+    blocks.sort(key=lambda x: -x["reads"])
 
     # plottable members = union of all collapsed families
     plottable = sorted({m for info in combo_to_members.values()

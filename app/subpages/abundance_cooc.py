@@ -766,6 +766,19 @@ def app():
                     "and add variants. Adding applies to the whole panel; re-run to apply."
                 )
 
+                # signal threshold slider — controls which co-occurrence regions
+                # show their full heatmap vs collapse to a dimmed line. Nothing is
+                # removed; the slider only sets the emphasis. Regions with fewer
+                # co-occurrence reads than this dim/collapse.
+                _sig_threshold = st.slider(
+                    "Signal threshold (min co-occurrence reads per region)",
+                    min_value=0, max_value=50000, value=5000, step=1000,
+                    key="acooc_sig_threshold",
+                    help="Regions above the threshold show their full heatmap; "
+                         "below it they collapse to a dimmed line (still expandable). "
+                         "Lower it to inspect weak signals; raise it to focus on strong ones.",
+                )
+
                 # coverage caption (instant, no scan needed): panel ∩ OT vs all OT
                 _ot_set = set(cached_get_variant_names())
                 _n_panel_ot = sum(1 for _v in all_selected_variants if _v in _ot_set)
@@ -893,6 +906,7 @@ def app():
                                 member_blocks=_slot.get("member_blocks", []),
                                 client=wiseLoculus,
                                 location=_hloc,
+                                reads_threshold=st.session_state.get("acooc_sig_threshold", 5000),
                                 date_range=(start_date, end_date),
                             )
 

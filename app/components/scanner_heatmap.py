@@ -351,7 +351,8 @@ def render_clade_heatmap(
     location: str,
     date_range: tuple,
     max_members: int = 12,
-    max_muts_per_block: int = 6,
+    max_muts_per_block: int = 25,
+    reads_threshold: int = 0,
 ) -> None:
     """Signal-over-time for a clade: one small heatmap per family block.
 
@@ -365,31 +366,44 @@ def render_clade_heatmap(
     import plotly.graph_objects as go
     from datetime import datetime
 
-    # blocks to render: shared first, then each family block
+    # blocks to render: split by the reads threshold. Above-threshold blocks
+    # show their full heatmap; below-threshold ones collapse to a dimmed line
+    # (still listed, nothing removed). shared block always shown.
     render_blocks = []
     if shared_mutations:
         render_blocks.append(("shared (clade)",
                               "present in all members — confirms the clade",
                               list(shared_mutations)[:max_muts_per_block]))
+    below = []
     for b in member_blocks[:max_members]:
         name = b.get("member", "?")
         mc = b.get("member_count", 1)
-        subtitle = (f"{mc} indistinguishable lineages" if mc > 1
-                    else "distinguishable lineage")
-        render_blocks.append((name, subtitle,
-                              list(b.get("discriminating", []))[:max_muts_per_block]))
+        reads = b.get("reads", 0)
+        subtitle = (f"{mc} lineages · {reads:,} reads" if mc > 1
+                    else f"{reads:,} reads")
+        if reads >= reads_threshold:
+            render_blocks.append((name, subtitle,
+                                  list(b.get("discriminating", []))[:max_muts_per_block]))
+        else:
+            below.append((name, reads))
 
-    if not render_blocks:
+    if not render_blocks and not below:
         st.caption("No co-occurrence groups to display for this clade.")
         return
 
     # fetch all muts once
     all_muts = list(dict.fromkeys(
         m for _, _, muts in render_blocks for m in muts))
-    with st.spinner(f"Fetching {clade_node} signal over time…"):
-        df = _fetch_frequencies(client, location, date_range, all_muts)
-    if df.empty:
-        st.caption("No frequency data returned.")
+    df = None
+    if all_muts:
+        with st.spinner(f"Fetching {clade_node} signal over time…"):
+            df = _fetch_frequencies(client, location, date_range, all_muts)
+    if df is None or df.empty:
+        if below:
+            _lines = " · ".join(f"{n} ({r:,})" for n, r in below)
+            st.caption(f"All regions below the threshold: {_lines}")
+        else:
+            st.caption("No frequency data returned.")
         return
     df = df.drop_duplicates(subset=["mutation", "dateFrom"], keep="first")
     freq = df.pivot(index="mutation", columns="dateFrom", values="frequency")
@@ -398,16 +412,35 @@ def render_clade_heatmap(
     col_labels = [datetime.strptime(c, "%Y-%m-%d").strftime("%b %d") for c in cols]
 
     st.caption(
-        "Each block is a discriminating co-occurrence group for this clade, in "
-        "a different amplicon region. A dark block means that group co-occurs on "
-        "reads — positive evidence. More blocks lit = stronger confirmation. "
+        "Each block is a co-occurrence group for this clade in one amplicon region. "
+        "Row labels show [number of lineages carrying that mutation]: a low number "
+        "with ★ = discriminating (few variants have it); a high number = backbone "
+        "(broadly shared, not variant-specific). The ★ rows are the ones that "
+        "confirm the variant — if they are dark the variant is present; if only the "
+        "high-number backbone rows are dark, it is just shared mutations. "
         "Hatched = no coverage that week (not absence)."
     )
+
+    # carrier-count lookup across all blocks: how many lineages carry each mut.
+    # Used to annotate rows so the user sees which are discriminating (few
+    # carriers) vs backbone (many). Discriminating threshold ~30 lineages.
+    _mut_car = {}
+    for _b in member_blocks:
+        _mut_car.update(_b.get("mut_carriers", {}))
+
+    def _row_label(m):
+        n = _mut_car.get(m)
+        if n is None:
+            return m
+        if n <= 30:
+            return f"{m} [{n}]★"          # discriminating (star marks it)
+        return f"{m} [{n}]"                # backbone (high count)
 
     def _one_block(title, subtitle, muts, key):
         rows = [m for m in muts if m in freq.index]
         if not rows:
             return
+        row_labels = [_row_label(m) for m in rows]
         z, hatch = [], []
         for m in rows:
             frow, hrow = [], []
@@ -422,13 +455,13 @@ def render_clade_heatmap(
 
         fig = go.Figure()
         fig.add_trace(go.Heatmap(
-            z=z, x=col_labels, y=rows, colorscale="Blues", zmin=0, zmax=1,
+            z=z, x=col_labels, y=row_labels, colorscale="Blues", zmin=0, zmax=1,
             hoverongaps=False, showscale=False, xgap=1, ygap=1,
         ))
         hz = [[1 if hatch[i][j] else np.nan for j in range(len(cols))]
               for i in range(len(rows))]
         fig.add_trace(go.Heatmap(
-            z=hz, x=col_labels, y=rows,
+            z=hz, x=col_labels, y=row_labels,
             colorscale=[[0, "#e5e7eb"], [1, "#e5e7eb"]],
             showscale=False, hoverongaps=False,
             hovertemplate="no coverage<extra></extra>", xgap=1, ygap=1,
@@ -450,3 +483,13 @@ def render_clade_heatmap(
     for i, (title, subtitle, muts) in enumerate(render_blocks):
         _one_block(title, subtitle, muts,
                    key=f"clade_hm_{clade_node}_{location}_{i}")
+
+    # dimmed list of below-threshold regions — kept, not removed
+    if below:
+        _lines = "<br>".join(
+            f"<span style='color:#9ca3af;'>{n} · {r:,} reads · below threshold</span>"
+            for n, r in below)
+        st.markdown(
+            f"<div style='font-size:12px;margin-top:6px;'>{_lines}</div>",
+            unsafe_allow_html=True,
+        )
