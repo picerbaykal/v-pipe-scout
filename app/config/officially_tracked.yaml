@@ -1,0 +1,19 @@
+# Officially tracked variants — the curated panel used for official abundance
+# reporting. This is the authoritative list, maintained here (not fetched from
+# cowwid), so it reflects exactly what your surveillance reports on.
+#
+# Edit this list as the officially tracked set changes. Variants must be valid
+# pango lineage names present in the pango data.
+#
+# Note: this list may lag emerging variants (add new ones here) and may include
+# variants that have stopped circulating (the scanner + deconvolution will flag
+# those). It is a starting reference, corrected by the data.
+
+officially_tracked:
+  - XFG
+  - NB.1.8.1
+  - KP.2
+  - KP.3
+  - XEC
+  - LP.8
+  - BA.3.2

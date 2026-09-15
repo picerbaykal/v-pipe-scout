@@ -51,6 +51,22 @@ def cached_get_pango_loader() -> PangoLoader:
 
 @st.cache_data
 def cached_get_variant_names() -> list:
+    """Officially tracked variants — the curated reporting panel. Read from the
+    local config (app/config/officially_tracked.yaml), NOT fetched from cowwid,
+    so it reflects exactly the set you report on. Falls back to the cowwid list
+    only if the config is missing."""
+    import os
+    import yaml
+    _cfg = os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                        "config", "officially_tracked.yaml")
+    try:
+        with open(_cfg) as _f:
+            _data = yaml.safe_load(_f) or {}
+        _vars = _data.get("officially_tracked") or []
+        if _vars:
+            return list(_vars)
+    except Exception:
+        pass
     from api.signatures import get_variant_names
     return get_variant_names()
 
@@ -776,21 +792,48 @@ def app():
                                 for _v in _dec_vars:
                                     _status, _reason = annotate_variant(
                                         _v, _idx, _found_nodes, _osc)
-                                    _rows.append((_v, _status, _reason))
+                                    # mean abundance for this variant
+                                    _ts = _dec.get(_v, {}).get("timeseriesSummary", [])
+                                    _ab = ([e.get("proportion", 0) for e in _ts]
+                                           if _ts else [])
+                                    _abmean = (sum(_ab) / len(_ab)) if _ab else 0.0
+                                    _rows.append((_v, _status, _reason, _abmean))
                                 if _rows:
-                                    st.markdown("**Co-occurrence check**")
-                                    _stcol = {"confirmed": "#0f6e56",
-                                              "oscillating": "#ba7517",
-                                              "cant_confirm": "#6b7280"}
-                                    for _v, _s, _r in _rows:
-                                        _c = _stcol.get(_s, "#6b7280")
-                                        st.markdown(
-                                            f"<div style='font-size:12px;margin:2px 0;'>"
-                                            f"<span style='font-weight:600;'>{_v}</span> "
-                                            f"<span style='color:{_c};'>· {_s.replace('_',' ')}</span> "
-                                            f"<span style='color:#6b7280;'>· {_r}</span></div>",
-                                            unsafe_allow_html=True,
-                                        )
+                                    # confirmed first, then oscillating, then blind
+                                    _order = {"confirmed": 0, "oscillating": 1,
+                                              "cant_confirm": 2}
+                                    _rows.sort(key=lambda r: (_order.get(r[1], 3),
+                                                              -r[3]))
+                                    _meta = {
+                                        "confirmed":   ("#0f6e56", "#e6f4ef", "✓ confirmed"),
+                                        "oscillating": ("#ba7517", "#fdf4e6", "⚠ oscillating"),
+                                        "cant_confirm":("#6b7280", "#f3f4f6", "· can't confirm"),
+                                    }
+                                    st.markdown(
+                                        "<div style='font-weight:600;font-size:13px;"
+                                        "margin:6px 0 4px;'>Co-occurrence check</div>",
+                                        unsafe_allow_html=True)
+                                    _html = ("<div style='border:0.5px solid #e5e7eb;"
+                                             "border-radius:8px;overflow:hidden;'>")
+                                    for _i, (_v, _s, _r, _ab) in enumerate(_rows):
+                                        _fg, _bg, _lbl = _meta.get(
+                                            _s, ("#6b7280", "#f3f4f6", _s))
+                                        _sep = ("border-top:0.5px solid #f0f0f0;"
+                                                if _i else "")
+                                        _html += (
+                                            f"<div style='display:flex;align-items:center;"
+                                            f"gap:10px;padding:7px 12px;{_sep}'>"
+                                            f"<span style='font-weight:600;font-size:13px;"
+                                            f"min-width:78px;'>{_v}</span>"
+                                            f"<span style='color:#6b7280;font-size:12px;"
+                                            f"min-width:42px;'>{_ab*100:.0f}%</span>"
+                                            f"<span style='background:{_bg};color:{_fg};"
+                                            f"font-size:11px;font-weight:600;padding:1px 8px;"
+                                            f"border-radius:10px;white-space:nowrap;'>{_lbl}</span>"
+                                            f"<span style='color:#9ca3af;font-size:11px;'>"
+                                            f"{_r}</span></div>")
+                                    _html += "</div>"
+                                    st.markdown(_html, unsafe_allow_html=True)
                         except Exception as _e:
                             st.caption(f"(co-occurrence check unavailable: {_e})")
 
