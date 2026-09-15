@@ -68,8 +68,11 @@ def _load_cowwid_variants() -> dict:
     try:
         from api.signatures import get_variant_list
         variant_list = get_variant_list()
-        result = {v.name: set() for v in variant_list.variants}
-        logger.info(f"Loaded cowwid variant names: {len(result)}")
+        result = {
+            v.name: {m[1:] for m in v.signature_mutations if len(m) > 1}
+            for v in variant_list.variants
+        }
+        logger.info(f"Loaded cowwid signatures for {len(result)} variants")
         return result
     except Exception as e:
         logger.warning(f"Could not load cowwid signatures: {e}")
@@ -140,8 +143,10 @@ def _build_variant_signatures(
     """
     sigs: Dict[str, set] = {}
     for variant in variants:
-        # Always use pango_summary.json — single source of truth.
-        sig = pango_loader.get_signature(variant)
+        if variant in pango_loader._reconstructed_signatures and variant in cowwid_variants:
+            sig = cowwid_variants[variant]
+        else:
+            sig = pango_loader.get_signature(variant)
         # Keep only substitution entries (skip deletions ending in "-")
         sigs[variant] = {m for m in sig if re.match(r"^\d+[ACGT]$", m)}
     return sigs
@@ -293,6 +298,7 @@ def run_cooc_panel_completeness(
         # confirmed_present spans only its own chunk since reads are short).
         per_date_results = []
         per_date_unexplained = []
+        per_date_matched = []  # matched patterns → confirm panel variants
 
         async def _one_query(session, batch_idx, batch_positions, date_str):
             async with sem:
@@ -315,6 +321,11 @@ def run_cooc_panel_completeness(
                 ].copy()
                 if not unexp.empty:
                     per_date_unexplained.append(unexp)
+                matched = annotated[annotated["classification"] == "matched"][
+                    ["date", "count", "confirmed_present"]
+                ].copy()
+                if not matched.empty:
+                    per_date_matched.append(matched)
             del df, rows, annotated
 
         async with aiohttp.ClientSession(
@@ -334,7 +345,7 @@ def run_cooc_panel_completeness(
             f"[cooc][{location}] processed {len(per_date_results)} dates, "
             f"{len(per_date_unexplained)} with unexplained patterns"
         )
-        return per_date_results, per_date_unexplained
+        return per_date_results, per_date_unexplained, per_date_matched
 
     try:
         loop = asyncio.get_event_loop()
@@ -342,11 +353,11 @@ def run_cooc_panel_completeness(
             import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor() as pool:
                 future = pool.submit(asyncio.run, _query_all_batches())
-                per_batch_results, pattern_results = future.result()
+                per_batch_results, pattern_results, matched_results = future.result()
         else:
-            per_batch_results, pattern_results = loop.run_until_complete(_query_all_batches())
+            per_batch_results, pattern_results, matched_results = loop.run_until_complete(_query_all_batches())
     except RuntimeError:
-        per_batch_results, pattern_results = asyncio.run(_query_all_batches())
+        per_batch_results, pattern_results, matched_results = asyncio.run(_query_all_batches())
 
     _progress(4, "Aggregating across batches")
     if not per_batch_results:
@@ -382,6 +393,76 @@ def run_cooc_panel_completeness(
     ).replace(0, pd.NA)
     per_date = per_date.sort_values("date").reset_index(drop=True)
 
+    # ── panel-variant confirmation (Option A) ──────────────────────────────
+    # A panel variant is confirmed if an observed matched pattern is a
+    # DISTINCTIVE COMBO of its signature — i.e. the combo (>=2 mutations, subset
+    # of the variant's signature) is carried by few lineages OUTSIDE the
+    # variant's own clade. This is the same clade-level detectability the scanner
+    # uses: distinctiveness comes from the COMBINATION (a discriminating mutation
+    # plus its amplicon neighbours), NOT from having 2+ individually-rare
+    # mutations. This correctly confirms NB.1.8.1 (whose disc muts sit on
+    # separate amplicons but whose amplicon combos are clade-specific) while
+    # never confirming JN.1/KP.2 (whose combos are shared backbone).
+    OUTSIDE_MAX = 15
+    panel_confirmations: dict = {}
+    try:
+        matched_all = (pd.concat(matched_results, ignore_index=True)
+                       if matched_results else
+                       pd.DataFrame(columns=["date", "count", "confirmed_present"]))
+        if not matched_all.empty:
+            all_sigs_full = get_all_lineage_signatures()
+            # mutation -> set(lineages) index for combo carrier lookups
+            mut_index: dict = {}
+            for _lin, _s in all_sigs_full.items():
+                for _m in _s:
+                    mut_index.setdefault(_m, set()).add(_lin)
+            parent_map = get_panel_parent_map()
+            child_map: dict = {}
+            for _lin, _par in parent_map.items():
+                child_map.setdefault(_par, []).append(_lin)
+
+            def _clade_of(v):
+                out = {v}; stack = [v]
+                while stack:
+                    x = stack.pop()
+                    for c in child_map.get(x, []):
+                        if c not in out:
+                            out.add(c); stack.append(c)
+                return out
+
+            def _combo_carriers(combo):
+                it = iter(combo)
+                try:
+                    acc = set(mut_index.get(next(it), ()))
+                except StopIteration:
+                    return set()
+                for m in it:
+                    acc &= mut_index.get(m, set())
+                    if not acc:
+                        break
+                return acc
+
+            matched_all["pat"] = matched_all["confirmed_present"].apply(frozenset)
+            agg = matched_all.groupby("pat")["count"].sum()
+            for pv in variants:
+                psig = variant_signatures.get(pv, set())
+                if not psig:
+                    panel_confirmations[pv] = 0
+                    continue
+                pclade = _clade_of(pv)
+                reads = 0
+                for pat, cnt in agg.items():
+                    # combo must be >=2 muts, all within this variant's signature,
+                    # and DISTINCTIVE: carried by few lineages outside pv's clade
+                    if len(pat) >= 2 and pat.issubset(psig):
+                        n_out = sum(1 for l in _combo_carriers(pat)
+                                    if l not in pclade)
+                        if n_out <= OUTSIDE_MAX:
+                            reads += int(cnt)
+                panel_confirmations[pv] = reads
+    except Exception as _e:
+        logger.warning(f"[cooc][{location}] panel confirmation failed: {_e}")
+
     return {
         "location": location,
         "dates": per_date["date"].astype(str).tolist(),
@@ -389,4 +470,5 @@ def run_cooc_panel_completeness(
         "unexplained_counts": per_date["unexplained_count"].astype(int).tolist(),
         "completeness": per_date["completeness"].astype(float).tolist(),
         "unexplained_patterns": unexplained_agg.to_dict("records"),
+        "panel_confirmations": panel_confirmations,
     }

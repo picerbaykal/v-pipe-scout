@@ -719,6 +719,81 @@ def app():
                         location, task_id, celery_app, redis_client
                     )
 
+                # ── co-occurrence check per deconvolution variant ─────────────
+                # Annotate each deconvolution result with whether co-occurrence
+                # corroborates it (confirmed / oscillating / can't-confirm).
+                if location in st.session_state.location_results:
+                    _dec = st.session_state.location_results[location]
+                    # deconv result is wrapped by location name:
+                    # {loc: {variant: {timeseriesSummary...}}}. Unwrap to the
+                    # inner variant dict. Handle both wrapped and flat shapes.
+                    if isinstance(_dec, dict) and location in _dec and isinstance(_dec[location], dict):
+                        _dec = _dec[location]
+                    # Corroboration is about PANEL variants and depends only on
+                    # deconvolution + the co-occurrence completeness pipeline
+                    # (panel_confirmations) — NOT the scanner (which finds
+                    # non-panel variants for the separate discovery section).
+                    _found_nodes = set()
+                    _cooc_res = _cooc_results.get(location)
+                    if _cooc_res is None and location in _cooc_tasks_map:
+                        _t = celery_app.AsyncResult(_cooc_tasks_map[location])
+                        if _t.ready():
+                            try:
+                                _cooc_res = _t.get()
+                                _cooc_results[location] = _cooc_res
+                                st.session_state["acooc_cooc_results"] = _cooc_results
+                            except Exception:
+                                _cooc_res = None
+                    # panel variant confirmed if its discriminating haplotype was
+                    # observed co-occurring (panel_confirmations from cooc pipeline)
+                    _panel_conf = (_cooc_res or {}).get("panel_confirmations", {}) or {}
+                    _MIN_CONFIRM_READS = 100
+                    for _pv, _reads in _panel_conf.items():
+                        if _reads and _reads >= _MIN_CONFIRM_READS:
+                            _found_nodes.add(_pv)
+                    # only render once the cooc completeness result is available,
+                    # so verdicts don't flip as the scanner streams in
+                    _cooc_ready = _cooc_res is not None
+                    if _cooc_ready and all_selected_variants:
+                        try:
+                            from process.variant_annotation import (
+                                VariantIndex, oscillating_pairs, annotate_variant)
+                            _sigs = st.session_state.get("acooc_all_sigs_cache")
+                            if not _sigs:
+                                _pl0 = cached_get_pango_loader()
+                                _sigs = {lin: _pl0.get_signature(lin)
+                                         for lin in _pl0.raw_data}
+                                st.session_state["acooc_all_sigs_cache"] = _sigs
+                            if _sigs:
+                                _pl = cached_get_pango_loader()
+                                _pmap = {l: _pl.get_raw_data().get(l, {}).get("parent", "")
+                                         for l in _sigs}
+                                _idx = VariantIndex(_sigs, _pmap)
+                                _osc = oscillating_pairs(all_selected_variants, _sigs)
+                                _dec_vars = [v for v in _dec.keys()
+                                             if v != "undetermined" and v in _sigs]
+                                _rows = []
+                                for _v in _dec_vars:
+                                    _status, _reason = annotate_variant(
+                                        _v, _idx, _found_nodes, _osc)
+                                    _rows.append((_v, _status, _reason))
+                                if _rows:
+                                    st.markdown("**Co-occurrence check**")
+                                    _stcol = {"confirmed": "#0f6e56",
+                                              "oscillating": "#ba7517",
+                                              "cant_confirm": "#6b7280"}
+                                    for _v, _s, _r in _rows:
+                                        _c = _stcol.get(_s, "#6b7280")
+                                        st.markdown(
+                                            f"<div style='font-size:12px;margin:2px 0;'>"
+                                            f"<span style='font-weight:600;'>{_v}</span> "
+                                            f"<span style='color:{_c};'>· {_s.replace('_',' ')}</span> "
+                                            f"<span style='color:#6b7280;'>· {_r}</span></div>",
+                                            unsafe_allow_html=True,
+                                        )
+                        except Exception as _e:
+                            st.caption(f"(co-occurrence check unavailable: {_e})")
+
                 st.markdown("---")
 
                 # ── completeness (guiding indicator) ──────────────────────────
