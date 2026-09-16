@@ -692,6 +692,23 @@ def _finalize_clade(s: dict, tree: "_Tree", all_sigs: Dict[str, Set[str]],
                 vals = [sum(vals[i:i+bucket]) for i in range(0, n, bucket)]
             trend_series = vals
 
+    # peak date: the single date carrying the most discriminating reads — used
+    # for the "seen mainly <date>" annotation in the UI.
+    peak_date = ""
+    if _group_sets and observed_dated:
+        from collections import defaultdict as _dd
+        _bd = _dd(int)
+        for muts, cnt, date in observed_dated:
+            if not date:
+                continue
+            for g in _group_sets:
+                inter = len(g & muts)
+                if inter >= 2 and inter / len(g) >= 0.8:
+                    _bd[date] += cnt
+                    break
+        if _bd:
+            peak_date = max(_bd, key=_bd.get)
+
     # direction: compare first third vs last third of the series
     trend = "flat"
     if len(trend_series) >= 3:
@@ -752,6 +769,7 @@ def _finalize_clade(s: dict, tree: "_Tree", all_sigs: Dict[str, Set[str]],
         "top_region_reads": top_reads,
         "trend": trend,
         "trend_series": trend_series,
+        "peak_date": peak_date,
     }
 
 

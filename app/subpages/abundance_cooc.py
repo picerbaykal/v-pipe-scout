@@ -152,9 +152,9 @@ def _render_composition(cooc_result: dict, scanner_result: dict) -> None:
     dates = [r["date"] for r in rows]
     layers = [
         ("explained by panel", "explained_pct", "#0F6E56", "rgba(15,110,86,0.85)"),
-        ("addable (scanner found)", "addable_pct", "#BA7517", "rgba(186,117,23,0.80)"),
-        ("novel (investigate)", "novel_pct", "#7C5CBF", "rgba(124,92,191,0.75)"),
-        ("noise", "noise_pct", "#9ca3af", "rgba(156,163,175,0.45)"),
+        ("addable (not in panel)", "addable_pct", "#dc2626", "rgba(220,38,38,0.55)"),
+        ("novel (investigate)", "novel_pct", "#2563eb", "rgba(37,99,235,0.45)"),
+        ("unresolved / noise", "noise_pct", "#9ca3af", "rgba(156,163,175,0.40)"),
     ]
     fig = go.Figure()
     for name, key, line_c, fill_c in layers:
@@ -172,10 +172,10 @@ def _render_composition(cooc_result: dict, scanner_result: dict) -> None:
     st.plotly_chart(fig, use_container_width=True)
     st.caption(
         "Per date, what the co-occurrence signal is made of. Green = explained by "
-        "your panel (its height is the completeness). Amber = coherent variants "
-        "the scanner found in the gap — add these. Violet = novel — investigate. "
-        "Grey = recurrent noise (the irreducible floor). Dates with too few reads "
-        "are omitted."
+        "your panel (its height is the completeness). Red = coherent variants "
+        "the scanner found in the gap — add these. Blue = novel — investigate. "
+        "Grey = unresolved or recurrent noise. Colours match the scanner below. "
+        "Dates with too few reads are omitted."
     )
 
 
@@ -1010,6 +1010,7 @@ def app():
                             "verdict": _c.get("verdict", ""),
                             "trend": _c.get("trend", "flat"),
                             "trend_series": list(_c.get("trend_series", [])),
+                            "peak_date": _c.get("peak_date", ""),
                             "trend_by_city": {},
                         })
                         _slot["reads"] += int(_c.get("total_reads", 0))
@@ -1128,13 +1129,15 @@ def app():
                             f"<svg width='{_w}' height='{_h}' style='vertical-align:middle;"
                             f"margin-left:8px;'><polyline points='{_pts}' fill='none' "
                             f"stroke='{_tr_col}' stroke-width='1.5'/></svg>")
+                    _peak = _slot.get("peak_date", "")
+                    _peak_txt = (f" · seen mainly {_peak}" if _peak else "")
                     st.markdown(
                         f"<div style='background:{_bg};border:1px solid {_border};"
                         f"border-radius:6px;padding:8px 12px;margin:4px 0;'>"
                         f"<span style='font-weight:600;color:{_accent};'>{_label}</span>"
                         f"{_badge}{_trend_chip}{_spark}"
                         f"<span style='color:#6b7280;font-size:0.82rem;margin-left:8px;'>"
-                        f"{_reads:,} co-occurrence reads{_desig_txt}</span>"
+                        f"{_reads:,} co-occurrence reads{_desig_txt}{_peak_txt}</span>"
                         f"<div style='color:#374151;font-size:0.76rem;margin-top:3px;'>"
                         f"{_verdict}</div>"
                         f"<div style='color:#9ca3af;font-size:0.72rem;margin-top:2px;'>"
@@ -1150,11 +1153,10 @@ def app():
                         )
                     if _is_sub:
                         _anc = _slot.get("panel_ancestor", "")
-                        st.caption(f"Descends from {_anc} — partly counted within its proportion.")
-                    else:
-                        _addkey = f"acooc_addc_{_slot['node']}"
-                        if st.button(f"+ Add {_slot['node']}", key=_addkey):
-                            st.session_state[f"acooc_add_variant_pending_{_slot['node']}"] = _slot["node"]
+                        st.caption(f"↳ sublineage of {_anc} — signal partly counted within its proportion; adding refines it.")
+                    _addkey = f"acooc_addc_{_slot['node']}"
+                    if st.button(f"+ Add {_slot['node']}", key=_addkey):
+                        st.session_state[f"acooc_add_variant_pending_{_slot['node']}"] = _slot["node"]
                     # drill-down heatmap — let the user pick which city when the
                     # finding spans several (the finding's reads are summed across
                     # cities, but a heatmap shows one city's signal at a time).
@@ -1183,37 +1185,30 @@ def app():
                                 date_range=(start_date, end_date),
                             )
 
-                # ---- Not in panel (new-lineage clades) ----
+                # ---- Not in panel (addable) — merges new-lineage clades AND
+                #      sublineages of the panel. Both are "consider adding"; the
+                #      relationship (unrelated vs sublineage) is shown per-row.
                 _new_list = sorted(_agg_new.values(), key=lambda x: -x["reads"])
+                _sub_list = sorted(_agg_sub.values(), key=lambda x: -x["reads"])
+                _addable_n = len(_new_list) + len(_sub_list)
                 with st.expander(
-                    f"🔴 Not in your panel — {len(_new_list)} finding(s)",
+                    f"🔴 Not in your panel — {_addable_n} finding(s)",
                     expanded=st.session_state.get("acooc_exp_missing", False),
                 ):
-                    if not _new_list:
+                    if not _addable_n:
                         st.caption("Nothing circulating that your panel doesn't cover.")
                     else:
                         st.caption(
                             "Co-occurrence signal your panel doesn't explain, mapped "
-                            "to the tightest pango clade the mutations support."
+                            "to the tightest pango clade the mutations support. "
+                            "Consider adding these to the panel."
                         )
+                        # unrelated new lineages first (bigger gaps), then sublineages
                         for _slot in _new_list:
                             _render_finding(_slot, "#dc2626", "#fef2f2", "#fecaca")
-
-                # ---- Sublineages of your panel ----
-                _sub_list = sorted(_agg_sub.values(), key=lambda x: -x["reads"])
-                with st.expander(
-                    f"🟡 Sublineages of your panel — {len(_sub_list)} finding(s)",
-                    expanded=st.session_state.get("acooc_exp_sub", False),
-                ):
-                    if not _sub_list:
-                        st.caption("No sublineages of your panel variants detected.")
-                    else:
-                        st.caption(
-                            "Clades descending from a panel variant. Signal partly "
-                            "counted within the parent — see the heatmap to judge."
-                        )
                         for _slot in _sub_list:
-                            _render_finding(_slot, "#92400e", "#fffbeb", "#fde68a", _is_sub=True)
+                            _render_finding(_slot, "#dc2626", "#fef2f2", "#fecaca",
+                                            _is_sub=True)
 
                 # ---- Matched a lineage but no discriminating co-occurrence ----
                 _mnh_list = sorted(_agg_mnh.values(), key=lambda x: -x["reads"])
