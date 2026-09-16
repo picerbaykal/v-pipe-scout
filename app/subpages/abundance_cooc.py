@@ -136,6 +136,49 @@ def _render_completeness(result: dict) -> None:
     )
 
 
+def _render_composition(cooc_result: dict, scanner_result: dict) -> None:
+    """Normalized (0-100%) per-date composition: explained / addable / novel /
+    noise. Green height = completeness; other bands = what the gap is made of.
+    Empty/low-read dates dropped. Built from existing outputs — scanner untouched."""
+    try:
+        from process.completeness_composition import compute_completeness_composition
+    except Exception:
+        return
+    rows = compute_completeness_composition(cooc_result, scanner_result or {})
+    if not rows:
+        st.caption("Not enough co-occurrence reads to show composition.")
+        return
+    import plotly.graph_objects as go
+    dates = [r["date"] for r in rows]
+    layers = [
+        ("explained by panel", "explained_pct", "#0F6E56", "rgba(15,110,86,0.85)"),
+        ("addable (scanner found)", "addable_pct", "#BA7517", "rgba(186,117,23,0.80)"),
+        ("novel (investigate)", "novel_pct", "#7C5CBF", "rgba(124,92,191,0.75)"),
+        ("noise", "noise_pct", "#9ca3af", "rgba(156,163,175,0.45)"),
+    ]
+    fig = go.Figure()
+    for name, key, line_c, fill_c in layers:
+        fig.add_trace(go.Scatter(
+            x=dates, y=[r[key] for r in rows], name=name, mode="lines",
+            stackgroup="one", line=dict(width=0.5, color=line_c), fillcolor=fill_c,
+            hovertemplate="%{x|%Y-%m-%d}<br>" + name + " %{y:.0%}<extra></extra>"))
+    fig.update_layout(
+        height=260, margin=dict(t=10, b=30, l=50, r=20),
+        template="plotly_white",
+        legend=dict(orientation="h", yanchor="bottom", y=1.0, x=0),
+        showlegend=True,
+    )
+    fig.update_yaxes(range=[0, 1], tickformat=".0%", title="share of co-occurrence")
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption(
+        "Per date, what the co-occurrence signal is made of. Green = explained by "
+        "your panel (its height is the completeness). Amber = coherent variants "
+        "the scanner found in the gap — add these. Violet = novel — investigate. "
+        "Grey = recurrent noise (the irreducible floor). Dates with too few reads "
+        "are omitted."
+    )
+
+
 def _step_label(n: int, label: str, done: bool = False, active: bool = False) -> None:
     """Render a numbered step header in the left column."""
     if done:
@@ -841,16 +884,18 @@ def app():
 
                 # ── completeness (guiding indicator) ──────────────────────────
                 st.markdown("#### Panel completeness")
-                st.caption("Guiding indicator — how much of the co-occurrence signal your panel explains.")
+                st.caption("Guiding indicator — how much of the co-occurrence signal your panel explains, and what the rest is.")
                 if location in _cooc_results:
-                    _render_completeness(_cooc_results[location])
+                    _render_composition(_cooc_results[location],
+                                        _scanner_results.get(location, {}))
                 elif location in _cooc_tasks_map:
                     _cooc_task = celery_app.AsyncResult(_cooc_tasks_map[location])
                     if _cooc_task.ready():
                         try:
                             _cooc_results[location] = _cooc_task.get()
                             st.session_state["acooc_cooc_results"] = _cooc_results
-                            _render_completeness(_cooc_results[location])
+                            _render_composition(_cooc_results[location],
+                                                _scanner_results.get(location, {}))
                         except Exception as _e:
                             st.error(f"Co-occurrence failed: {_e}")
                     else:
