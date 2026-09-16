@@ -517,26 +517,27 @@ def _finalize_clade(s: dict, tree: "_Tree", all_sigs: Dict[str, Set[str]],
         return _mut_pos(m)
 
     def _amplicon_groups(member_sig):
-        """Amplicon-local mutation groups (positions within ~350bp)."""
-        # position each mutation ONCE
-        posmap = [(m, _mut_pos(m)) for m in member_sig]
-        posmap = [(m, p) for m, p in posmap if p >= 0]
-        posmap.sort(key=lambda mp: mp[1])
-        positions = [p for _, p in posmap]
-        # cluster positions
-        clusters, cur = [], []
-        for p in positions:
-            if cur and p - cur[-1] > 350:
-                clusters.append(set(cur))
-                cur = []
-            cur.append(p)
-        if cur:
-            clusters.append(set(cur))
+        """Discriminating co-occurrence groups for a variant, defined by the
+        DATA: each group is the intersection of the variant's signature with an
+        observed co-occurrence pattern. Because LAPIS returns a pattern only when
+        those mutations were seen together on reads, a pattern IS a set of
+        same-amplicon, co-occurring mutations — so we don't guess amplicon
+        boundaries by base-pair distance. We take each observed pattern, intersect
+        it with the variant's signature, and keep the intersections of >=2
+        mutations (the part of that amplicon's co-occurrence that belongs to this
+        variant). Deletions/insertions are dropped (LAPIS returns them as N).
+
+        This replaces distance-based clustering, which merged mutations that never
+        actually co-occur (e.g. BA.3.2.2's 25699..27259 chained into one group no
+        read could cover), hiding real tight combos like {26645T,26718T,26771T}."""
+        sig_no_indel = {m for m in member_sig if "-" not in m and "+" not in m}
+        seen = set()
         out = []
-        for cl in clusters:
-            g = frozenset(m for m, p in posmap if p in cl)
-            if len(g) >= 2:
-                out.append(g)
+        for op, _cnt in observed_patterns:
+            inter = frozenset(m for m in op if m in sig_no_indel)
+            if len(inter) >= 2 and inter not in seen:
+                seen.add(inter)
+                out.append(inter)
         return out
 
     def _is_observed(group):
