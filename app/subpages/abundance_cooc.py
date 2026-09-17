@@ -23,6 +23,7 @@ from utils.config import get_wiseloculus_url
 
 from components.abundance_cooc_tree import render_panel_tree
 from components.jaccard_heatmap import render_jaccard_heatmap
+from components.variant_explorer_ui import render_variant_explorer
 
 from datetime import datetime
 import pandas as pd
@@ -1331,6 +1332,17 @@ def app():
                                             date_range=(start_date, end_date),
                                         )
 
+
+            # ── Investigate a variant (on-demand explorer) ─────────────────────
+            st.markdown("---")
+            _expl_loc = _selected.replace("📍 ", "") if _selected else None
+            _expl_cooc = (st.session_state.get("acooc_cooc_results", {})
+                          .get(_expl_loc) if _expl_loc else None)
+            render_variant_explorer(
+                pango_loader=cached_get_pango_loader(),
+                panel=all_selected_variants,
+                cooc_result=_expl_cooc,
+            )
 
             # ── Download report (triggered by button in progress header) ───────
             if st.session_state.get("acooc_show_report"):
