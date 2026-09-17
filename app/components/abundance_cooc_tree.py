@@ -33,7 +33,10 @@ def _ancestors(v: str, parent_map: dict) -> list[str]:
     return path
 
 
-def _build_spine(selected_set: set, yaml_set: set, parent_map: dict):
+def _build_spine(selected_set: set, yaml_set: set, parent_map: dict, recomb_set: set = None):
+    recomb_set = recomb_set or set()
+    # recombinants are shown in a separate section, not the main bifurcating tree
+    selected_set = {v for v in selected_set if v not in recomb_set}
     if not selected_set:
         return None
 
@@ -43,6 +46,8 @@ def _build_spine(selected_set: set, yaml_set: set, parent_map: dict):
         for a in _ancestors(v, parent_map):
             needed.add(a)
     for v in yaml_set:
+        if v in recomb_set:
+            continue
         if any(a in selected_set for a in _ancestors(v, parent_map) + [v]):
             needed.add(v)
     needed.add("B")
@@ -90,7 +95,8 @@ def _build_spine(selected_set: set, yaml_set: set, parent_map: dict):
     return children, root, needed, kind_of, collapse
 
 
-def _build_svg(children, root, kind_of, collapse, width=340):
+def _build_svg(children, root, kind_of, collapse, width=340, recombinant_set=None):
+    recombinant_set = recombinant_set or set()
     ROW_H, INDENT, X0 = 26, 20, 16
     rows = []
     visited = set()
@@ -169,7 +175,8 @@ def _build_svg(children, root, kind_of, collapse, width=340):
             f'{label}</text>'
         )
 
-        # OT badge only
+        # OT badge
+        _badge_x_end = tx + len(label) * (7 if not is_spine else 6) + 16
         if kind in ("panel_ot", "yaml"):
             lw = len(label) * (7 if not is_spine else 6) + 16
             bx = tx + lw
@@ -182,6 +189,21 @@ def _build_svg(children, root, kind_of, collapse, width=340):
                 f'text-anchor="middle" font-size="10" fill="#5F5E5A" '
                 f'font-family="-apple-system,BlinkMacSystemFont,\'Segoe UI\',sans-serif">'
                 f'OT</text>'
+            )
+            _badge_x_end = bx + bw + 4
+
+        # recombinant badge (mixed ancestry — no single parent in the tree)
+        if real_v in recombinant_set:
+            bw2 = 6.2 * 6 + 14
+            bh = 15
+            bx2 = _badge_x_end
+            nodes_svg.append(
+                f'<rect x="{bx2}" y="{y - bh//2}" width="{bw2}" height="{bh}" '
+                f'rx="7" fill="#F3E8F1"/>'
+                f'<text x="{bx2 + bw2/2:.1f}" y="{y}" dy="0.35em" '
+                f'text-anchor="middle" font-size="10" fill="#8A4E82" '
+                f'font-family="-apple-system,BlinkMacSystemFont,\'Segoe UI\',sans-serif">'
+                f'recomb</text>'
             )
 
     # legend
@@ -259,13 +281,10 @@ def render_panel_tree(
     raw = pango_loader.get_raw_data()
     parent_map = {v: e.get("parent", "") for v, e in raw.items() if e.get("parent")}
 
-    RECOMBINANT_PARENT = {
-        "XDV": "JN.1", "XFG": "JN.1", "XEC": "JN.1",
-        "XBB": "BA.2", "XBB.1": "XBB", "XBB.2": "XBB",
-    }
-    for alias, par in RECOMBINANT_PARENT.items():
-        if alias in raw and alias not in parent_map:
-            parent_map[alias] = par
+    # Recombinants (X*, no parent in pango data) are NOT anchored into the main
+    # tree — that computation crashed. They are rendered in a SEPARATE
+    # "Recombinants" section (see render_panel_tree), grouped by family, so the
+    # main bifurcating tree stays clean and cheap. Nothing to do here.
 
     all_known = set(raw.keys())
     for v in list(selected_set) + list(yaml_set):
@@ -289,11 +308,51 @@ def render_panel_tree(
         st.caption("Select at least one variant to build the tree.")
         return
 
-    result = _build_spine(selected_set, yaml_set, parent_map)
-    if not result:
+    # Identify recombinants (X* with no parent in the data). A recombinant's
+    # descendants (XFG.1, XFG.3.1.7…) trace back to the recombinant root by name.
+    def _recomb_root(v):
+        # the top-level X* ancestor of v (e.g. XFG.3.1.7 -> XFG), if v is in an
+        # X* family whose root has no parent
+        head = v.split(".")[0]
+        if head.startswith("X") and head in raw and not raw.get(head, {}).get("parent"):
+            return head
+        return None
+
+    _all_panel = set(selected_variants) | set(yaml_variants)
+    recomb_members = {v for v in _all_panel if _recomb_root(v) is not None}
+
+    result = _build_spine(selected_set, yaml_set, parent_map, recomb_set=recomb_members)
+
+    # ── main bifurcating tree (non-recombinants) ──
+    if result:
+        children, root, needed, kind_of, collapse = result
+        _html, _h = _build_svg(children, root, kind_of, collapse)
+        components.html(_html, height=_h + 20, scrolling=True)
+    elif not recomb_members:
         st.caption("Select at least one variant to build the tree.")
         return
 
-    children, root, needed, kind_of, collapse = result
-    _html, _h = _build_svg(children, root, kind_of, collapse)
-    components.html(_html, height=_h + 20, scrolling=True)
+    # ── separate Recombinants section (grouped by family) ──
+    selected_recomb = {v for v in selected_variants if v in recomb_members}
+    if selected_recomb:
+        from collections import defaultdict as _dd
+        fam = _dd(list)
+        for v in selected_recomb:
+            fam[_recomb_root(v)].append(v)
+        st.caption("Recombinants (mixed ancestry — shown separately from the tree):")
+        for froot in sorted(fam):
+            members = sorted(fam[froot])
+            # show family root then its selected members indented
+            lines = []
+            for m in members:
+                is_ot = m in set(yaml_variants)
+                badge = " · OT" if is_ot else ""
+                indent = "&nbsp;&nbsp;&nbsp;" if m != froot else ""
+                lines.append(f"{indent}● <b>{m}</b>{badge}")
+            st.markdown(
+                f"<div style='border:0.5px solid #e5e7eb;border-radius:8px;"
+                f"padding:6px 10px;margin:4px 0;font-size:13px;'>"
+                f"<span style='color:#8A4E82;font-weight:600;'>⧉ {froot} recombinant</span><br>"
+                + "<br>".join(lines) + "</div>",
+                unsafe_allow_html=True,
+            )

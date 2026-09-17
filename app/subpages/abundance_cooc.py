@@ -206,37 +206,34 @@ def _step_label(n: int, label: str, done: bool = False, active: bool = False) ->
 
 
 def app():
-    # Apply any pending variant additions from the scanner BEFORE widgets render.
-    # Scanner-found variants may not be in the curated cowwid list, so they go
-    # into the manual-add multiselect (acooc_extra_variants), which accepts any
-    # pango lineage. Curated ones could go either way; extra_variants is safe.
-    _pending_changed = False
-    # removals first (for "track instead" swaps: remove parent, add sublineage)
+    # Scanner-added variants live in their OWN plain session key (NOT a widget
+    # key), so adding one never mutates the multiselect widgets' state — which
+    # was wiping the OT panel on rerun. They're merged into the panel at build
+    # time (see all_selected_variants below). Removals just drop from this list
+    # or from the widget lists as appropriate.
+    st.session_state.setdefault("acooc_scanner_added", [])
+    _removal_changed = False
     for key in list(st.session_state.keys()):
         if key.startswith("acooc_remove_variant_pending_"):
             v = st.session_state.pop(key)
+            st.session_state["acooc_scanner_added"] = [
+                x for x in st.session_state["acooc_scanner_added"] if x != v]
             _cm = st.session_state.get("acooc_variant_multiselect", [])
             if v in _cm:
                 st.session_state["acooc_variant_multiselect"] = [x for x in _cm if x != v]
             _ce = st.session_state.get("acooc_extra_variants", [])
             if v in _ce:
                 st.session_state["acooc_extra_variants"] = [x for x in _ce if x != v]
-            _pending_changed = True
-    # then additions
+            _removal_changed = True
     for key in list(st.session_state.keys()):
         if key.startswith("acooc_add_variant_pending_"):
             v = st.session_state.pop(key)
-            _curated = cached_get_variant_names()
-            if v in _curated:
-                _cur = st.session_state.get("acooc_variant_multiselect", [])
-                if v not in _cur:
-                    st.session_state["acooc_variant_multiselect"] = _cur + [v]
-            else:
-                _cur = st.session_state.get("acooc_extra_variants", [])
-                if v not in _cur:
-                    st.session_state["acooc_extra_variants"] = _cur + [v]
-            _pending_changed = True
-    if _pending_changed:
+            if v not in st.session_state["acooc_scanner_added"]:
+                st.session_state["acooc_scanner_added"].append(v)
+            # NO rerun for adds: the button click already reruns; an extra
+            # st.rerun() competes with the scanner autorefresh and froze the UI.
+            # The append updates the panel; the natural rerun reflects it.
+    if _removal_changed:
         st.rerun()
 
     st.session_state.setdefault("location_results", {})
@@ -264,7 +261,10 @@ def app():
     col_controls, col_results = st.columns([1, 3])
 
     # derive state flags for step indicators
-    has_variants = len(st.session_state.get("acooc_variant_multiselect", [])) >= 2
+    has_variants = len(list(dict.fromkeys(
+        st.session_state.get("acooc_variant_multiselect", [])
+        + st.session_state.get("acooc_extra_variants", [])
+        + st.session_state.get("acooc_scanner_added", [])))) >= 2
     has_locations = len(st.session_state.get("acooc_location_multiselect", [])) >= 1
     has_run = bool(st.session_state.get("acooc_location_tasks"))
     has_completeness = bool(st.session_state.get("acooc_cooc_results"))
@@ -314,7 +314,20 @@ def app():
             )
 
         # dedup: a scanner variant routed to extras might also be curated
-        all_selected_variants = list(dict.fromkeys(selected_variants + extra_variants))
+        _scanner_added = st.session_state.get("acooc_scanner_added", [])
+        all_selected_variants = list(dict.fromkeys(
+            selected_variants + extra_variants + _scanner_added))
+        # show scanner-added variants (from the "Add" buttons) with a way to drop
+        if _scanner_added:
+            st.caption("Added from scanner:")
+            for _sv in list(_scanner_added):
+                _c1, _c2 = st.columns([4, 1])
+                _c1.markdown(f"<span style='font-size:0.85rem;'>• {_sv}</span>",
+                             unsafe_allow_html=True)
+                if _c2.button("✕", key=f"acooc_rm_added_{_sv}",
+                              help=f"Remove {_sv}"):
+                    st.session_state[f"acooc_remove_variant_pending_{_sv}"] = _sv
+                    st.rerun()
         if len(all_selected_variants) >= 2:
             st.caption(f"{len(all_selected_variants)} variants in panel")
         else:
@@ -885,21 +898,16 @@ def app():
                 # ── completeness (guiding indicator) ──────────────────────────
                 st.markdown("#### Panel completeness")
                 st.caption("Guiding indicator — how much of the co-occurrence signal your panel explains, and what the rest is.")
-                if location in _cooc_results:
-                    _render_composition(_cooc_results[location],
-                                        _scanner_results.get(location, {}))
-                elif location in _cooc_tasks_map:
-                    _cooc_task = celery_app.AsyncResult(_cooc_tasks_map[location])
-                    if _cooc_task.ready():
-                        try:
-                            _cooc_results[location] = _cooc_task.get()
-                            st.session_state["acooc_cooc_results"] = _cooc_results
-                            _render_composition(_cooc_results[location],
-                                                _scanner_results.get(location, {}))
-                        except Exception as _e:
-                            st.error(f"Co-occurrence failed: {_e}")
-                    else:
-                        st.info("Computing panel completeness…")
+                # Render only when BOTH cooc AND scanner results for this location
+                # are ready, so the composition appears in its FINAL form. Rendering
+                # with an empty scanner result first showed a green-only curve that
+                # then morphed (added addable/novel/noise) — confusing on first load.
+                _comp_cooc = _cooc_results.get(location)
+                _comp_scan = _scanner_results.get(location)
+                if _comp_cooc is not None and _comp_scan is not None:
+                    _render_composition(_comp_cooc, _comp_scan)
+                elif location in _cooc_tasks_map or location in st.session_state.get("acooc_scanner_tasks", {}):
+                    st.info("Computing panel completeness… (finalises when the scan completes)")
                 else:
                     st.caption("Runs alongside deconvolution.")
 
@@ -920,6 +928,26 @@ def app():
 
             # ── Scanner (one section, aggregated across all cities) ────────────
             _scan_res_all = st.session_state.get("acooc_scanner_results", {})
+            # Show progress only while a scanner task is actively running. Once
+            # no task is running, show whatever results were collected (avoids
+            # hiding findings forever on a location-matching mismatch).
+            # scanner is "running" if any location with a completeness result
+            # doesn't yet have a collected scanner result (same reliable signal
+            # the autorefresh uses — the task-map .ready() check was unreliable).
+            # Show scanner findings only when NOTHING is still running (_outstanding
+            # is the same signal that drives the autorefresh — it's True while any
+            # deconv/completeness/scanner task is uncollected). The previous
+            # _scan_running check relied on cooc results being present, but they
+            # aren't collected yet at this point (cr_keys empty), so it never
+            # triggered and partial findings leaked through.
+            _scan_running = _outstanding
+            if _scan_running:
+                st.markdown("---")
+                st.markdown("### Scanner")
+                st.info("🔍 Scanning for variants not in your panel… "
+                        "findings and Add buttons appear when the scan completes.")
+                _scan_res_all = {}  # suppress partial rendering below
+
             if _scan_res_all:
                 from collections import defaultdict as _ddict
                 st.markdown("---")
@@ -1155,8 +1183,12 @@ def app():
                         _anc = _slot.get("panel_ancestor", "")
                         st.caption(f"↳ sublineage of {_anc} — signal partly counted within its proportion; adding refines it.")
                     _addkey = f"acooc_addc_{_slot['node']}"
-                    if st.button(f"+ Add {_slot['node']}", key=_addkey):
-                        st.session_state[f"acooc_add_variant_pending_{_slot['node']}"] = _slot["node"]
+                    if _scan_running:
+                        st.caption(f"⏳ finishing scan… Add enables shortly")
+                    else:
+                        if st.button(f"+ Add {_slot['node']}", key=_addkey):
+                            st.session_state[f"acooc_add_variant_pending_{_slot['node']}"] = _slot["node"]
+                            st.rerun()  # process immediately (no autorefresh running once scan done)
                     # drill-down heatmap — let the user pick which city when the
                     # finding spans several (the finding's reads are summed across
                     # cities, but a heatmap shows one city's signal at a time).
