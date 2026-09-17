@@ -217,22 +217,24 @@ def app():
         if key.startswith("acooc_remove_variant_pending_"):
             v = st.session_state.pop(key)
             st.session_state["acooc_scanner_added"] = [
-                x for x in st.session_state["acooc_scanner_added"] if x != v]
-            _cm = st.session_state.get("acooc_variant_multiselect", [])
-            if v in _cm:
-                st.session_state["acooc_variant_multiselect"] = [x for x in _cm if x != v]
-            _ce = st.session_state.get("acooc_extra_variants", [])
-            if v in _ce:
-                st.session_state["acooc_extra_variants"] = [x for x in _ce if x != v]
+                x for x in st.session_state.get("acooc_scanner_added", []) if x != v]
+            _panel = st.session_state.get("acooc_panel", [])
+            if v in _panel:
+                st.session_state["acooc_panel"] = [x for x in _panel if x != v]
             _removal_changed = True
     for key in list(st.session_state.keys()):
         if key.startswith("acooc_add_variant_pending_"):
             v = st.session_state.pop(key)
-            if v not in st.session_state["acooc_scanner_added"]:
-                st.session_state["acooc_scanner_added"].append(v)
-            # NO rerun for adds: the button click already reruns; an extra
-            # st.rerun() competes with the scanner autorefresh and froze the UI.
-            # The append updates the panel; the natural rerun reflects it.
+            # add directly to the unified panel so it shows IN the multiselect.
+            # Done here at the top, BEFORE the widget renders, so the widget picks
+            # it up. (Also track in acooc_scanner_added for the "from scanner"
+            # provenance / heatmap wiring.)
+            _panel = st.session_state.get("acooc_panel", [])
+            if v not in _panel:
+                st.session_state["acooc_panel"] = _panel + [v]
+            _sa = st.session_state.setdefault("acooc_scanner_added", [])
+            if v not in _sa:
+                _sa.append(v)
     if _removal_changed:
         st.rerun()
 
@@ -262,8 +264,7 @@ def app():
 
     # derive state flags for step indicators
     has_variants = len(list(dict.fromkeys(
-        st.session_state.get("acooc_variant_multiselect", [])
-        + st.session_state.get("acooc_extra_variants", [])
+        st.session_state.get("acooc_panel", [])
         + st.session_state.get("acooc_scanner_added", [])))) >= 2
     has_locations = len(st.session_state.get("acooc_location_multiselect", [])) >= 1
     has_run = bool(st.session_state.get("acooc_location_tasks"))
@@ -276,58 +277,46 @@ def app():
         # ── Step 1: Variant panel ─────────────────────────────────────────────
         _step_label(1, "Variant panel", done=has_variants)
 
-        col_select_all, col_clear = st.columns(2)
-        with col_select_all:
-            if st.button("Select all", key="acooc_select_all", use_container_width=True):
-                st.session_state["acooc_variant_multiselect"] = curated_variants
+        pango_loader = cached_get_pango_loader()
+        available_lineages = sorted(pango_loader.get_raw_data().keys())
+
+        col_add_ot, col_clear = st.columns(2)
+        with col_add_ot:
+            if st.button("+ Add surveillance panel",
+                         key="acooc_add_all_ot", use_container_width=True,
+                         help="Add the officially-tracked surveillance panel (7 variants)"):
+                _cur = st.session_state.get("acooc_panel", [])
+                st.session_state["acooc_panel"] = list(dict.fromkeys(_cur + curated_variants))
+                st.rerun()
         with col_clear:
             if st.button("Clear", key="acooc_clear_variants", use_container_width=True):
-                st.session_state["acooc_variant_multiselect"] = []
+                st.session_state["acooc_panel"] = []
+                st.session_state["acooc_scanner_added"] = []
+                st.rerun()
 
+        # ONE multiselect for the whole panel — any pango lineage. Scanner-added
+        # variants are merged in (below) so everything lives in one list the user
+        # can edit. OT variants are the curated set; the "Add all OT" button is a
+        # convenience to load them. options always include current selections +
+        # scanner-added so Streamlit never silently drops a value.
+        _scanner_added = st.session_state.get("acooc_scanner_added", [])
+        _cur_panel = st.session_state.get("acooc_panel", [])
+        _panel_options = sorted(set(available_lineages) | set(_cur_panel)
+                                | set(_scanner_added) | set(curated_variants))
         selected_variants = st.multiselect(
-            "Surveillance variants",
-            options=curated_variants,
-            help="Curated variants from the Swiss wastewater surveillance panel (cowwid).",
-            key="acooc_variant_multiselect",
-            label_visibility="collapsed",
+            "Variant panel",
+            options=_panel_options,
+            default=None,
+            help="Add any pango lineage. Use “Add surveillance panel” to load the "
+                 "officially-tracked variants; the tree marks them “OT”. Scanner "
+                 "findings you add appear here too.",
+            key="acooc_panel",
+            placeholder="Search any pango lineage (e.g. KP.2.3, XFG)…",
         )
 
-        with st.expander("Add lineage manually", expanded=False):
-            pango_loader = cached_get_pango_loader()
-            available_lineages = sorted(pango_loader.get_raw_data().keys())
-            # options must ALWAYS include whatever is currently in session state,
-            # otherwise Streamlit silently drops a value not in options — which is
-            # exactly what happens when the scanner adds a variant: it lands in
-            # session state, but if it's filtered out of options the widget drops
-            # it and the panel count doesn't grow (breaking the Run button).
-            _current_extras = st.session_state.get("acooc_extra_variants", [])
-            extra_options = sorted(set(
-                [v for v in available_lineages if v not in selected_variants]
-                + list(_current_extras)
-            ))
-            extra_variants = st.multiselect(
-                "Search pango lineage",
-                options=extra_options,
-                placeholder="e.g. KP.2.3",
-                help="Add any pango lineage. Scanner suggestions below highlight missing variants automatically.",
-                key="acooc_extra_variants",
-            )
-
-        # dedup: a scanner variant routed to extras might also be curated
-        _scanner_added = st.session_state.get("acooc_scanner_added", [])
-        all_selected_variants = list(dict.fromkeys(
-            selected_variants + extra_variants + _scanner_added))
-        # show scanner-added variants (from the "Add" buttons) with a way to drop
-        if _scanner_added:
-            st.caption("Added from scanner:")
-            for _sv in list(_scanner_added):
-                _c1, _c2 = st.columns([4, 1])
-                _c1.markdown(f"<span style='font-size:0.85rem;'>• {_sv}</span>",
-                             unsafe_allow_html=True)
-                if _c2.button("✕", key=f"acooc_rm_added_{_sv}",
-                              help=f"Remove {_sv}"):
-                    st.session_state[f"acooc_remove_variant_pending_{_sv}"] = _sv
-                    st.rerun()
+        # scanner-added variants are written into acooc_panel directly (above),
+        # so the multiselect selection IS the full panel — single source of truth.
+        all_selected_variants = list(dict.fromkeys(list(selected_variants)))
         if len(all_selected_variants) >= 2:
             st.caption(f"{len(all_selected_variants)} variants in panel")
         else:

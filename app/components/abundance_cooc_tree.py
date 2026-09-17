@@ -54,22 +54,38 @@ def _build_spine(selected_set: set, yaml_set: set, parent_map: dict, recomb_set:
 
     root = "B"
 
-    def is_desc(v, r):
+    def chain_root(v):
+        """the top of v's parent chain (where parent is empty/absent)."""
         x = v
-        while x in parent_map:
-            if x == r:
-                return True
+        seen = set()
+        while x in parent_map and x not in seen:
+            seen.add(x)
             x = parent_map[x]
-        return x == r or v == r
+        return x
 
-    needed = {v for v in needed if is_desc(v, root)}
+    # A node is kept if its chain reaches B OR terminates at a recombinant root
+    # (e.g. NB.1.8.1 → ... → XDV, a recombinant with no parent). Previously only
+    # B-reaching nodes were kept, so NB.1.8.1 (rooted at XDV) was dropped from the
+    # tree. Recombinant chain-roots are then attached under B so they render.
+    def keeps(v):
+        r = chain_root(v)
+        return r == root or (r.startswith("X"))
+
+    needed = {v for v in needed if keeps(v)}
     needed.add(root)
+
+    # recombinant roots that anchor kept chains → attach them under B
+    _recomb_roots = {chain_root(v) for v in needed
+                     if chain_root(v) != root and chain_root(v).startswith("X")}
+    needed |= _recomb_roots
 
     children = defaultdict(list)
     for v in needed:
         p = parent_map.get(v)
         if p and p in needed:
             children[p].append(v)
+        elif v in _recomb_roots:
+            children[root].append(v)  # recombinant root hangs under B
 
     def kind_of(v):
         if v in selected_set:
