@@ -12,25 +12,36 @@ PANGO_DATA_DIR = Path(__file__).parent.parent / "data"
 PANGO_SUMMARY_DEFAULT = PANGO_DATA_DIR / "pango_summary.json"
 PANGO_SUMMARY_CACHE = Path("/app/.cache/pango/pango_summary.json")  # Docker runtime path
 
+def _cache_is_valid(path: Path) -> bool:
+    """A cache is valid only if it has no ORPHANED lineages — lineages with an
+    empty parent whose naming-parent exists in the file. Orphans (introduced by
+    an old merge step) break clade traversal and corrupt scanner resolution, so
+    a cache containing them must be rejected in favour of the clean checked-in
+    file. Cheap check: scan parents once."""
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            d = json.load(f)
+        for lin, entry in d.items():
+            if entry.get("parent"):
+                continue
+            if "." in lin and ".".join(lin.split(".")[:-1]) in d:
+                return False  # orphaned lineage → corrupted cache
+        return True
+    except Exception:
+        return False
+
+
 def get_pango_summary_path() -> Path:
     """
     Return the path to the best available pango_summary.json.
 
-    Two copies may exist:
-    - A checked-in default at app/data/pango_summary.json — always
-      present, never overwritten at runtime. Used for local dev,
-      CI, and as the fallback on a fresh deployment before any
-      update check has run.
-    - A runtime copy at /app/.cache/pango/pango_summary.json —
-      written by download_pango_summary() on first startup and
-      refreshed whenever upstream has a newer version. Lives in a
-      Docker volume so it persists across container restarts.
-
-    Prefers the runtime copy when it exists (i.e. after at least
-    one successful download), falls back to the checked-in default
-    otherwise.
+    Prefers the runtime cache ONLY if it passes validation (no orphaned
+    lineages). A corrupted cache (orphans from an old merge) is rejected and the
+    clean checked-in default is used instead. This prevents a stale/corrupted
+    cache — which can survive volume/container resets — from breaking clade-level
+    scanner detection.
     """
-    if PANGO_SUMMARY_CACHE.exists():
+    if PANGO_SUMMARY_CACHE.exists() and _cache_is_valid(PANGO_SUMMARY_CACHE):
         return PANGO_SUMMARY_CACHE
     return PANGO_SUMMARY_DEFAULT
 
@@ -312,8 +323,6 @@ class PangoLoader:
         return self._signatures[lineage]
 
     def get_private_mutations(self, lineage: str) -> set[str]:
-        if lineage not in self._private_mutations and lineage in self.raw_data:
-            self._process_lineage(lineage)
         return self._private_mutations.get(lineage, set())
 
     def is_reconstructed(self, lineage: str) -> bool:
@@ -352,94 +361,31 @@ def _get_pango_source() -> str:
     except Exception:
         return "cornelius"
 
-def _download_from_freyja(local_path: Path, old_data: dict) -> dict:
-    """Download Freyja barcodes and merge with existing pango_summary."""
-    import io
-    try:
-        import pyarrow.feather as feather
-    except ImportError:
-        return {"success": False, "error": "pyarrow not installed",
-                "new_variants": 0, "old_variants": len(old_data), "added": []}
-    try:
-        with urllib.request.urlopen(FREYJA_BARCODES_URL, timeout=120) as resp:
-            raw = resp.read()
-        df = feather.read_feather(io.BytesIO(raw))
-        if df.index.name is None:
-            df = df.set_index(df.columns[0])
-        # vectorized conversion — O(n) not O(n²)
-        freyja_sigs = {
-            lin: df.columns[df.loc[lin].astype(bool)].tolist()
-            for lin in df.index
-        }
-        new_data = dict(old_data)
-        added = []
-        for lin, nuc_muts in freyja_sigs.items():
-            if lin in new_data:
-                new_data[lin]["nucSubstitutions"] = nuc_muts
-            else:
-                new_data[lin] = {"nucSubstitutions": nuc_muts, "aaSubstitutions": []}
-                added.append(lin)
-        local_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = local_path.with_suffix(".tmp")
-        with tmp.open("w", encoding="utf-8") as f:
-            json.dump(new_data, f)
-        shutil.move(str(tmp), str(local_path))
-        return {"success": True, "new_variants": len(new_data),
-                "old_variants": len(old_data), "added": added, "error": None}
-    except Exception as exc:
-        return {"success": False, "error": str(exc),
-                "new_variants": 0, "old_variants": len(old_data), "added": []}
-
 
 def download_pango_summary(local_path: str | Path) -> dict:
     """
-    Download the latest pango_summary.json and overwrite local_path.
+    Download the pango_summary.json from corneliusroemer and overwrite
+    local_path with the raw upstream content. NO merging: the cache is an exact
+    copy of the upstream source. (Merging with a metadata base, and the Freyja
+    barcode merge, were removed because they introduced orphaned lineages — new
+    lineages written without a `parent` field — which broke clade traversal and
+    corrupted the scanner's clade resolution.)
 
     Returns:
-        {
-            "success": bool,
-            "new_variants": int,   # variants in new file
-            "old_variants": int,   # variants in old file (0 if didn't exist)
-            "added": list[str],    # newly added variant names
-            "error": str | None,
-        }
+        {success, new_variants, old_variants, added, error}
     """
-
-    # dispatch to Freyja or Cornelius based on config
-    source = _get_pango_source()
-    local = Path(local_path)
-    # always use the static checked-in file as the metadata base for merging
-    # this ensures parent/children/designationDate are preserved even when
-    # the cache is empty (e.g. after a docker volume reset)
-    old_data: dict = {}
-    try:
-        with PANGO_SUMMARY_DEFAULT.open("r", encoding="utf-8") as f:
-            old_data = json.load(f)
-        logging.info(f"pango_loader: loaded {len(old_data)} lineages from default as merge base")
-    except Exception:
-        # fallback to cache if default is unavailable
-        if local.exists():
-            try:
-                with local.open("r", encoding="utf-8") as f:
-                    old_data = json.load(f)
-            except Exception:
-                pass
-    if source == "freyja":
-        logging.info("pango_loader: downloading from Freyja (UShER/NCBI, daily updated)")
-        return _download_from_freyja(local, old_data)
-    logging.info("pango_loader: downloading from corneliusroemer/pango-sequences")
-
     local = Path(local_path)
 
+    # record previous variant set only for the "added" diff (not merged in)
     old_variants: set[str] = set()
     if local.exists():
         try:
             with local.open("r", encoding="utf-8") as f:
-                old_data = json.load(f)
-            old_variants = set(old_data.keys())
+                old_variants = set(json.load(f).keys())
         except Exception:
             pass
 
+    logging.info("pango_loader: downloading from corneliusroemer/pango-sequences (no merge)")
     try:
         with urllib.request.urlopen(PANGO_SUMMARY_URL, timeout=30) as resp:
             raw = resp.read()
@@ -449,22 +395,20 @@ def download_pango_summary(local_path: str | Path) -> dict:
         new_data = json.loads(raw)
         new_variants = set(new_data.keys())
 
-        # atomic write via temp file
+        # atomic write of the RAW upstream bytes — no merge
         local.parent.mkdir(parents=True, exist_ok=True)
         tmp = local.with_suffix(".tmp")
         tmp.write_bytes(raw)
         shutil.move(str(tmp), str(local))
 
-        # save ETag sidecar so next check knows current version
         if remote_etag:
             local.with_suffix(".etag").write_text(remote_etag)
 
-        added = sorted(new_variants - old_variants)
         return {
             "success": True,
             "new_variants": len(new_variants),
             "old_variants": len(old_variants),
-            "added": added,
+            "added": sorted(new_variants - old_variants),
             "error": None,
         }
 
@@ -476,6 +420,3 @@ def download_pango_summary(local_path: str | Path) -> dict:
             "added": [],
             "error": str(exc),
         }
-
-
-

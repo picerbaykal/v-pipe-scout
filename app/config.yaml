@@ -10,5 +10,5 @@ pango:
   #   "cornelius" — frozen June 2025, 4976 lineages (default, stable)
   #   "freyja"    — daily updated via UShER/NCBI, 5975 lineages (more current)
   #   "custom"    — use a custom file at custom_path
-  source: "custom"
+  source: "cornelius"
   custom_path: "/app_shared/data/pango_summary.json"
