@@ -1335,13 +1335,10 @@ def app():
 
             # ── Investigate a variant (on-demand explorer) ─────────────────────
             st.markdown("---")
-            _expl_loc = _selected.replace("📍 ", "") if _selected else None
-            _expl_cooc = (st.session_state.get("acooc_cooc_results", {})
-                          .get(_expl_loc) if _expl_loc else None)
             render_variant_explorer(
                 pango_loader=cached_get_pango_loader(),
                 panel=all_selected_variants,
-                cooc_result=_expl_cooc,
+                disabled=_outstanding,  # avoid rerun races during a scan
             )
 
             # ── Download report (triggered by button in progress header) ───────
