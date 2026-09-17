@@ -526,6 +526,7 @@ def app():
                 logger.info(f"Submitted task {cooc_task.id} for {loc}")
 
             st.session_state["acooc_location_tasks"] = location_tasks
+            st.session_state["acooc_ran_panel"] = sorted(all_selected_variants)
             st.session_state["location_results"] = {}
             st.session_state["acooc_cooc_tasks"] = cooc_tasks
             st.session_state["acooc_cooc_results"] = {}
@@ -547,6 +548,11 @@ def app():
         if not location_tasks:
             st.info("Complete steps 1–5 on the left to see results here.")
         else:
+            # panel-changed warning: current selection differs from what was run
+            _ran = st.session_state.get("acooc_ran_panel")
+            if _ran is not None and sorted(all_selected_variants) != _ran:
+                st.warning("⚠ Panel changed since the last run — re-run the analysis "
+                           "to update the results below.")
             # collect completed results — track if anything new arrives this cycle
             _new_collected = False
 
@@ -703,7 +709,6 @@ def app():
                 )
 
             _agg_bar("Deconvolution", _n_deconv, "#185FA5")
-            _agg_bar("Completeness", _n_cooc, "#3B6D11")
             _agg_bar("Scanner", _n_scan, "#EF9F27")
 
             # per-city checklist
@@ -731,615 +736,650 @@ def app():
 
             st.markdown("<hr style='margin:10px 0 8px;opacity:.15;'>", unsafe_allow_html=True)
 
-            # ── Tab strip ────────────────────────────────────────────────────
-            _city_options = [f"📍 {loc}" for loc in location_names]
-            if ("acooc_selected_city" not in st.session_state or
-                    st.session_state.get("acooc_selected_city") not in _city_options):
-                st.session_state["acooc_selected_city"] = _city_options[0] if _city_options else ""
+            # ── Section tabs: Per-city | Scanner | Investigate ───────────────
+            _sec_pc, _sec_sc, _sec_inv = st.tabs([
+                "Deconvolution results", "Scanner", "Investigate a variant"])
 
-            # Tab strip using actual buttons (guaranteed clickable, no grey-out)
-            _tab_cols = st.columns(len(location_names))
-            for _ti, _loc in enumerate(location_names):
-                _p2, _nm2, _sd2, _sr2, _dd2, _cd2, _dr2, _cr2 = _city_status(_loc)
-                _dc0 = _dot_color(_dd2, _dr2)  # deconvolution
-                _dc1 = _dot_color(_cd2, _cr2)  # completeness
-                _dc2 = _dot_color(_sd2, _sr2)  # scanner
-                _is_on = st.session_state.get("acooc_selected_city","") == f"📍 {_loc}"
-                _sn = _loc.split("(")[0].strip()
-                _pct_t = _p2 if _p2 is not None else None
-                _tab_label = f"{_sn} · {_pct_t}%" if _pct_t is not None else _sn
-                with _tab_cols[_ti]:
-                    if st.button(
-                        _tab_label,
-                        key=f"acooc_tab_{_loc}",
-                        use_container_width=True,
-                        type="primary" if _is_on else "secondary",
-                    ):
-                        st.session_state["acooc_selected_city"] = f"📍 {_loc}"
+            with _sec_pc:
+              # ── Tab strip ────────────────────────────────────────────────────
+              _city_options = [f"📍 {loc}" for loc in location_names]
+              if ("acooc_selected_city" not in st.session_state or
+                      st.session_state.get("acooc_selected_city") not in _city_options):
+                  st.session_state["acooc_selected_city"] = _city_options[0] if _city_options else ""
 
-            _selected = st.session_state.get("acooc_selected_city", _city_options[0] if _city_options else "")
-            st.markdown("<hr style='margin:6px 0 10px;opacity:.15;'>", unsafe_allow_html=True)
+              # Tab strip using actual buttons (guaranteed clickable, no grey-out)
+              _tab_cols = st.columns(len(location_names))
+              for _ti, _loc in enumerate(location_names):
+                  _p2, _nm2, _sd2, _sr2, _dd2, _cd2, _dr2, _cr2 = _city_status(_loc)
+                  _dc0 = _dot_color(_dd2, _dr2)  # deconvolution
+                  _dc1 = _dot_color(_cd2, _cr2)  # completeness
+                  _dc2 = _dot_color(_sd2, _sr2)  # scanner
+                  _is_on = st.session_state.get("acooc_selected_city","") == f"📍 {_loc}"
+                  _sn = _loc.split("(")[0].strip()
+                  _pct_t = _p2 if _p2 is not None else None
+                  _tab_label = f"{_sn} · {_pct_t}%" if _pct_t is not None else _sn
+                  with _tab_cols[_ti]:
+                      if st.button(
+                          _tab_label,
+                          key=f"acooc_tab_{_loc}",
+                          use_container_width=True,
+                          type="primary" if _is_on else "secondary",
+                      ):
+                          st.session_state["acooc_selected_city"] = f"📍 {_loc}"
 
-            def _city_tab_content(location, task_id):
-                """Shared content for both active and idle city tab fragments."""
-                _cooc_tasks_map = st.session_state.get("acooc_cooc_tasks", {})
-                _cooc_results = st.session_state.get("acooc_cooc_results", {})
-                _scanner_results = st.session_state.get("acooc_scanner_results", {})
-                _scanner_panels = st.session_state.get("acooc_scanner_panels", {})
-                _added_for = st.session_state.get("acooc_scanner_added_for", {})
-                _scanner_tasks_map = st.session_state.get("acooc_scanner_tasks", {})
+              _selected = st.session_state.get("acooc_selected_city", _city_options[0] if _city_options else "")
+              st.markdown("<hr style='margin:6px 0 10px;opacity:.15;'>", unsafe_allow_html=True)
 
-                # ── deconvolution (primary output) ────────────────────────────
-                st.markdown("#### Variant deconvolution")
-                st.caption("Primary output — estimated variant proportions over time.")
-                if location in st.session_state.location_results:
-                    render_single_location_result(
-                        location, st.session_state.location_results[location]
-                    )
-                else:
-                    render_location_progress(
-                        location, task_id, celery_app, redis_client
-                    )
+              def _city_tab_content(location, task_id):
+                  """Shared content for both active and idle city tab fragments."""
+                  _cooc_tasks_map = st.session_state.get("acooc_cooc_tasks", {})
+                  _cooc_results = st.session_state.get("acooc_cooc_results", {})
+                  _scanner_results = st.session_state.get("acooc_scanner_results", {})
+                  _scanner_panels = st.session_state.get("acooc_scanner_panels", {})
+                  _added_for = st.session_state.get("acooc_scanner_added_for", {})
+                  _scanner_tasks_map = st.session_state.get("acooc_scanner_tasks", {})
 
-                # ── co-occurrence check per deconvolution variant ─────────────
-                # Annotate each deconvolution result with whether co-occurrence
-                # corroborates it (confirmed / oscillating / can't-confirm).
-                if location in st.session_state.location_results:
-                    _dec = st.session_state.location_results[location]
-                    # deconv result is wrapped by location name:
-                    # {loc: {variant: {timeseriesSummary...}}}. Unwrap to the
-                    # inner variant dict. Handle both wrapped and flat shapes.
-                    if isinstance(_dec, dict) and location in _dec and isinstance(_dec[location], dict):
-                        _dec = _dec[location]
-                    # Corroboration is about PANEL variants and depends only on
-                    # deconvolution + the co-occurrence completeness pipeline
-                    # (panel_confirmations) — NOT the scanner (which finds
-                    # non-panel variants for the separate discovery section).
-                    _found_nodes = set()
-                    _cooc_res = _cooc_results.get(location)
-                    if _cooc_res is None and location in _cooc_tasks_map:
-                        _t = celery_app.AsyncResult(_cooc_tasks_map[location])
-                        if _t.ready():
-                            try:
-                                _cooc_res = _t.get()
-                                _cooc_results[location] = _cooc_res
-                                st.session_state["acooc_cooc_results"] = _cooc_results
-                            except Exception:
-                                _cooc_res = None
-                    # panel variant confirmed if its discriminating haplotype was
-                    # observed co-occurring (panel_confirmations from cooc pipeline)
-                    _panel_conf = (_cooc_res or {}).get("panel_confirmations", {}) or {}
-                    _MIN_CONFIRM_READS = 100
-                    for _pv, _reads in _panel_conf.items():
-                        if _reads and _reads >= _MIN_CONFIRM_READS:
-                            _found_nodes.add(_pv)
-                    # only render once the cooc completeness result is available,
-                    # so verdicts don't flip as the scanner streams in
-                    _cooc_ready = _cooc_res is not None
-                    if _cooc_ready and all_selected_variants:
-                        try:
-                            from process.variant_annotation import (
-                                VariantIndex, oscillating_pairs, annotate_variant)
-                            _sigs = st.session_state.get("acooc_all_sigs_cache")
-                            if not _sigs:
-                                _pl0 = cached_get_pango_loader()
-                                _sigs = {lin: _pl0.get_signature(lin)
-                                         for lin in _pl0.raw_data}
-                                st.session_state["acooc_all_sigs_cache"] = _sigs
-                            if _sigs:
-                                _pl = cached_get_pango_loader()
-                                _pmap = {l: _pl.get_raw_data().get(l, {}).get("parent", "")
-                                         for l in _sigs}
-                                _idx = VariantIndex(_sigs, _pmap)
-                                _osc = oscillating_pairs(all_selected_variants, _sigs)
-                                _dec_vars = [v for v in _dec.keys()
-                                             if v != "undetermined" and v in _sigs]
-                                _rows = []
-                                for _v in _dec_vars:
-                                    _status, _reason = annotate_variant(
-                                        _v, _idx, _found_nodes, _osc)
-                                    # mean abundance for this variant
-                                    _ts = _dec.get(_v, {}).get("timeseriesSummary", [])
-                                    _ab = ([e.get("proportion", 0) for e in _ts]
-                                           if _ts else [])
-                                    _abmean = (sum(_ab) / len(_ab)) if _ab else 0.0
-                                    _rows.append((_v, _status, _reason, _abmean))
-                                if _rows:
-                                    # confirmed first, then oscillating, then blind
-                                    _order = {"confirmed": 0, "oscillating": 1,
-                                              "cant_confirm": 2}
-                                    _rows.sort(key=lambda r: (_order.get(r[1], 3),
-                                                              -r[3]))
-                                    _meta = {
-                                        "confirmed":   ("#0f6e56", "#e6f4ef", "✓ confirmed"),
-                                        "oscillating": ("#ba7517", "#fdf4e6", "⚠ oscillating"),
-                                        "cant_confirm":("#6b7280", "#f3f4f6", "· can't confirm"),
-                                    }
-                                    st.markdown(
-                                        "<div style='font-weight:600;font-size:13px;"
-                                        "margin:6px 0 4px;'>Co-occurrence check</div>",
-                                        unsafe_allow_html=True)
-                                    _html = ("<div style='border:0.5px solid #e5e7eb;"
-                                             "border-radius:8px;overflow:hidden;'>")
-                                    for _i, (_v, _s, _r, _ab) in enumerate(_rows):
-                                        _fg, _bg, _lbl = _meta.get(
-                                            _s, ("#6b7280", "#f3f4f6", _s))
-                                        _sep = ("border-top:0.5px solid #f0f0f0;"
-                                                if _i else "")
-                                        _html += (
-                                            f"<div style='display:flex;align-items:center;"
-                                            f"gap:10px;padding:7px 12px;{_sep}'>"
-                                            f"<span style='font-weight:600;font-size:13px;"
-                                            f"min-width:78px;'>{_v}</span>"
-                                            f"<span style='color:#6b7280;font-size:12px;"
-                                            f"min-width:42px;'>{_ab*100:.0f}%</span>"
-                                            f"<span style='background:{_bg};color:{_fg};"
-                                            f"font-size:11px;font-weight:600;padding:1px 8px;"
-                                            f"border-radius:10px;white-space:nowrap;'>{_lbl}</span>"
-                                            f"<span style='color:#9ca3af;font-size:11px;'>"
-                                            f"{_r}</span></div>")
-                                    _html += "</div>"
-                                    st.markdown(_html, unsafe_allow_html=True)
-                        except Exception as _e:
-                            st.caption(f"(co-occurrence check unavailable: {_e})")
+                  # ── deconvolution (primary output) ────────────────────────────
+                  st.markdown("#### Variant deconvolution")
+                  st.caption("Primary output — estimated variant proportions over time.")
+                  if location in st.session_state.location_results:
+                      render_single_location_result(
+                          location, st.session_state.location_results[location]
+                      )
+                  else:
+                      render_location_progress(
+                          location, task_id, celery_app, redis_client
+                      )
 
-                st.markdown("---")
+                  # ── co-occurrence check per deconvolution variant ─────────────
+                  # Annotate each deconvolution result with whether co-occurrence
+                  # corroborates it (confirmed / oscillating / can't-confirm).
+                  if location in st.session_state.location_results:
+                      _dec = st.session_state.location_results[location]
+                      # deconv result is wrapped by location name:
+                      # {loc: {variant: {timeseriesSummary...}}}. Unwrap to the
+                      # inner variant dict. Handle both wrapped and flat shapes.
+                      if isinstance(_dec, dict) and location in _dec and isinstance(_dec[location], dict):
+                          _dec = _dec[location]
+                      # Corroboration is about PANEL variants and depends only on
+                      # deconvolution + the co-occurrence completeness pipeline
+                      # (panel_confirmations) — NOT the scanner (which finds
+                      # non-panel variants for the separate discovery section).
+                      _found_nodes = set()
+                      _cooc_res = _cooc_results.get(location)
+                      if _cooc_res is None and location in _cooc_tasks_map:
+                          _t = celery_app.AsyncResult(_cooc_tasks_map[location])
+                          if _t.ready():
+                              try:
+                                  _cooc_res = _t.get()
+                                  _cooc_results[location] = _cooc_res
+                                  st.session_state["acooc_cooc_results"] = _cooc_results
+                              except Exception:
+                                  _cooc_res = None
+                      # panel variant confirmed if its discriminating haplotype was
+                      # observed co-occurring (panel_confirmations from cooc pipeline)
+                      _panel_conf = (_cooc_res or {}).get("panel_confirmations", {}) or {}
+                      _MIN_CONFIRM_READS = 100
+                      for _pv, _reads in _panel_conf.items():
+                          if _reads and _reads >= _MIN_CONFIRM_READS:
+                              _found_nodes.add(_pv)
+                      # only render once the cooc completeness result is available,
+                      # so verdicts don't flip as the scanner streams in
+                      _cooc_ready = _cooc_res is not None
+                      # header always shows so the section doesn't pop in late
+                      st.markdown(
+                          "<div style='font-weight:600;font-size:13px;"
+                          "margin:6px 0 2px;'>Co-occurrence check</div>",
+                          unsafe_allow_html=True)
+                      st.caption(
+                          "Does each panel variant's deconvolution abundance have "
+                          "distinctive mutations co-occurring on reads to back it up? "
+                          "Confirmed = yes; oscillating = swaps with a near-identical "
+                          "relative (trust the sum); can't confirm = no distinctive "
+                          "haplotype (blind spot).")
+                      if not _cooc_ready:
+                          st.info("⏳ Waiting for the co-occurrence scan to finish…")
+                      if _cooc_ready and all_selected_variants:
+                          try:
+                              from process.variant_annotation import (
+                                  VariantIndex, oscillating_pairs, annotate_variant)
+                              _sigs = st.session_state.get("acooc_all_sigs_cache")
+                              if not _sigs:
+                                  _pl0 = cached_get_pango_loader()
+                                  _sigs = {lin: _pl0.get_signature(lin)
+                                           for lin in _pl0.raw_data}
+                                  st.session_state["acooc_all_sigs_cache"] = _sigs
+                              if _sigs:
+                                  _pl = cached_get_pango_loader()
+                                  _pmap = {l: _pl.get_raw_data().get(l, {}).get("parent", "")
+                                           for l in _sigs}
+                                  _idx = VariantIndex(_sigs, _pmap)
+                                  _osc = oscillating_pairs(all_selected_variants, _sigs)
+                                  _dec_vars = [v for v in _dec.keys()
+                                               if v != "undetermined" and v in _sigs]
+                                  _rows = []
+                                  for _v in _dec_vars:
+                                      _status, _reason = annotate_variant(
+                                          _v, _idx, _found_nodes, _osc)
+                                      # mean abundance for this variant
+                                      _ts = _dec.get(_v, {}).get("timeseriesSummary", [])
+                                      _ab = ([e.get("proportion", 0) for e in _ts]
+                                             if _ts else [])
+                                      _abmean = (sum(_ab) / len(_ab)) if _ab else 0.0
+                                      _rows.append((_v, _status, _reason, _abmean))
+                                  if _rows:
+                                      # confirmed first, then oscillating, then blind
+                                      _order = {"confirmed": 0, "oscillating": 1,
+                                                "cant_confirm": 2}
+                                      _rows.sort(key=lambda r: (_order.get(r[1], 3),
+                                                                -r[3]))
+                                      _meta = {
+                                          "confirmed":   ("#0f6e56", "#e6f4ef", "✓ confirmed"),
+                                          "oscillating": ("#ba7517", "#fdf4e6", "⚠ oscillating"),
+                                          "cant_confirm":("#6b7280", "#f3f4f6", "· can't confirm"),
+                                      }
+                                      _html = ("<div style='border:0.5px solid #e5e7eb;"
+                                               "border-radius:8px;overflow:hidden;'>")
+                                      for _i, (_v, _s, _r, _ab) in enumerate(_rows):
+                                          _fg, _bg, _lbl = _meta.get(
+                                              _s, ("#6b7280", "#f3f4f6", _s))
+                                          _sep = ("border-top:0.5px solid #f0f0f0;"
+                                                  if _i else "")
+                                          _html += (
+                                              f"<div style='display:flex;align-items:center;"
+                                              f"gap:10px;padding:7px 12px;{_sep}'>"
+                                              f"<span style='font-weight:600;font-size:13px;"
+                                              f"min-width:78px;'>{_v}</span>"
+                                              f"<span style='color:#6b7280;font-size:12px;"
+                                              f"min-width:42px;'>{_ab*100:.0f}%</span>"
+                                              f"<span style='background:{_bg};color:{_fg};"
+                                              f"font-size:11px;font-weight:600;padding:1px 8px;"
+                                              f"border-radius:10px;white-space:nowrap;'>{_lbl}</span>"
+                                              f"<span style='color:#9ca3af;font-size:11px;'>"
+                                              f"{_r}</span></div>")
+                                      _html += "</div>"
+                                      st.markdown(_html, unsafe_allow_html=True)
+                          except Exception as _e:
+                              st.caption(f"(co-occurrence check unavailable: {_e})")
 
-                # ── completeness (guiding indicator) ──────────────────────────
-                st.markdown("#### Panel completeness")
-                st.caption("Guiding indicator — how much of the co-occurrence signal your panel explains, and what the rest is.")
-                # Render only when BOTH cooc AND scanner results for this location
-                # are ready, so the composition appears in its FINAL form. Rendering
-                # with an empty scanner result first showed a green-only curve that
-                # then morphed (added addable/novel/noise) — confusing on first load.
-                _comp_cooc = _cooc_results.get(location)
-                _comp_scan = _scanner_results.get(location)
-                if _comp_cooc is not None and _comp_scan is not None:
-                    _render_composition(_comp_cooc, _comp_scan)
-                elif location in _cooc_tasks_map or location in st.session_state.get("acooc_scanner_tasks", {}):
-                    st.info("Computing panel completeness… (finalises when the scan completes)")
-                else:
-                    st.caption("Runs alongside deconvolution.")
+                  # ── Jaccard (signature similarity) ────────────────────────────
+                  if len(all_selected_variants) >= 2:
+                      st.markdown("---")
+                      st.markdown("<div style='font-weight:600;font-size:13px;'>"
+                                  "🧬 Signature similarity (Jaccard)</div>",
+                                  unsafe_allow_html=True)
+                      st.caption("How much each pair of panel variants shares mutations "
+                                 "— high similarity means deconvolution may struggle to "
+                                 "tell them apart.")
+                      with st.expander("Show similarity heatmap", expanded=False):
+                          render_jaccard_heatmap(
+                              variants=all_selected_variants,
+                              pango_loader=cached_get_pango_loader(),
+                          )
 
-                # ── Jaccard collapsed ─────────────────────────────────────────
-                if len(all_selected_variants) >= 2:
-                    with st.expander("Signature similarity (Jaccard)", expanded=False):
-                        render_jaccard_heatmap(
-                            variants=all_selected_variants,
-                            pango_loader=cached_get_pango_loader(),
-                        )
+                  # scanner results shown in a combined summary below all city tabs
+                  # (not per-tab) — see the "Scanner findings" section after the tabs
 
-                # scanner results shown in a combined summary below all city tabs
-                # (not per-tab) — see the "Scanner findings" section after the tabs
-
-            _active_loc = _selected.replace("📍 ", "")
-            if _active_loc in location_tasks:
-                _city_tab_content(_active_loc, location_tasks[_active_loc])
-
-            # ── Scanner (one section, aggregated across all cities) ────────────
-            _scan_res_all = st.session_state.get("acooc_scanner_results", {})
-            # Show progress only while a scanner task is actively running. Once
-            # no task is running, show whatever results were collected (avoids
-            # hiding findings forever on a location-matching mismatch).
-            # scanner is "running" if any location with a completeness result
-            # doesn't yet have a collected scanner result (same reliable signal
-            # the autorefresh uses — the task-map .ready() check was unreliable).
-            # Show scanner findings only when NOTHING is still running (_outstanding
-            # is the same signal that drives the autorefresh — it's True while any
-            # deconv/completeness/scanner task is uncollected). The previous
-            # _scan_running check relied on cooc results being present, but they
-            # aren't collected yet at this point (cr_keys empty), so it never
-            # triggered and partial findings leaked through.
-            _scan_running = _outstanding
-            if _scan_running:
-                st.markdown("---")
-                st.markdown("### Scanner")
-                st.info("🔍 Scanning for variants not in your panel… "
-                        "findings and Add buttons appear when the scan completes.")
-                _scan_res_all = {}  # suppress partial rendering below
-
-            if _scan_res_all:
-                from collections import defaultdict as _ddict
-                st.markdown("---")
-                st.markdown("### Scanner")
-                st.caption(
-                    "Diagnostic across all cities — expand a category to see findings "
-                    "and add variants. Adding applies to the whole panel; re-run to apply."
-                )
-
-                # signal threshold slider — controls which co-occurrence regions
-                # show their full heatmap vs collapse to a dimmed line. Nothing is
-                # removed; the slider only sets the emphasis. Regions with fewer
-                # co-occurrence reads than this dim/collapse.
-                _sig_threshold = st.slider(
-                    "Signal threshold (min co-occurrence reads per region)",
-                    min_value=0, max_value=50000, value=5000, step=1000,
-                    key="acooc_sig_threshold",
-                    help="Regions above the threshold show their full heatmap; "
-                         "below it they collapse to a dimmed line (still expandable). "
-                         "Lower it to inspect weak signals; raise it to focus on strong ones.",
-                )
-
-                # coverage caption (instant, no scan needed): panel ∩ OT vs all OT
-                _ot_set = set(cached_get_variant_names())
-                _n_panel_ot = sum(1 for _v in all_selected_variants if _v in _ot_set)
-                st.markdown(
-                    f"<div style='border:0.5px solid #BFD9F2;background:#EFF6FF;border-radius:8px;"
-                    f"padding:8px 12px;margin:2px 0 10px;font-size:12px;color:#1E3A5F;'>"
-                    f"<b>Panel coverage:</b> {_n_panel_ot} of {len(_ot_set)} officially tracked "
-                    f"variants selected. The scanner ranks the missing ones by how much "
-                    f"co-occurrence signal they actually have in your samples.</div>",
-                    unsafe_allow_html=True,
-                )
-
-                def _chip_html(cities):
-                    return "".join(
-                        f"<span style='display:inline-block;font-size:10px;padding:1px 6px;"
-                        f"border-radius:4px;background:#F1EFE8;color:#5F5E5A;margin:1px 2px 1px 0;'>"
-                        f"{c.split('(')[0].strip()}</span>"
-                        for c in cities
-                    )
-
-                # ══ Option C scanner rendering ══════════════════════════════
-                # signatures for heatmap classification (lazy, cached in session)
-                _all_sigs = st.session_state.get("acooc_all_sigs_cache")
-                if _all_sigs is None:
-                    try:
-                        from api.pango_loader import PangoLoader, get_pango_summary_path
-                        _pl = PangoLoader(get_pango_summary_path())
-                        _all_sigs = {lin: _pl.get_signature(lin) for lin in _pl.raw_data}
-                        st.session_state["acooc_all_sigs_cache"] = _all_sigs
-                    except Exception:
-                        _all_sigs = {}
-                # Aggregate the new clade-based scanner output across cities.
-                # Categories: not-in-panel clades, sublineage clades,
-                # unresolved, novel. Honest clade labels, member counts.
-                def _human_reads(_n):
-                    if _n >= 1_000_000:
-                        return f"{_n/1_000_000:.1f}M".replace(".0M", "M")
-                    if _n >= 1_000:
-                        return f"{_n/1_000:.0f}K"
-                    return str(_n)
-
-                # collect clade findings across cities, keyed by node
-                _agg_new = {}      # node -> {reads, cities, member_count, members, designation, muts}
-                _agg_sub = {}
-                _agg_unres = {}    # frozenset(fp) -> {reads, cand, anc}
-                _agg_mnh = {}      # node -> matched-but-no-haplotype
-                _novel_total = 0
-                _novel_pats = 0
-
-                for _loc, _res in _scan_res_all.items():
-                    for _c in _res.get("resolved_clade", []):
-                        _bucket = _agg_new if _c.get("relationship") == "new_lineage" else _agg_sub
-                        _node = _c["node"]
-                        _slot = _bucket.setdefault(_node, {
-                            "node": _node, "reads": 0, "signal_reads": 0,
-                            "cities": [],
-                            "member_count": _c.get("member_count", 1),
-                            "members": _c.get("members", []),
-                            "designation": _c.get("designation", ""),
-                            "panel_ancestor": _c.get("panel_ancestor", ""),
-                            "muts": _c.get("observed_mutations", []),
-                            "member_blocks": _c.get("member_blocks", []),
-                            "shared_mutations": _c.get("shared_mutations", []),
-                            "associated": _c.get("associated_members", []),
-                            "confidence": _c.get("confidence", "weak"),
-                            "verdict": _c.get("verdict", ""),
-                            "trend": _c.get("trend", "flat"),
-                            "trend_series": list(_c.get("trend_series", [])),
-                            "peak_date": _c.get("peak_date", ""),
-                            "trend_by_city": {},
-                        })
-                        _slot["reads"] += int(_c.get("total_reads", 0))
-                        # signal_reads is the strongest discriminating region's
-                        # reads; across cities take the MAX (summing would
-                        # double-count the same discriminating reads and can
-                        # exceed the total). Capped at total as a safety net.
-                        _slot["signal_reads"] = max(
-                            _slot.get("signal_reads", 0),
-                            int(_c.get("signal_reads", 0)))
-                        _slot["cities"].append(_loc)
-                        # keep each city's own series so trend can be shown
-                        # per-city or aggregated (summed element-wise)
-                        _slot["trend_by_city"][_loc] = list(_c.get("trend_series", []))
-                    for _u in _res.get("unresolved", []):
-                        _k = tuple(_u["fingerprint"])
-                        _s = _agg_unres.setdefault(_k, {
-                            "fp": _u["fingerprint"], "reads": 0,
-                            "cand": _u.get("candidate_count", 0),
-                            "anc": _u.get("common_ancestor", ""),
-                        })
-                        _s["reads"] += int(_u.get("total_reads", 0))
-                    for _mnh in _res.get("matched_no_haplotype", []):
-                        _k = _mnh["node"]
-                        _s = _agg_mnh.setdefault(_k, {
-                            "node": _mnh["node"], "reads": 0,
-                            "member_count": _mnh.get("member_count", 1),
-                            "muts": _mnh.get("observed_mutations", []),
-                        })
-                        _s["reads"] += int(_mnh.get("total_reads", 0))
-                    _nv = _res.get("novel", {})
-                    _novel_total += int(_nv.get("total_reads", 0))
-                    _novel_pats += int(_nv.get("pattern_count", 0))
-
-                def _clade_label(_slot):
-                    return f"{_slot['node']} clade" if _slot["member_count"] > 1 else _slot["node"]
-
-                def _render_finding(_slot, _accent, _bg, _border, _is_sub=False):
-                    _label = _clade_label(_slot)
-                    _sig_reads = _slot.get("signal_reads", 0)
-                    _tot_reads = _slot["reads"]
-                    # headline = discriminating co-occurrence reads (the real
-                    # signal); the broad fingerprint total is shown as context.
-                    _reads = _sig_reads if _sig_reads > 0 else _tot_reads
-                    _mc = _slot["member_count"]
-                    _desig = _slot["designation"]
-                    _members = _slot["members"]
-                    _member_txt = ""
-                    if _mc > 1:
-                        _samp = ", ".join(_members[:4])
-                        _more = f" +{_mc-4}" if _mc > 4 else ""
-                        _member_txt = f" · {_mc} members: {_samp}{_more}"
-                    _desig_txt = f" · designated {_desig}" if _desig else ""
-                    # confidence badge + one-line verdict for quick reading
-                    _conf = _slot.get("confidence", "weak")
-                    _verdict = _slot.get("verdict", "")
-                    _conf_style = {
-                        "strong": ("#0f6e56", "#e6f4ef", "✓ strong"),
-                        "medium": ("#ba7517", "#fdf6e9", "~ medium"),
-                        "weak":   ("#6b7280", "#f3f4f6", "· weak"),
-                    }.get(_conf, ("#6b7280", "#f3f4f6", "· weak"))
-                    _badge = (
-                        f"<span style='background:{_conf_style[1]};color:{_conf_style[0]};"
-                        f"font-size:0.72rem;font-weight:600;padding:1px 8px;border-radius:10px;"
-                        f"margin-left:8px;'>{_conf_style[2]}</span>"
-                    )
-                    # trend chip + inline sparkline — aggregate across cities by
-                    # summing each city's series element-wise (aligned by bucket),
-                    # then recompute the direction from the aggregate. This makes
-                    # the trend a true multi-city aggregate, not just one city's.
-                    _by_city = _slot.get("trend_by_city", {})
-                    if len(_by_city) > 1:
-                        _maxlen = max((len(v) for v in _by_city.values()), default=0)
-                        _series = [0] * _maxlen
-                        for _cs in _by_city.values():
-                            # align to the right (most recent) end
-                            _off = _maxlen - len(_cs)
-                            for _i, _v in enumerate(_cs):
-                                _series[_off + _i] += _v
-                    else:
-                        _series = _slot.get("trend_series", [])
-                    # recompute direction from the (aggregated) series
-                    _trend = "flat"
-                    if len(_series) >= 3:
-                        _third = max(1, len(_series) // 3)
-                        _early = sum(_series[:_third]) / _third
-                        _late = sum(_series[-_third:]) / _third
-                        if _late > _early * 1.5:
-                            _trend = "rising"
-                        elif _late < _early * 0.5:
-                            _trend = "declining"
-                        else:
-                            _trend = "stable"
-                    _tr_map = {
-                        "rising":    ("↑ rising", "#0f6e56"),
-                        "declining": ("↓ declining", "#ba7517"),
-                        "stable":    ("→ stable", "#6b7280"),
-                        "flat":      ("", "#6b7280"),
-                    }
-                    _tr_txt, _tr_col = _tr_map.get(_trend, ("", "#6b7280"))
-                    _trend_chip = ""
-                    if _tr_txt:
-                        _multi = " (all cities)" if len(_by_city) > 1 else ""
-                        _trend_chip = (
-                            f"<span style='color:{_tr_col};font-size:0.72rem;"
-                            f"font-weight:600;margin-left:8px;'>{_tr_txt}{_multi}</span>"
-                        )
-                    _spark = ""
-                    if len(_series) >= 2:
-                        _mx = max(_series) or 1
-                        _w, _h = 80, 18
-                        _pts = " ".join(
-                            f"{(i/(len(_series)-1))*_w:.1f},{_h-(v/_mx)*_h:.1f}"
-                            for i, v in enumerate(_series))
-                        _spark = (
-                            f"<svg width='{_w}' height='{_h}' style='vertical-align:middle;"
-                            f"margin-left:8px;'><polyline points='{_pts}' fill='none' "
-                            f"stroke='{_tr_col}' stroke-width='1.5'/></svg>")
-                    _peak = _slot.get("peak_date", "")
-                    _peak_txt = (f" · seen mainly {_peak}" if _peak else "")
-                    st.markdown(
-                        f"<div style='background:{_bg};border:1px solid {_border};"
-                        f"border-radius:6px;padding:8px 12px;margin:4px 0;'>"
-                        f"<span style='font-weight:600;color:{_accent};'>{_label}</span>"
-                        f"{_badge}{_trend_chip}{_spark}"
-                        f"<span style='color:#6b7280;font-size:0.82rem;margin-left:8px;'>"
-                        f"{_reads:,} co-occurrence reads{_desig_txt}{_peak_txt}</span>"
-                        f"<div style='color:#374151;font-size:0.76rem;margin-top:3px;'>"
-                        f"{_verdict}</div>"
-                        f"<div style='color:#9ca3af;font-size:0.72rem;margin-top:2px;'>"
-                        f"{_chip_html(_slot['cities'])}{_member_txt}</div></div>",
-                        unsafe_allow_html=True,
-                    )
-                    _assoc = _slot.get("associated", [])
-                    if _assoc:
-                        st.caption(
-                            "⚠ includes recombinants sharing these mutations: "
-                            + ", ".join(_assoc[:6])
-                            + " — check the heatmap to see which is driving the signal."
-                        )
-                    if _is_sub:
-                        _anc = _slot.get("panel_ancestor", "")
-                        st.caption(f"↳ sublineage of {_anc} — signal partly counted within its proportion; adding refines it.")
-                    _addkey = f"acooc_addc_{_slot['node']}"
-                    if _scan_running:
-                        st.caption(f"⏳ finishing scan… Add enables shortly")
-                    else:
-                        if st.button(f"+ Add {_slot['node']}", key=_addkey):
-                            st.session_state[f"acooc_add_variant_pending_{_slot['node']}"] = _slot["node"]
-                            st.rerun()  # process immediately (no autorefresh running once scan done)
-                    # drill-down heatmap — let the user pick which city when the
-                    # finding spans several (the finding's reads are summed across
-                    # cities, but a heatmap shows one city's signal at a time).
-                    if _slot["muts"] and wiseLoculus and _slot["cities"]:
-                        _cities = _slot["cities"]
-                        with st.expander(f"Signal over time — {_label}", expanded=False):
-                            if len(_cities) > 1:
-                                _hloc = st.selectbox(
-                                    "City",
-                                    _cities,
-                                    key=f"acooc_hmcity_{_slot['node']}",
-                                    help="This finding was seen in several cities; "
-                                         "pick which city's signal to display.",
-                                )
-                            else:
-                                _hloc = _cities[0]
-                            st.caption(f"Showing {_hloc}")
-                            from components.scanner_heatmap import render_clade_heatmap
-                            render_clade_heatmap(
-                                clade_node=_slot["node"],
-                                shared_mutations=_slot.get("shared_mutations", []),
-                                member_blocks=_slot.get("member_blocks", []),
-                                client=wiseLoculus,
-                                location=_hloc,
-                                reads_threshold=st.session_state.get("acooc_sig_threshold", 5000),
-                                date_range=(start_date, end_date),
-                            )
-
-                # ---- Not in panel (addable) — merges new-lineage clades AND
-                #      sublineages of the panel. Both are "consider adding"; the
-                #      relationship (unrelated vs sublineage) is shown per-row.
-                _new_list = sorted(_agg_new.values(), key=lambda x: -x["reads"])
-                _sub_list = sorted(_agg_sub.values(), key=lambda x: -x["reads"])
-                _addable_n = len(_new_list) + len(_sub_list)
-                with st.expander(
-                    f"🔴 Not in your panel — {_addable_n} finding(s)",
-                    expanded=st.session_state.get("acooc_exp_missing", False),
-                ):
-                    if not _addable_n:
-                        st.caption("Nothing circulating that your panel doesn't cover.")
-                    else:
-                        st.caption(
-                            "Co-occurrence signal your panel doesn't explain, mapped "
-                            "to the tightest pango clade the mutations support. "
-                            "Consider adding these to the panel."
-                        )
-                        # unrelated new lineages first (bigger gaps), then sublineages
-                        for _slot in _new_list:
-                            _render_finding(_slot, "#dc2626", "#fef2f2", "#fecaca")
-                        for _slot in _sub_list:
-                            _render_finding(_slot, "#dc2626", "#fef2f2", "#fecaca",
-                                            _is_sub=True)
-
-                # ---- Matched a lineage but no discriminating co-occurrence ----
-                _mnh_list = sorted(_agg_mnh.values(), key=lambda x: -x["reads"])
-                if _mnh_list:
-                    _mnh_reads = sum(m["reads"] for m in _mnh_list)
-                    with st.expander(
-                        f"🟣 Matched but not co-occurrence-confirmed — "
-                        f"{len(_mnh_list)} lineage(s) · {_mnh_reads:,} reads",
-                        expanded=False,
-                    ):
-                        st.caption(
-                            "These lineages match some observed mutations, but their "
-                            "distinguishing mutations don't co-occur on reads — so "
-                            "co-occurrence can't confirm them (they may still be present; "
-                            "deconvolution is the tool to quantify them)."
-                        )
-                        for _m in _mnh_list[:15]:
-                            _lbl = f"{_m['node']} clade" if _m["member_count"] > 1 else _m["node"]
-                            _muts = ", ".join(_m["muts"][:5])
-                            st.markdown(
-                                f"<div style='background:#faf5ff;border:1px solid #e9d5ff;"
-                                f"border-radius:6px;padding:6px 10px;margin:3px 0;font-size:0.82rem;'>"
-                                f"<span style='font-weight:600;color:#7c3aed;'>{_lbl}</span>"
-                                f"<span style='color:#6b7280;margin-left:8px;'>"
-                                f"{_m['reads']:,} reads · matched: {_muts}</span></div>",
-                                unsafe_allow_html=True,
-                            )
-
-                # ---- Unresolved ----
-                _unres_list = sorted(_agg_unres.values(), key=lambda x: -x["reads"])
-                if _unres_list:
-                    _ur_reads = sum(u["reads"] for u in _unres_list)
-                    with st.expander(
-                        f"⚪ Unresolved — {len(_unres_list)} pattern(s) · {_ur_reads:,} reads",
-                        expanded=False,
-                    ):
-                        st.caption(
-                            "Co-occurring mutations match many lineages across "
-                            "unrelated clades — too broad to name."
-                        )
-                        for _u in _unres_list[:15]:
-                            _fp = ", ".join(_u["fp"][:5])
-                            _anc = f" · nearest ancestor {_u['anc']}" if _u["anc"] else ""
-                            st.markdown(
-                                f"<div style='background:#f8f9fa;border:1px solid #e5e7eb;"
-                                f"border-radius:6px;padding:6px 10px;margin:3px 0;font-size:0.82rem;'>"
-                                f"<span style='font-family:monospace;color:#374151;'>{_fp}</span>"
-                                f"<span style='color:#6b7280;margin-left:8px;'>"
-                                f"{_u['cand']} lineages · {_u['reads']:,} reads{_anc}</span></div>",
-                                unsafe_allow_html=True,
-                            )
-
-                # ---- Novel ----
-                with st.expander(
-                    f"🔵 Novel — no pango match ({_novel_total:,} reads)",
-                    expanded=False,
-                ):
-                    if _novel_total == 0:
-                        st.caption("No unexplained patterns without a pango match.")
-                    else:
-                        st.caption(
-                            f"{_novel_total:,} reads in {_novel_pats} pattern(s) match "
-                            "no known lineage. Could be novel, recombinant, or artifact. "
-                            "A rising pattern is the most worth investigating."
-                        )
-                        for _loc, _res in _scan_res_all.items():
-                            _pn = _res.get("novel", {}) or _res.get("possibly_new", {})
-                            for _pi, _pat in enumerate(_pn.get("top_patterns", [])[:5]):
-                                _pmuts = _pat.get("mutations", [])
-                                _muts = ", ".join(_pmuts)
-                                st.markdown(
-                                    f"<div style='background:#eff6ff;border:1px solid #bfdbfe;"
-                                    f"border-radius:6px;padding:6px 10px;margin:3px 0;font-size:0.8rem;'>"
-                                    f"<span style='color:#1d4ed8;font-family:monospace;'>{_muts}</span>"
-                                    f"<span style='color:#6b7280;margin-left:8px;'>"
-                                    f"{_pat.get('count',0):,} · {_loc.split('(')[0].strip()}</span></div>",
-                                    unsafe_allow_html=True,
-                                )
-                                # trend heatmap for this novel pattern — is it rising?
-                                if _pmuts and wiseLoculus and len(_pmuts) >= 2:
-                                    with st.expander(
-                                        f"Trend over time — {_loc.split('(')[0].strip()} — "
-                                        f"{_muts[:40]}",
-                                        expanded=False,
-                                    ):
-                                        from components.scanner_heatmap import render_clade_heatmap
-                                        render_clade_heatmap(
-                                            clade_node=f"novel_{_loc}_{_pi}",
-                                            shared_mutations=[],
-                                            member_blocks=[{
-                                                "member": "novel pattern",
-                                                "discriminating": _pmuts,
-                                                "member_count": 1,
-                                                "reads": _pat.get("count", 0),
-                                            }],
-                                            client=wiseLoculus,
-                                            location=_loc,
-                                            reads_threshold=0,
-                                            date_range=(start_date, end_date),
-                                        )
+              _active_loc = _selected.replace("📍 ", "")
+              if _active_loc in location_tasks:
+                  _city_tab_content(_active_loc, location_tasks[_active_loc])
 
 
-            # ── Investigate a variant (on-demand explorer) ─────────────────────
-            st.markdown("---")
-            render_variant_explorer(
-                pango_loader=cached_get_pango_loader(),
-                panel=all_selected_variants,
-                disabled=_outstanding,  # avoid rerun races during a scan
-            )
+            with _sec_sc:
+              # panel-changed warning: scanner findings reflect the panel that was
+              # run, so flag when the current selection differs.
+              _ran_sc = st.session_state.get("acooc_ran_panel")
+              if _ran_sc is not None and sorted(all_selected_variants) != _ran_sc:
+                  st.warning("⚠ Panel changed since these results were computed — "
+                             "the completeness and findings below reflect the "
+                             "previous panel. Re-run to update.")
+              # ── Panel completeness (at top of scanner — shows what each city's
+              #    signal is made of, before the findings that fill the gaps) ─────
+              _cr_all = st.session_state.get("acooc_cooc_results", {})
+              _sr_all = st.session_state.get("acooc_scanner_results", {})
+              _ready_locs = [l for l in location_names
+                             if _cr_all.get(l) is not None and _sr_all.get(l) is not None]
+              if _ready_locs:
+                  st.markdown("#### Panel completeness")
+                  st.caption("How much of each city's co-occurrence signal your panel "
+                             "explains (green), and what the rest is — the scanner "
+                             "findings below cover the addable part.")
+                  if len(_ready_locs) == 1:
+                      _render_composition(_cr_all[_ready_locs[0]], _sr_all[_ready_locs[0]])
+                  else:
+                      # all-cities grid (max 6): two per row
+                      for _i in range(0, len(_ready_locs), 2):
+                          _cols = st.columns(2)
+                          for _j, _lc in enumerate(_ready_locs[_i:_i+2]):
+                              with _cols[_j]:
+                                  st.markdown(f"<div style='font-size:12px;font-weight:600;"
+                                              f"'>{_lc}</div>", unsafe_allow_html=True)
+                                  _render_composition(_cr_all[_lc], _sr_all[_lc])
+                  st.markdown("---")
+
+              # ── Scanner (one section, aggregated across all cities) ────────────
+              _scan_res_all = st.session_state.get("acooc_scanner_results", {})
+              # Show progress only while a scanner task is actively running. Once
+              # no task is running, show whatever results were collected (avoids
+              # hiding findings forever on a location-matching mismatch).
+              # scanner is "running" if any location with a completeness result
+              # doesn't yet have a collected scanner result (same reliable signal
+              # the autorefresh uses — the task-map .ready() check was unreliable).
+              # Show scanner findings only when NOTHING is still running (_outstanding
+              # is the same signal that drives the autorefresh — it's True while any
+              # deconv/completeness/scanner task is uncollected). The previous
+              # _scan_running check relied on cooc results being present, but they
+              # aren't collected yet at this point (cr_keys empty), so it never
+              # triggered and partial findings leaked through.
+              _scan_running = _outstanding
+              st.markdown("---")
+              st.markdown("### Scanner")
+              st.caption(
+                  "Variants circulating that your panel doesn't cover — across all "
+                  "cities. Adding applies to the whole panel; re-run to apply.")
+              if _scan_running:
+                  st.info("🔍 Scanning for variants not in your panel… "
+                          "findings and Add buttons appear when the scan completes.")
+                  _scan_res_all = {}  # suppress partial rendering below
+
+              if _scan_res_all:
+                  from collections import defaultdict as _ddict
+                  # signal threshold slider — controls which co-occurrence regions
+                  # show their full heatmap vs collapse to a dimmed line. Nothing is
+                  # removed; the slider only sets the emphasis. Regions with fewer
+                  # co-occurrence reads than this dim/collapse.
+                  _sig_threshold = st.slider(
+                      "Signal threshold (min co-occurrence reads per region)",
+                      min_value=0, max_value=50000, value=5000, step=1000,
+                      key="acooc_sig_threshold",
+                      help="Regions above the threshold show their full heatmap; "
+                           "below it they collapse to a dimmed line (still expandable). "
+                           "Lower it to inspect weak signals; raise it to focus on strong ones.",
+                  )
+
+                  # coverage caption (instant, no scan needed): panel ∩ OT vs all OT
+                  _ot_set = set(cached_get_variant_names())
+                  _n_panel_ot = sum(1 for _v in all_selected_variants if _v in _ot_set)
+                  st.markdown(
+                      f"<div style='border:0.5px solid #BFD9F2;background:#EFF6FF;border-radius:8px;"
+                      f"padding:8px 12px;margin:2px 0 10px;font-size:12px;color:#1E3A5F;'>"
+                      f"<b>Panel coverage:</b> {_n_panel_ot} of {len(_ot_set)} officially tracked "
+                      f"variants selected. The scanner ranks the missing ones by how much "
+                      f"co-occurrence signal they actually have in your samples.</div>",
+                      unsafe_allow_html=True,
+                  )
+
+                  def _chip_html(cities):
+                      return "".join(
+                          f"<span style='display:inline-block;font-size:10px;padding:1px 6px;"
+                          f"border-radius:4px;background:#F1EFE8;color:#5F5E5A;margin:1px 2px 1px 0;'>"
+                          f"{c.split('(')[0].strip()}</span>"
+                          for c in cities
+                      )
+
+                  # ══ Option C scanner rendering ══════════════════════════════
+                  # signatures for heatmap classification (lazy, cached in session)
+                  _all_sigs = st.session_state.get("acooc_all_sigs_cache")
+                  if _all_sigs is None:
+                      try:
+                          from api.pango_loader import PangoLoader, get_pango_summary_path
+                          _pl = PangoLoader(get_pango_summary_path())
+                          _all_sigs = {lin: _pl.get_signature(lin) for lin in _pl.raw_data}
+                          st.session_state["acooc_all_sigs_cache"] = _all_sigs
+                      except Exception:
+                          _all_sigs = {}
+                  # Aggregate the new clade-based scanner output across cities.
+                  # Categories: not-in-panel clades, sublineage clades,
+                  # unresolved, novel. Honest clade labels, member counts.
+                  def _human_reads(_n):
+                      if _n >= 1_000_000:
+                          return f"{_n/1_000_000:.1f}M".replace(".0M", "M")
+                      if _n >= 1_000:
+                          return f"{_n/1_000:.0f}K"
+                      return str(_n)
+
+                  # collect clade findings across cities, keyed by node
+                  _agg_new = {}      # node -> {reads, cities, member_count, members, designation, muts}
+                  _agg_sub = {}
+                  _agg_unres = {}    # frozenset(fp) -> {reads, cand, anc}
+                  _agg_mnh = {}      # node -> matched-but-no-haplotype
+                  _novel_total = 0
+                  _novel_pats = 0
+
+                  for _loc, _res in _scan_res_all.items():
+                      for _c in _res.get("resolved_clade", []):
+                          _bucket = _agg_new if _c.get("relationship") == "new_lineage" else _agg_sub
+                          _node = _c["node"]
+                          _slot = _bucket.setdefault(_node, {
+                              "node": _node, "reads": 0, "signal_reads": 0,
+                              "cities": [],
+                              "member_count": _c.get("member_count", 1),
+                              "members": _c.get("members", []),
+                              "designation": _c.get("designation", ""),
+                              "panel_ancestor": _c.get("panel_ancestor", ""),
+                              "muts": _c.get("observed_mutations", []),
+                              "member_blocks": _c.get("member_blocks", []),
+                              "shared_mutations": _c.get("shared_mutations", []),
+                              "associated": _c.get("associated_members", []),
+                              "confidence": _c.get("confidence", "weak"),
+                              "verdict": _c.get("verdict", ""),
+                              "trend": _c.get("trend", "flat"),
+                              "trend_series": list(_c.get("trend_series", [])),
+                              "peak_date": _c.get("peak_date", ""),
+                              "trend_by_city": {},
+                          })
+                          _slot["reads"] += int(_c.get("total_reads", 0))
+                          # signal_reads is the strongest discriminating region's
+                          # reads; across cities take the MAX (summing would
+                          # double-count the same discriminating reads and can
+                          # exceed the total). Capped at total as a safety net.
+                          _slot["signal_reads"] = max(
+                              _slot.get("signal_reads", 0),
+                              int(_c.get("signal_reads", 0)))
+                          _slot["cities"].append(_loc)
+                          # keep each city's own series so trend can be shown
+                          # per-city or aggregated (summed element-wise)
+                          _slot["trend_by_city"][_loc] = list(_c.get("trend_series", []))
+                      for _u in _res.get("unresolved", []):
+                          _k = tuple(_u["fingerprint"])
+                          _s = _agg_unres.setdefault(_k, {
+                              "fp": _u["fingerprint"], "reads": 0,
+                              "cand": _u.get("candidate_count", 0),
+                              "anc": _u.get("common_ancestor", ""),
+                          })
+                          _s["reads"] += int(_u.get("total_reads", 0))
+                      for _mnh in _res.get("matched_no_haplotype", []):
+                          _k = _mnh["node"]
+                          _s = _agg_mnh.setdefault(_k, {
+                              "node": _mnh["node"], "reads": 0,
+                              "member_count": _mnh.get("member_count", 1),
+                              "muts": _mnh.get("observed_mutations", []),
+                          })
+                          _s["reads"] += int(_mnh.get("total_reads", 0))
+                      _nv = _res.get("novel", {})
+                      _novel_total += int(_nv.get("total_reads", 0))
+                      _novel_pats += int(_nv.get("pattern_count", 0))
+
+                  def _clade_label(_slot):
+                      return f"{_slot['node']} clade" if _slot["member_count"] > 1 else _slot["node"]
+
+                  def _render_finding(_slot, _accent, _bg, _border, _is_sub=False):
+                      _label = _clade_label(_slot)
+                      _sig_reads = _slot.get("signal_reads", 0)
+                      _tot_reads = _slot["reads"]
+                      # headline = discriminating co-occurrence reads (the real
+                      # signal); the broad fingerprint total is shown as context.
+                      _reads = _sig_reads if _sig_reads > 0 else _tot_reads
+                      _mc = _slot["member_count"]
+                      _desig = _slot["designation"]
+                      _members = _slot["members"]
+                      _member_txt = ""
+                      if _mc > 1:
+                          _samp = ", ".join(_members[:4])
+                          _more = f" +{_mc-4}" if _mc > 4 else ""
+                          _member_txt = f" · {_mc} members: {_samp}{_more}"
+                      _desig_txt = f" · designated {_desig}" if _desig else ""
+                      # confidence badge + one-line verdict for quick reading
+                      _conf = _slot.get("confidence", "weak")
+                      _verdict = _slot.get("verdict", "")
+                      _conf_style = {
+                          "strong": ("#0f6e56", "#e6f4ef", "✓ strong"),
+                          "medium": ("#ba7517", "#fdf6e9", "~ medium"),
+                          "weak":   ("#6b7280", "#f3f4f6", "· weak"),
+                      }.get(_conf, ("#6b7280", "#f3f4f6", "· weak"))
+                      _badge = (
+                          f"<span style='background:{_conf_style[1]};color:{_conf_style[0]};"
+                          f"font-size:0.72rem;font-weight:600;padding:1px 8px;border-radius:10px;"
+                          f"margin-left:8px;'>{_conf_style[2]}</span>"
+                      )
+                      # trend chip + inline sparkline — aggregate across cities by
+                      # summing each city's series element-wise (aligned by bucket),
+                      # then recompute the direction from the aggregate. This makes
+                      # the trend a true multi-city aggregate, not just one city's.
+                      _by_city = _slot.get("trend_by_city", {})
+                      if len(_by_city) > 1:
+                          _maxlen = max((len(v) for v in _by_city.values()), default=0)
+                          _series = [0] * _maxlen
+                          for _cs in _by_city.values():
+                              # align to the right (most recent) end
+                              _off = _maxlen - len(_cs)
+                              for _i, _v in enumerate(_cs):
+                                  _series[_off + _i] += _v
+                      else:
+                          _series = _slot.get("trend_series", [])
+                      # recompute direction from the (aggregated) series
+                      _trend = "flat"
+                      if len(_series) >= 3:
+                          _third = max(1, len(_series) // 3)
+                          _early = sum(_series[:_third]) / _third
+                          _late = sum(_series[-_third:]) / _third
+                          if _late > _early * 1.5:
+                              _trend = "rising"
+                          elif _late < _early * 0.5:
+                              _trend = "declining"
+                          else:
+                              _trend = "stable"
+                      _tr_map = {
+                          "rising":    ("↑ rising", "#0f6e56"),
+                          "declining": ("↓ declining", "#ba7517"),
+                          "stable":    ("→ stable", "#6b7280"),
+                          "flat":      ("", "#6b7280"),
+                      }
+                      _tr_txt, _tr_col = _tr_map.get(_trend, ("", "#6b7280"))
+                      _trend_chip = ""
+                      if _tr_txt:
+                          _multi = " (all cities)" if len(_by_city) > 1 else ""
+                          _trend_chip = (
+                              f"<span style='color:{_tr_col};font-size:0.72rem;"
+                              f"font-weight:600;margin-left:8px;'>{_tr_txt}{_multi}</span>"
+                          )
+                      _spark = ""
+                      if len(_series) >= 2:
+                          _mx = max(_series) or 1
+                          _w, _h = 80, 18
+                          _pts = " ".join(
+                              f"{(i/(len(_series)-1))*_w:.1f},{_h-(v/_mx)*_h:.1f}"
+                              for i, v in enumerate(_series))
+                          _spark = (
+                              f"<svg width='{_w}' height='{_h}' style='vertical-align:middle;"
+                              f"margin-left:8px;'><polyline points='{_pts}' fill='none' "
+                              f"stroke='{_tr_col}' stroke-width='1.5'/></svg>")
+                      _peak = _slot.get("peak_date", "")
+                      _peak_txt = (f" · seen mainly {_peak}" if _peak else "")
+                      st.markdown(
+                          f"<div style='background:{_bg};border:1px solid {_border};"
+                          f"border-radius:6px;padding:8px 12px;margin:4px 0;'>"
+                          f"<span style='font-weight:600;color:{_accent};'>{_label}</span>"
+                          f"{_badge}{_trend_chip}{_spark}"
+                          f"<span style='color:#6b7280;font-size:0.82rem;margin-left:8px;'>"
+                          f"{_reads:,} co-occurrence reads{_desig_txt}{_peak_txt}</span>"
+                          f"<div style='color:#374151;font-size:0.76rem;margin-top:3px;'>"
+                          f"{_verdict}</div>"
+                          f"<div style='color:#9ca3af;font-size:0.72rem;margin-top:2px;'>"
+                          f"{_chip_html(_slot['cities'])}{_member_txt}</div></div>",
+                          unsafe_allow_html=True,
+                      )
+                      _assoc = _slot.get("associated", [])
+                      if _assoc:
+                          st.caption(
+                              "⚠ includes recombinants sharing these mutations: "
+                              + ", ".join(_assoc[:6])
+                              + " — check the heatmap to see which is driving the signal."
+                          )
+                      if _is_sub:
+                          _anc = _slot.get("panel_ancestor", "")
+                          st.caption(f"↳ sublineage of {_anc} — signal partly counted within its proportion; adding refines it.")
+                      _addkey = f"acooc_addc_{_slot['node']}"
+                      if _scan_running:
+                          st.caption(f"⏳ finishing scan… Add enables shortly")
+                      else:
+                          if st.button(f"+ Add {_slot['node']}", key=_addkey):
+                              st.session_state[f"acooc_add_variant_pending_{_slot['node']}"] = _slot["node"]
+                              st.rerun()  # process immediately (no autorefresh running once scan done)
+                      # drill-down heatmap — let the user pick which city when the
+                      # finding spans several (the finding's reads are summed across
+                      # cities, but a heatmap shows one city's signal at a time).
+                      if _slot["muts"] and wiseLoculus and _slot["cities"]:
+                          _cities = _slot["cities"]
+                          with st.expander(f"Signal over time — {_label}", expanded=False):
+                              if len(_cities) > 1:
+                                  _hloc = st.selectbox(
+                                      "City",
+                                      _cities,
+                                      key=f"acooc_hmcity_{_slot['node']}",
+                                      help="This finding was seen in several cities; "
+                                           "pick which city's signal to display.",
+                                  )
+                              else:
+                                  _hloc = _cities[0]
+                              st.caption(f"Showing {_hloc}")
+                              from components.scanner_heatmap import render_clade_heatmap
+                              render_clade_heatmap(
+                                  clade_node=_slot["node"],
+                                  shared_mutations=_slot.get("shared_mutations", []),
+                                  member_blocks=_slot.get("member_blocks", []),
+                                  client=wiseLoculus,
+                                  location=_hloc,
+                                  reads_threshold=st.session_state.get("acooc_sig_threshold", 5000),
+                                  date_range=(start_date, end_date),
+                              )
+
+                  # ---- Not in panel (addable) — merges new-lineage clades AND
+                  #      sublineages of the panel. Both are "consider adding"; the
+                  #      relationship (unrelated vs sublineage) is shown per-row.
+                  _new_list = sorted(_agg_new.values(), key=lambda x: -x["reads"])
+                  _sub_list = sorted(_agg_sub.values(), key=lambda x: -x["reads"])
+                  _addable_n = len(_new_list) + len(_sub_list)
+                  with st.expander(
+                      f"🔴 Not in your panel — {_addable_n} finding(s)",
+                      expanded=st.session_state.get("acooc_exp_missing", False),
+                  ):
+                      if not _addable_n:
+                          st.caption("Nothing circulating that your panel doesn't cover.")
+                      else:
+                          st.caption(
+                              "Co-occurrence signal your panel doesn't explain, mapped "
+                              "to the tightest pango clade the mutations support. "
+                              "Consider adding these to the panel."
+                          )
+                          # unrelated new lineages first (bigger gaps), then sublineages
+                          for _slot in _new_list:
+                              _render_finding(_slot, "#dc2626", "#fef2f2", "#fecaca")
+                          for _slot in _sub_list:
+                              _render_finding(_slot, "#dc2626", "#fef2f2", "#fecaca",
+                                              _is_sub=True)
+
+                  # ---- Matched a lineage but no discriminating co-occurrence ----
+                  _mnh_list = sorted(_agg_mnh.values(), key=lambda x: -x["reads"])
+                  if _mnh_list:
+                      _mnh_reads = sum(m["reads"] for m in _mnh_list)
+                      with st.expander(
+                          f"🟣 Matched but not co-occurrence-confirmed — "
+                          f"{len(_mnh_list)} lineage(s) · {_mnh_reads:,} reads",
+                          expanded=False,
+                      ):
+                          st.caption(
+                              "These lineages match some observed mutations, but their "
+                              "distinguishing mutations don't co-occur on reads — so "
+                              "co-occurrence can't confirm them (they may still be present; "
+                              "deconvolution is the tool to quantify them)."
+                          )
+                          for _m in _mnh_list[:15]:
+                              _lbl = f"{_m['node']} clade" if _m["member_count"] > 1 else _m["node"]
+                              _muts = ", ".join(_m["muts"][:5])
+                              st.markdown(
+                                  f"<div style='background:#faf5ff;border:1px solid #e9d5ff;"
+                                  f"border-radius:6px;padding:6px 10px;margin:3px 0;font-size:0.82rem;'>"
+                                  f"<span style='font-weight:600;color:#7c3aed;'>{_lbl}</span>"
+                                  f"<span style='color:#6b7280;margin-left:8px;'>"
+                                  f"{_m['reads']:,} reads · matched: {_muts}</span></div>",
+                                  unsafe_allow_html=True,
+                              )
+
+                  # ---- Unresolved ----
+                  _unres_list = sorted(_agg_unres.values(), key=lambda x: -x["reads"])
+                  if _unres_list:
+                      _ur_reads = sum(u["reads"] for u in _unres_list)
+                      with st.expander(
+                          f"⚪ Unresolved — {len(_unres_list)} pattern(s) · {_ur_reads:,} reads",
+                          expanded=False,
+                      ):
+                          st.caption(
+                              "Co-occurring mutations match many lineages across "
+                              "unrelated clades — too broad to name."
+                          )
+                          for _u in _unres_list[:15]:
+                              _fp = ", ".join(_u["fp"][:5])
+                              _anc = f" · nearest ancestor {_u['anc']}" if _u["anc"] else ""
+                              st.markdown(
+                                  f"<div style='background:#f8f9fa;border:1px solid #e5e7eb;"
+                                  f"border-radius:6px;padding:6px 10px;margin:3px 0;font-size:0.82rem;'>"
+                                  f"<span style='font-family:monospace;color:#374151;'>{_fp}</span>"
+                                  f"<span style='color:#6b7280;margin-left:8px;'>"
+                                  f"{_u['cand']} lineages · {_u['reads']:,} reads{_anc}</span></div>",
+                                  unsafe_allow_html=True,
+                              )
+
+                  # ---- Novel ----
+                  with st.expander(
+                      f"🔵 Novel — no pango match ({_novel_total:,} reads)",
+                      expanded=False,
+                  ):
+                      if _novel_total == 0:
+                          st.caption("No unexplained patterns without a pango match.")
+                      else:
+                          st.caption(
+                              f"{_novel_total:,} reads in {_novel_pats} pattern(s) match "
+                              "no known lineage. Could be novel, recombinant, or artifact. "
+                              "A rising pattern is the most worth investigating."
+                          )
+                          for _loc, _res in _scan_res_all.items():
+                              _pn = _res.get("novel", {}) or _res.get("possibly_new", {})
+                              for _pi, _pat in enumerate(_pn.get("top_patterns", [])[:5]):
+                                  _pmuts = _pat.get("mutations", [])
+                                  _muts = ", ".join(_pmuts)
+                                  st.markdown(
+                                      f"<div style='background:#eff6ff;border:1px solid #bfdbfe;"
+                                      f"border-radius:6px;padding:6px 10px;margin:3px 0;font-size:0.8rem;'>"
+                                      f"<span style='color:#1d4ed8;font-family:monospace;'>{_muts}</span>"
+                                      f"<span style='color:#6b7280;margin-left:8px;'>"
+                                      f"{_pat.get('count',0):,} · {_loc.split('(')[0].strip()}</span></div>",
+                                      unsafe_allow_html=True,
+                                  )
+                                  # trend heatmap for this novel pattern — is it rising?
+                                  if _pmuts and wiseLoculus and len(_pmuts) >= 2:
+                                      with st.expander(
+                                          f"Trend over time — {_loc.split('(')[0].strip()} — "
+                                          f"{_muts[:40]}",
+                                          expanded=False,
+                                      ):
+                                          from components.scanner_heatmap import render_clade_heatmap
+                                          render_clade_heatmap(
+                                              clade_node=f"novel_{_loc}_{_pi}",
+                                              shared_mutations=[],
+                                              member_blocks=[{
+                                                  "member": "novel pattern",
+                                                  "discriminating": _pmuts,
+                                                  "member_count": 1,
+                                                  "reads": _pat.get("count", 0),
+                                              }],
+                                              client=wiseLoculus,
+                                              location=_loc,
+                                              reads_threshold=0,
+                                              date_range=(start_date, end_date),
+                                          )
+
+
+
+            with _sec_inv:
+              # ── Investigate a variant (on-demand explorer) ─────────────────────
+              st.markdown("---")
+              render_variant_explorer(
+                  pango_loader=cached_get_pango_loader(),
+                  panel=all_selected_variants,
+                  disabled=_outstanding,  # avoid rerun races during a scan
+              )
+
 
             # ── Download report (triggered by button in progress header) ───────
             if st.session_state.get("acooc_show_report"):
