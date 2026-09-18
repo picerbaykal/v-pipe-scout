@@ -79,65 +79,8 @@ def cached_fetch_locations() -> list:
     return wiseLoculus.fetch_locations()
 
 
-def _render_completeness(result: dict) -> None:
-    """Plot per-date panel completeness with read-weighted smoothed line."""
-    import numpy as np
-    import pandas as pd
-    import plotly.graph_objects as go
-
-    if not result.get("dates"):
-        st.warning("No co-occurrence data for this location and range.")
-        return
-
-    df = pd.DataFrame({
-        "date": pd.to_datetime(result["dates"]),
-        "matched": result["matched_counts"],
-        "unexplained": result["unexplained_counts"],
-        "completeness": result["completeness"],
-    }).sort_values("date").reset_index(drop=True)
-    df["informative"] = df["matched"] + df["unexplained"]
-
-    WINDOW = 5
-    comp = pd.to_numeric(df["completeness"], errors="coerce")
-    w = df["informative"].astype(float).where(comp.notna(), 0.0)
-    cw = (comp.fillna(0.0) * w)
-    num = cw.rolling(WINDOW, center=True, min_periods=1).sum()
-    den = w.rolling(WINDOW, center=True, min_periods=1).sum()
-    df["smoothed"] = np.where(den > 0, num / den, np.nan)
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=df["date"], y=comp, mode="markers",
-        marker=dict(size=[6 + min(8, n / 5000) for n in df["informative"]],
-                    color="rgba(120,120,120,0.35)"),
-        name="per-date",
-        customdata=df[["informative"]],
-        hovertemplate="%{x|%Y-%m-%d}<br>completeness %{y:.1%}"
-                      "<br>%{customdata[0]:,} informative reads<extra></extra>",
-    ))
-    fig.add_trace(go.Scatter(
-        x=df["date"], y=df["smoothed"], mode="lines",
-        line=dict(width=2.5, color="#4C6EF5", shape="spline"),
-        name="weighted smoothed",
-        hovertemplate="%{x|%Y-%m-%d}<br>smoothed %{y:.1%}<extra></extra>",
-    ))
-    fig.update_yaxes(range=[-0.05, 1.05], tickformat=".0%", title="completeness")
-    fig.update_layout(
-        height=220, margin=dict(t=10, b=30, l=50, r=20),
-        template="plotly_white",
-        legend=dict(orientation="h", yanchor="bottom", y=1.0, x=0),
-        showlegend=True,
-    )
-    st.plotly_chart(fig, use_container_width=True)
-    st.caption(
-        f"Line = read-weighted smoothed (window {WINDOW}). Points = per-date, "
-        f"size scales with informative reads "
-        f"({df['informative'].min():,}–{df['informative'].max():,} across dates). "
-        "Weighting lets high-read dates anchor the curve and down-weights sparse ones."
-    )
-
-
-def _render_composition(cooc_result: dict, scanner_result: dict) -> None:
+def _render_composition(cooc_result: dict, scanner_result: dict, key: str = "",
+                        show_legend: bool = True, show_caption: bool = True) -> None:
     """Normalized (0-100%) per-date composition: explained / addable / novel /
     noise. Green height = completeness; other bands = what the gap is made of.
     Empty/low-read dates dropped. Built from existing outputs — scanner untouched."""
@@ -158,26 +101,23 @@ def _render_composition(cooc_result: dict, scanner_result: dict) -> None:
         ("unresolved / noise", "noise_pct", "#9ca3af", "rgba(156,163,175,0.40)"),
     ]
     fig = go.Figure()
-    for name, key, line_c, fill_c in layers:
+    for name, _fld, line_c, fill_c in layers:
         fig.add_trace(go.Scatter(
-            x=dates, y=[r[key] for r in rows], name=name, mode="lines",
+            x=dates, y=[r[_fld] for r in rows], name=name, mode="lines",
             stackgroup="one", line=dict(width=0.5, color=line_c), fillcolor=fill_c,
             hovertemplate="%{x|%Y-%m-%d}<br>" + name + " %{y:.0%}<extra></extra>"))
     fig.update_layout(
-        height=260, margin=dict(t=10, b=30, l=50, r=20),
+        height=230, margin=dict(t=6, b=26, l=46, r=12),
         template="plotly_white",
         legend=dict(orientation="h", yanchor="bottom", y=1.0, x=0),
-        showlegend=True,
+        showlegend=show_legend,
     )
-    fig.update_yaxes(range=[0, 1], tickformat=".0%", title="share of co-occurrence")
-    st.plotly_chart(fig, use_container_width=True)
-    st.caption(
-        "Per date, what the co-occurrence signal is made of. Green = explained by "
-        "your panel (its height is the completeness). Red = coherent variants "
-        "the scanner found in the gap — add these. Blue = novel — investigate. "
-        "Grey = unresolved or recurrent noise. Colours match the scanner below. "
-        "Dates with too few reads are omitted."
-    )
+    fig.update_yaxes(range=[0, 1], tickformat=".0%", title="share")
+    st.plotly_chart(fig, use_container_width=True, key=f"comp_stack_{key}")
+    if show_caption:
+        st.caption(
+            "Green = explained by your panel (its height = completeness) · "
+            "red = addable (scanner found it) · blue = novel · grey = noise.")
 
 
 def _step_label(n: int, label: str, done: bool = False, active: bool = False) -> None:
@@ -527,6 +467,8 @@ def app():
 
             st.session_state["acooc_location_tasks"] = location_tasks
             st.session_state["acooc_ran_panel"] = sorted(all_selected_variants)
+            st.session_state["acooc_ran_locations"] = sorted(selected_locations)
+            st.session_state["acooc_ran_dates"] = (start_date.isoformat(), end_date.isoformat())
             st.session_state["location_results"] = {}
             st.session_state["acooc_cooc_tasks"] = cooc_tasks
             st.session_state["acooc_cooc_results"] = {}
@@ -548,11 +490,28 @@ def app():
         if not location_tasks:
             st.info("Complete steps 1–5 on the left to see results here.")
         else:
-            # panel-changed warning: current selection differs from what was run
+            # Smart "re-run needed" warning. A re-run is needed only when the
+            # existing results become stale/incomplete:
+            #  - variants changed (deconv+scanner are computed for that panel)
+            #  - date range changed (results are for that window)
+            #  - a NEW city was added (it has no results yet)
+            # Removing a city does NOT need a re-run — the remaining cities'
+            # results are still valid (each city is computed independently).
             _ran = st.session_state.get("acooc_ran_panel")
+            _ran_locs = st.session_state.get("acooc_ran_locations", [])
+            _ran_dates = st.session_state.get("acooc_ran_dates")
+            _now_dates = (start_date.isoformat(), end_date.isoformat())
+            _reasons = []
             if _ran is not None and sorted(all_selected_variants) != _ran:
-                st.warning("⚠ Panel changed since the last run — re-run the analysis "
-                           "to update the results below.")
+                _reasons.append("variant panel changed")
+            if _ran_dates is not None and _now_dates != _ran_dates:
+                _reasons.append("date range changed")
+            _added_cities = [c for c in selected_locations if c not in _ran_locs]
+            if _added_cities:
+                _reasons.append(f"new location(s) added ({', '.join(_added_cities)})")
+            if _reasons:
+                st.warning("⚠ Re-run needed — " + "; ".join(_reasons)
+                           + ". Results below reflect the previous run.")
             # collect completed results — track if anything new arrives this cycle
             _new_collected = False
 
@@ -736,36 +695,43 @@ def app():
 
             st.markdown("<hr style='margin:10px 0 8px;opacity:.15;'>", unsafe_allow_html=True)
 
-            # ── Section tabs: Per-city | Scanner | Investigate ───────────────
-            _sec_pc, _sec_sc, _sec_inv = st.tabs([
-                "Deconvolution results", "Scanner", "Investigate a variant"])
+            # ── Section switcher (top-level tabs) ─────────────────────────────
+            # Buttons persist selection across autorefresh (st.tabs ghosted +
+            # reset to the first tab on each rerun). Styled as underline tabs (via
+            # CSS on their container) so they read as navigation, not as another
+            # row of city buttons.
+            st.session_state.setdefault("acooc_section", "Deconvolution results")
+            _sections = ["Deconvolution results", "Co-occurrence results", "Investigate a variant"]
+            _scols = st.columns(len(_sections))
+            for _si, _snm in enumerate(_sections):
+                with _scols[_si]:
+                    _active = st.session_state["acooc_section"] == _snm
+                    if st.button(_snm, key=f"acooc_sec_{_si}",
+                                 use_container_width=True,
+                                 type="primary" if _active else "secondary"):
+                        st.session_state["acooc_section"] = _snm
+                        st.rerun()
+            _active_section = st.session_state["acooc_section"]
+            st.markdown("<hr style='margin:2px 0 10px;opacity:.12;'>", unsafe_allow_html=True)
 
-            with _sec_pc:
-              # ── Tab strip ────────────────────────────────────────────────────
+            if _active_section == "Deconvolution results":
+              # ── City selector (radio — lighter than the section tabs above) ───
               _city_options = [f"📍 {loc}" for loc in location_names]
               if ("acooc_selected_city" not in st.session_state or
                       st.session_state.get("acooc_selected_city") not in _city_options):
                   st.session_state["acooc_selected_city"] = _city_options[0] if _city_options else ""
-
-              # Tab strip using actual buttons (guaranteed clickable, no grey-out)
-              _tab_cols = st.columns(len(location_names))
-              for _ti, _loc in enumerate(location_names):
-                  _p2, _nm2, _sd2, _sr2, _dd2, _cd2, _dr2, _cr2 = _city_status(_loc)
-                  _dc0 = _dot_color(_dd2, _dr2)  # deconvolution
-                  _dc1 = _dot_color(_cd2, _cr2)  # completeness
-                  _dc2 = _dot_color(_sd2, _sr2)  # scanner
-                  _is_on = st.session_state.get("acooc_selected_city","") == f"📍 {_loc}"
-                  _sn = _loc.split("(")[0].strip()
-                  _pct_t = _p2 if _p2 is not None else None
-                  _tab_label = f"{_sn} · {_pct_t}%" if _pct_t is not None else _sn
-                  with _tab_cols[_ti]:
-                      if st.button(
-                          _tab_label,
-                          key=f"acooc_tab_{_loc}",
-                          use_container_width=True,
-                          type="primary" if _is_on else "secondary",
-                      ):
-                          st.session_state["acooc_selected_city"] = f"📍 {_loc}"
+              if len(location_names) > 1:
+                  _city_labels = [loc.split("(")[0].strip() for loc in location_names]
+                  _cur_idx = 0
+                  _cur_city = st.session_state.get("acooc_selected_city", "")
+                  for _ci, _loc in enumerate(location_names):
+                      if f"📍 {_loc}" == _cur_city:
+                          _cur_idx = _ci
+                  _pick = st.radio("City", options=list(range(len(location_names))),
+                                   format_func=lambda i: _city_labels[i],
+                                   index=_cur_idx, horizontal=True,
+                                   key="acooc_city_radio", label_visibility="collapsed")
+                  st.session_state["acooc_selected_city"] = f"📍 {location_names[_pick]}"
 
               _selected = st.session_state.get("acooc_selected_city", _city_options[0] if _city_options else "")
               st.markdown("<hr style='margin:6px 0 10px;opacity:.15;'>", unsafe_allow_html=True)
@@ -925,14 +891,21 @@ def app():
                   _city_tab_content(_active_loc, location_tasks[_active_loc])
 
 
-            with _sec_sc:
+            if _active_section == "Co-occurrence results":
               # panel-changed warning: scanner findings reflect the panel that was
               # run, so flag when the current selection differs.
               _ran_sc = st.session_state.get("acooc_ran_panel")
-              if _ran_sc is not None and sorted(all_selected_variants) != _ran_sc:
-                  st.warning("⚠ Panel changed since these results were computed — "
-                             "the completeness and findings below reflect the "
-                             "previous panel. Re-run to update.")
+              _sc_stale = (
+                  (_ran_sc is not None and sorted(all_selected_variants) != _ran_sc)
+                  or (st.session_state.get("acooc_ran_dates") is not None
+                      and (start_date.isoformat(), end_date.isoformat())
+                      != st.session_state.get("acooc_ran_dates"))
+                  or any(c not in st.session_state.get("acooc_ran_locations", [])
+                         for c in selected_locations)
+              )
+              if _sc_stale:
+                  st.warning("⚠ Re-run needed — the panel, dates, or locations "
+                             "changed since these results were computed.")
               # ── Panel completeness (at top of scanner — shows what each city's
               #    signal is made of, before the findings that fill the gaps) ─────
               _cr_all = st.session_state.get("acooc_cooc_results", {})
@@ -942,19 +915,23 @@ def app():
               if _ready_locs:
                   st.markdown("#### Panel completeness")
                   st.caption("How much of each city's co-occurrence signal your panel "
-                             "explains (green), and what the rest is — the scanner "
-                             "findings below cover the addable part.")
+                             "explains (green) vs the rest. Green = explained · red = "
+                             "addable (scanner found it) · blue = novel · grey = noise.")
                   if len(_ready_locs) == 1:
-                      _render_composition(_cr_all[_ready_locs[0]], _sr_all[_ready_locs[0]])
+                      _render_composition(_cr_all[_ready_locs[0]], _sr_all[_ready_locs[0]],
+                                          key=_ready_locs[0], show_caption=False)
                   else:
-                      # all-cities grid (max 6): two per row
+                      # all-cities grid (max 6): two per row. Legend only on the first
+                      # chart, caption suppressed (shown once above).
                       for _i in range(0, len(_ready_locs), 2):
                           _cols = st.columns(2)
                           for _j, _lc in enumerate(_ready_locs[_i:_i+2]):
                               with _cols[_j]:
                                   st.markdown(f"<div style='font-size:12px;font-weight:600;"
                                               f"'>{_lc}</div>", unsafe_allow_html=True)
-                                  _render_composition(_cr_all[_lc], _sr_all[_lc])
+                                  _render_composition(_cr_all[_lc], _sr_all[_lc], key=_lc,
+                                                      show_legend=(_i == 0 and _j == 0),
+                                                      show_caption=False)
                   st.markdown("---")
 
               # ── Scanner (one section, aggregated across all cities) ────────────
@@ -1371,7 +1348,7 @@ def app():
 
 
 
-            with _sec_inv:
+            if _active_section == "Investigate a variant":
               # ── Investigate a variant (on-demand explorer) ─────────────────────
               st.markdown("---")
               render_variant_explorer(
