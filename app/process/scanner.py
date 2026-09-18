@@ -279,6 +279,7 @@ def scan_unexplained_patterns(
     clade_hits: Dict[str, dict] = {}
     unresolved_hits: Dict[frozenset, dict] = {}
     novel_reads = 0
+    novel_reads_by_date: Dict[str, int] = {}
     novel_patterns: List[dict] = []
     total_unexplained = 0
 
@@ -294,6 +295,7 @@ def scan_unexplained_patterns(
         count = int(row["count"])
         if count < min_read_count:
             continue
+        d = row.get("date", "")
         total_unexplained += count
         if len(present) >= 2:
             observed_patterns.append((frozenset(present), count))
@@ -309,8 +311,9 @@ def scan_unexplained_patterns(
 
         if kind == "novel":
             novel_reads += count
+            novel_reads_by_date[d] = novel_reads_by_date.get(d, 0) + count
             novel_patterns.append(
-                {"count": count, "date": row.get("date", ""),
+                {"count": count, "date": d,
                  "mutations": sorted(fingerprint)[:12]}
             )
             continue
@@ -345,8 +348,10 @@ def scan_unexplained_patterns(
                 "observed_mutations": set(),
                 "designation": "",
                 "candidates": set(),
+                "reads_by_date": {},
             }
         slot["total_reads"] += count
+        slot["reads_by_date"][d] = slot["reads_by_date"].get(d, 0) + count
         slot["pattern_count"] += 1
         slot["observed_mutations"].update(fingerprint)
         slot["candidates"].update(candidates)
@@ -422,6 +427,7 @@ def scan_unexplained_patterns(
 
     novel = {
         "total_reads": novel_reads,
+        "reads_by_date": novel_reads_by_date,
         "top_patterns": sorted(
             novel_patterns, key=lambda x: -x["count"]
         )[:10],
@@ -757,6 +763,7 @@ def _finalize_clade(s: dict, tree: "_Tree", all_sigs: Dict[str, Set[str]],
         "associated_members": associated[:10],
         "plottable_members": plottable,
         "total_reads": s["total_reads"],
+        "reads_by_date": s.get("reads_by_date", {}),
         "signal_reads": top_reads,
         "pattern_count": s["pattern_count"],
         "observed_mutations": sorted(s["observed_mutations"]),
@@ -811,7 +818,8 @@ def _summary(clade, unresolved, novel) -> str:
 def _empty_result() -> dict:
     return {
         "resolved_clade": [], "matched_no_haplotype": [], "unresolved": [],
-        "novel": {"total_reads": 0, "pattern_count": 0, "top_patterns": []},
+        "novel": {"total_reads": 0, "pattern_count": 0, "top_patterns": [],
+                  "reads_by_date": {}},
         "total_unexplained_reads": 0,
         "summary": "No unexplained patterns.",
     }
