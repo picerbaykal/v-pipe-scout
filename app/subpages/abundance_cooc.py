@@ -1023,40 +1023,55 @@ def app():
                   _novel_total = 0
                   _novel_pats = 0
 
+                  def _ingest_clade(_c, _loc):
+                      # Route one finding (top-level OR a promoted sub-finding) into
+                      # the new/sub bucket and aggregate its reads across cities.
+                      _bucket = _agg_new if _c.get("relationship") == "new_lineage" else _agg_sub
+                      _node = _c["node"]
+                      _slot = _bucket.setdefault(_node, {
+                          "node": _node, "reads": 0, "signal_reads": 0,
+                          "cities": [],
+                          "member_count": _c.get("member_count", 1),
+                          "members": _c.get("members", []),
+                          "designation": _c.get("designation", ""),
+                          "panel_ancestor": _c.get("panel_ancestor", ""),
+                          "muts": _c.get("observed_mutations", []),
+                          "member_blocks": _c.get("member_blocks", []),
+                          "shared_mutations": _c.get("shared_mutations", []),
+                          "associated": _c.get("associated_members", []),
+                          "confidence": _c.get("confidence", "weak"),
+                          "verdict": _c.get("verdict", ""),
+                          "trend": _c.get("trend", "flat"),
+                          "trend_series": list(_c.get("trend_series", [])),
+                          "peak_date": _c.get("peak_date", ""),
+                          "trend_by_city": {},
+                      })
+                      _slot["reads"] += int(_c.get("total_reads", 0))
+                      # signal_reads is the strongest discriminating region's
+                      # reads; across cities take the MAX (summing would
+                      # double-count the same discriminating reads and can
+                      # exceed the total). Capped at total as a safety net.
+                      _slot["signal_reads"] = max(
+                          _slot.get("signal_reads", 0),
+                          int(_c.get("signal_reads", 0)))
+                      if _loc not in _slot["cities"]:
+                          _slot["cities"].append(_loc)
+                      # keep each city's own series so trend can be shown
+                      # per-city or aggregated (summed element-wise)
+                      _slot["trend_by_city"][_loc] = list(_c.get("trend_series", []))
+
                   for _loc, _res in _scan_res_all.items():
                       for _c in _res.get("resolved_clade", []):
-                          _bucket = _agg_new if _c.get("relationship") == "new_lineage" else _agg_sub
-                          _node = _c["node"]
-                          _slot = _bucket.setdefault(_node, {
-                              "node": _node, "reads": 0, "signal_reads": 0,
-                              "cities": [],
-                              "member_count": _c.get("member_count", 1),
-                              "members": _c.get("members", []),
-                              "designation": _c.get("designation", ""),
-                              "panel_ancestor": _c.get("panel_ancestor", ""),
-                              "muts": _c.get("observed_mutations", []),
-                              "member_blocks": _c.get("member_blocks", []),
-                              "shared_mutations": _c.get("shared_mutations", []),
-                              "associated": _c.get("associated_members", []),
-                              "confidence": _c.get("confidence", "weak"),
-                              "verdict": _c.get("verdict", ""),
-                              "trend": _c.get("trend", "flat"),
-                              "trend_series": list(_c.get("trend_series", [])),
-                              "peak_date": _c.get("peak_date", ""),
-                              "trend_by_city": {},
-                          })
-                          _slot["reads"] += int(_c.get("total_reads", 0))
-                          # signal_reads is the strongest discriminating region's
-                          # reads; across cities take the MAX (summing would
-                          # double-count the same discriminating reads and can
-                          # exceed the total). Capped at total as a safety net.
-                          _slot["signal_reads"] = max(
-                              _slot.get("signal_reads", 0),
-                              int(_c.get("signal_reads", 0)))
-                          _slot["cities"].append(_loc)
-                          # keep each city's own series so trend can be shown
-                          # per-city or aggregated (summed element-wise)
-                          _slot["trend_by_city"][_loc] = list(_c.get("trend_series", []))
+                          _ingest_clade(_c, _loc)
+                          # A confirmed sub-finding (e.g. LF.7 nested under JN.1) is
+                          # its own real finding — surface it as a card too, else a
+                          # tiny parent (e.g. a 4k-read JN.1) hides a huge descendant
+                          # (a 460k-read LF.7). Only promote sub-findings that are
+                          # actually confirmed (have discriminating blocks); their
+                          # reads are disjoint from the parent's, so no double count.
+                          for _sf in _c.get("sub_findings", []) or []:
+                              if _sf.get("member_blocks"):
+                                  _ingest_clade(_sf, _loc)
                       for _u in _res.get("unresolved", []):
                           _k = tuple(_u["fingerprint"])
                           _s = _agg_unres.setdefault(_k, {
