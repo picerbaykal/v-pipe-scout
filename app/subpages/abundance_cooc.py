@@ -674,10 +674,14 @@ def app():
             _chk_html = "<div style='display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;padding-top:8px;border-top:0.5px solid rgba(0,0,0,.06);'>"
             for _loc in location_names:
                 _pct, _n_miss, _sd, _sr, _dd, _cd, _dr, _cr = _city_status(_loc)
-                # a city is "done" when deconv is done (primary deliverable)
-                if _dd:
+                # a city is "done" only when ALL stages are done — deconv AND
+                # completeness AND scanner. Showing green on deconv alone is
+                # misleading: the scanner findings / addable band aren't ready yet.
+                if _dd and _cd and _sd:
                     _icon, _ic = "✓", "#3B6D11"
-                elif _dr or _cr or _sr:
+                elif _dr or _cr or _sr or _dd or _cd:
+                    # any stage running, or an earlier stage done but later ones
+                    # still pending → in progress
                     _icon, _ic = "⟳", "#93C5FD"
                 else:
                     _icon, _ic = "○", "#898781"
