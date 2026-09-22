@@ -107,12 +107,15 @@ def _render_composition(cooc_result: dict, scanner_result: dict, key: str = "",
             stackgroup="one", line=dict(width=0.5, color=line_c), fillcolor=fill_c,
             hovertemplate="%{x|%Y-%m-%d}<br>" + name + " %{y:.0%}<extra></extra>"))
     fig.update_layout(
-        height=230, margin=dict(t=6, b=26, l=46, r=12),
+        height=234, margin=dict(t=18, b=26, l=46, r=12),
         template="plotly_white",
         legend=dict(orientation="h", yanchor="bottom", y=1.0, x=0),
         showlegend=show_legend,
     )
-    fig.update_yaxes(range=[0, 1], tickformat=".0%", title="share")
+    fig.update_yaxes(
+        range=[0, 1], autorange=False, fixedrange=True,
+        tickmode="array", tickvals=[0, 0.25, 0.5, 0.75, 1.0],
+        ticktext=["0%", "25%", "50%", "75%", "100%"], title="share")
     st.plotly_chart(fig, use_container_width=True, key=f"comp_stack_{key}")
     if show_caption:
         st.caption(
@@ -921,21 +924,31 @@ def app():
                   st.caption("How much of each city's co-occurrence signal your panel "
                              "explains (green) vs the rest. Green = explained · red = "
                              "addable (scanner found it) · blue = novel · grey = noise.")
-                  if len(_ready_locs) == 1:
-                      _render_composition(_cr_all[_ready_locs[0]], _sr_all[_ready_locs[0]],
-                                          key=_ready_locs[0], show_caption=False)
+                  # Consistent layout: reserve a slot for EVERY selected city
+                  # so plots are the same size and labelled from the start,
+                  # regardless of which city finishes first. Cities still
+                  # computing show a placeholder in their slot. Legend on the
+                  # first ready plot only.
+                  _grid_locs = list(location_names)
+                  _legend_used = [False]
+                  def _one_city(_lc):
+                      st.markdown(f"<div style='font-size:12px;font-weight:600;'>"
+                                  f"{_lc}</div>", unsafe_allow_html=True)
+                      if _cr_all.get(_lc) is not None and _sr_all.get(_lc) is not None:
+                          _render_composition(_cr_all[_lc], _sr_all[_lc], key=_lc,
+                                              show_legend=not _legend_used[0],
+                                              show_caption=False)
+                          _legend_used[0] = True
+                      else:
+                          st.caption("\u23f3 computing\u2026")
+                  if len(_grid_locs) == 1:
+                      _one_city(_grid_locs[0])
                   else:
-                      # all-cities grid (max 6): two per row. Legend only on the first
-                      # chart, caption suppressed (shown once above).
-                      for _i in range(0, len(_ready_locs), 2):
+                      for _i in range(0, len(_grid_locs), 2):
                           _cols = st.columns(2)
-                          for _j, _lc in enumerate(_ready_locs[_i:_i+2]):
+                          for _j, _lc in enumerate(_grid_locs[_i:_i+2]):
                               with _cols[_j]:
-                                  st.markdown(f"<div style='font-size:12px;font-weight:600;"
-                                              f"'>{_lc}</div>", unsafe_allow_html=True)
-                                  _render_composition(_cr_all[_lc], _sr_all[_lc], key=_lc,
-                                                      show_legend=(_i == 0 and _j == 0),
-                                                      show_caption=False)
+                                  _one_city(_lc)
                   st.markdown("---")
 
               # ── Scanner (one section, aggregated across all cities) ────────────
