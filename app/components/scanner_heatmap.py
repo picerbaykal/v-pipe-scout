@@ -407,26 +407,78 @@ def render_clade_heatmap(
         mm = _re.match(r"^(\d+)", m)
         return int(mm.group(1)) if mm else 0
 
-    # blocks to render: split by the reads threshold. Above-threshold blocks
-    # show their full heatmap; below-threshold ones collapse to a dimmed line
-    # (still listed, nothing removed). shared block always shown.
+    # ── block selection: DEFAULT shows only regions that contain a
+    # discriminating (★) mutation — those are what confirm the variant.
+    # Backbone-only regions are hidden behind a per-finding toggle (nothing is
+    # dropped permanently). reads_threshold is kept in the signature for
+    # backward compatibility but is no longer used to gate blocks.
+    def _blk_has_star(b):
+        return any(_is_star(m) for m in b.get("discriminating", []))
+
+    def _blk_min_carrier(b):
+        # lowest carrier count among the block's discriminating muts
+        cs = [_mut_car.get(m, 10**9) for m in b.get("discriminating", [])
+              if _mut_car.get(m) is not None]
+        return min(cs) if cs else 10**9
+
+    _star_blocks = [b for b in member_blocks if _blk_has_star(b)]
+    _back_blocks = [b for b in member_blocks if not _blk_has_star(b)]
+    # discriminating-first ordering: most specific (lowest carrier) block first,
+    # then by reads as a tiebreak.
+    _star_blocks.sort(key=lambda b: (_blk_min_carrier(b), -b.get("reads", 0)))
+    _back_blocks.sort(key=lambda b: -b.get("reads", 0))
+
+    _toggle_key = f"clade_showall_{clade_node}_{location}"
+    _show_all = st.session_state.get(_toggle_key, False)
+    _SAFETY_CAP = 40   # only to guard a pathological finding, not a real limit
+
+    # DEFAULT: ALL regions that have a discriminating (★) mutation (these also
+    # contain backbone rows — that's fine, the ★ is what matters). Backbone-ONLY
+    # regions (no ★ at all) are appended only when the user asks. Nothing is
+    # capped away in practice; _SAFETY_CAP just bounds a runaway finding.
     render_blocks = []
     if shared_mutations:
         render_blocks.append(("shared (clade)",
                               "present in all members — confirms the clade",
                               list(shared_mutations)[:max_muts_per_block]))
-    below = []
-    for b in member_blocks[:max_members]:
+    _selected = list(_star_blocks)
+    if _show_all:
+        _selected += _back_blocks
+    for b in _selected[:_SAFETY_CAP]:
         name = b.get("member", "?")
         mc = b.get("member_count", 1)
         reads = b.get("reads", 0)
         subtitle = (f"{mc} lineages · {reads:,} reads" if mc > 1
                     else f"{reads:,} reads")
-        if reads >= reads_threshold:
-            render_blocks.append((name, subtitle,
-                                  list(b.get("discriminating", []))[:max_muts_per_block]))
-        else:
-            below.append((name, reads))
+        render_blocks.append((name, subtitle,
+                              list(b.get("discriminating", []))[:max_muts_per_block]))
+    below = []  # kept for the "no data" branch below
+
+    # header line: what's shown, what's hidden, and the toggle — at the TOP so it
+    # isn't lost below a long stack of grids.
+    _n_star = len(_star_blocks)
+    _n_back = len(_back_blocks)
+    _hdr = (f"Showing {_n_star} region(s) with a discriminating (\u2605) mutation."
+            if _n_star else "No regions have a discriminating (\u2605) mutation.")
+    if _n_back:
+        _hdr += (f"  {_n_back} backbone-only region(s) "
+                 + ("shown below." if _show_all else "hidden."))
+    st.markdown(f"<div style='font-size:12px;color:#6b7280;margin:2px 0 4px;'>{_hdr}"
+                f"</div>", unsafe_allow_html=True)
+    if _n_back:
+        _lbl = (f"Hide backbone-only regions ({_n_back})" if _show_all
+                else f"Show backbone-only regions (+{_n_back})")
+        if st.button(_lbl, key=f"btn_top_{_toggle_key}"):
+            st.session_state[_toggle_key] = not _show_all
+            st.rerun()
+
+    # all-backbone finding (no ★ region anywhere): with backbone hidden there is
+    # nothing to draw — say so and stop (the toggle above reveals them).
+    if not _star_blocks and not shared_mutations and not _show_all:
+        st.caption("Every co-occurrence group here is backbone (shared) only, so "
+                   "co-occurrence can't confirm a specific variant. Use the button "
+                   "above to inspect the backbone regions.")
+        return
 
     if not render_blocks and not below:
         st.caption("No co-occurrence groups to display for this clade.")
@@ -555,13 +607,3 @@ def render_clade_heatmap(
     for i, (title, subtitle, muts) in enumerate(render_blocks):
         _one_block(title, subtitle, muts,
                    key=f"clade_hm_{clade_node}_{location}_{i}")
-
-    # dimmed list of below-threshold regions — kept, not removed
-    if below:
-        _lines = "<br>".join(
-            f"<span style='color:#9ca3af;'>{n} · {r:,} reads · below threshold</span>"
-            for n, r in below)
-        st.markdown(
-            f"<div style='font-size:12px;margin-top:6px;'>{_lines}</div>",
-            unsafe_allow_html=True,
-        )

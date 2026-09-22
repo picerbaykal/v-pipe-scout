@@ -965,18 +965,9 @@ def app():
 
               if _scan_res_all:
                   from collections import defaultdict as _ddict
-                  # signal threshold slider — controls which co-occurrence regions
-                  # show their full heatmap vs collapse to a dimmed line. Nothing is
-                  # removed; the slider only sets the emphasis. Regions with fewer
-                  # co-occurrence reads than this dim/collapse.
-                  _sig_threshold = st.slider(
-                      "Signal threshold (min co-occurrence reads per region)",
-                      min_value=0, max_value=50000, value=5000, step=1000,
-                      key="acooc_sig_threshold",
-                      help="Regions above the threshold show their full heatmap; "
-                           "below it they collapse to a dimmed line (still expandable). "
-                           "Lower it to inspect weak signals; raise it to focus on strong ones.",
-                  )
+                  # (reads-threshold slider removed — the heatmap now defaults to
+                  # regions with a discriminating mutation and offers a per-finding
+                  # "show all regions" toggle instead.)
 
                   # coverage caption (instant, no scan needed): panel ∩ OT vs all OT
                   _ot_set = set(cached_get_variant_names())
@@ -1049,6 +1040,7 @@ def app():
                           "trend_series": list(_c.get("trend_series", [])),
                           "peak_date": _c.get("peak_date", ""),
                           "trend_by_city": {},
+                          "per_city": {},
                       })
                       _slot["reads"] += int(_c.get("total_reads", 0))
                       # signal_reads is the strongest discriminating region's
@@ -1063,6 +1055,31 @@ def app():
                       # keep each city's own series so trend can be shown
                       # per-city or aggregated (summed element-wise)
                       _slot["trend_by_city"][_loc] = list(_c.get("trend_series", []))
+                      # per-city discriminating (star) mutations: a mutation is
+                      # discriminating if <= _STAR_MAX lineages carry it. Kept per
+                      # city so the card shows which city has which. Regex-free
+                      # leading-digit position sort.
+                      _STAR_MAX = 30
+                      def _pcpos(_m):
+                          _d = ""
+                          for _ch in _m:
+                              if _ch.isdigit():
+                                  _d += _ch
+                              else:
+                                  break
+                          return int(_d) if _d else 0
+                      _pc_car = {}
+                      for _blk in _c.get("member_blocks", []):
+                          _pc_car.update(_blk.get("mut_carriers", {}))
+                      _pc_star = sorted(
+                          {_m for _blk in _c.get("member_blocks", [])
+                           for _m in _blk.get("discriminating", [])
+                           if _pc_car.get(_m, 999) <= _STAR_MAX},
+                          key=_pcpos)
+                      _slot["per_city"][_loc] = {
+                          "star": _pc_star,
+                          "car": {_m: _pc_car.get(_m) for _m in _pc_star},
+                      }
 
                   for _loc, _res in _scan_res_all.items():
                       for _c in _res.get("resolved_clade", []):
@@ -1114,87 +1131,56 @@ def app():
                           _samp = ", ".join(_members[:4])
                           _more = f" +{_mc-4}" if _mc > 4 else ""
                           _member_txt = f" · {_mc} members: {_samp}{_more}"
-                      _desig_txt = f" · designated {_desig}" if _desig else ""
-                      # confidence badge + one-line verdict for quick reading
-                      _conf = _slot.get("confidence", "weak")
-                      _verdict = _slot.get("verdict", "")
-                      _conf_style = {
-                          "strong": ("#0f6e56", "#e6f4ef", "✓ strong"),
-                          "medium": ("#ba7517", "#fdf6e9", "~ medium"),
-                          "weak":   ("#6b7280", "#f3f4f6", "· weak"),
-                      }.get(_conf, ("#6b7280", "#f3f4f6", "· weak"))
-                      _badge = (
-                          f"<span style='background:{_conf_style[1]};color:{_conf_style[0]};"
-                          f"font-size:0.72rem;font-weight:600;padding:1px 8px;border-radius:10px;"
-                          f"margin-left:8px;'>{_conf_style[2]}</span>"
-                      )
-                      # trend chip + inline sparkline — aggregate across cities by
-                      # summing each city's series element-wise (aligned by bucket),
-                      # then recompute the direction from the aggregate. This makes
-                      # the trend a true multi-city aggregate, not just one city's.
-                      _by_city = _slot.get("trend_by_city", {})
-                      if len(_by_city) > 1:
-                          _maxlen = max((len(v) for v in _by_city.values()), default=0)
-                          _series = [0] * _maxlen
-                          for _cs in _by_city.values():
-                              # align to the right (most recent) end
-                              _off = _maxlen - len(_cs)
-                              for _i, _v in enumerate(_cs):
-                                  _series[_off + _i] += _v
-                      else:
-                          _series = _slot.get("trend_series", [])
-                      # recompute direction from the (aggregated) series
-                      _trend = "flat"
-                      if len(_series) >= 3:
-                          _third = max(1, len(_series) // 3)
-                          _early = sum(_series[:_third]) / _third
-                          _late = sum(_series[-_third:]) / _third
-                          if _late > _early * 1.5:
-                              _trend = "rising"
-                          elif _late < _early * 0.5:
-                              _trend = "declining"
-                          else:
-                              _trend = "stable"
-                      _tr_map = {
-                          "rising":    ("↑ rising", "#0f6e56"),
-                          "declining": ("↓ declining", "#ba7517"),
-                          "stable":    ("→ stable", "#6b7280"),
-                          "flat":      ("", "#6b7280"),
-                      }
-                      _tr_txt, _tr_col = _tr_map.get(_trend, ("", "#6b7280"))
-                      _trend_chip = ""
-                      if _tr_txt:
-                          _multi = " (all cities)" if len(_by_city) > 1 else ""
-                          _trend_chip = (
-                              f"<span style='color:{_tr_col};font-size:0.72rem;"
-                              f"font-weight:600;margin-left:8px;'>{_tr_txt}{_multi}</span>"
-                          )
-                      _spark = ""
-                      if len(_series) >= 2:
-                          _mx = max(_series) or 1
-                          _w, _h = 80, 18
-                          _pts = " ".join(
-                              f"{(i/(len(_series)-1))*_w:.1f},{_h-(v/_mx)*_h:.1f}"
-                              for i, v in enumerate(_series))
-                          _spark = (
-                              f"<svg width='{_w}' height='{_h}' style='vertical-align:middle;"
-                              f"margin-left:8px;'><polyline points='{_pts}' fill='none' "
-                              f"stroke='{_tr_col}' stroke-width='1.5'/></svg>")
-                      _peak = _slot.get("peak_date", "")
-                      _peak_txt = (f" · seen mainly {_peak}" if _peak else "")
+                      _desig_txt = f" \u00b7 designated {_desig}" if _desig else ""
+                      # ── per-city discriminating-mutation rows (no verdict /
+                      # trend / sparkline / read-count headline). Show, per city,
+                      # the discriminating (star) mutations found there; cities
+                      # that share the same set are grouped on one row; a city
+                      # with none is flagged backbone-only.
+                      _per_city = _slot.get("per_city", {})
                       st.markdown(
                           f"<div style='background:{_bg};border:1px solid {_border};"
                           f"border-radius:6px;padding:8px 12px;margin:4px 0;'>"
                           f"<span style='font-weight:600;color:{_accent};'>{_label}</span>"
-                          f"{_badge}{_trend_chip}{_spark}"
-                          f"<span style='color:#6b7280;font-size:0.82rem;margin-left:8px;'>"
-                          f"{_reads:,} co-occurrence reads{_desig_txt}{_peak_txt}</span>"
-                          f"<div style='color:#374151;font-size:0.76rem;margin-top:3px;'>"
-                          f"{_verdict}</div>"
-                          f"<div style='color:#9ca3af;font-size:0.72rem;margin-top:2px;'>"
-                          f"{_chip_html(_slot['cities'])}{_member_txt}</div></div>",
+                          f"<span style='color:#6b7280;font-size:0.8rem;margin-left:8px;'>"
+                          f"{_member_txt.lstrip(' \u00b7') if _member_txt else ''}"
+                          f"{_desig_txt}</span></div>",
                           unsafe_allow_html=True,
                       )
+                      _CAP_MUTS = 6
+                      _groups = {}
+                      for _cty in _slot.get("cities", []):
+                          _pc = _per_city.get(_cty, {})
+                          _key = tuple(_pc.get("star", []))
+                          _groups.setdefault(_key, []).append(_cty)
+                      for _star_key, _cts in sorted(_groups.items(),
+                                                    key=lambda kv: -len(kv[0])):
+                          _tags = "".join(
+                              f"<span style='display:inline-block;font-size:10px;"
+                              f"padding:1px 7px;border-radius:10px;background:{_bg};"
+                              f"border:0.5px solid {_border};color:{_accent};"
+                              f"margin:0 3px 2px 0;'>{_c2.split('(')[0].strip()}</span>"
+                              for _c2 in _cts)
+                          if _star_key:
+                              # Option 1: show only the COUNT of discriminating
+                              # mutations — the names aren't actionable on the card;
+                              # the heatmap shows which ones over time.
+                              _n = len(_star_key)
+                              st.markdown(
+                                  f"<div style='margin:2px 0 2px 4px;font-size:12px;"
+                                  f"color:#374151;'>{_tags}"
+                                  f"<span style='margin-left:4px;'>{_n} discriminating "
+                                  f"mutation{'s' if _n != 1 else ''}</span></div>",
+                                  unsafe_allow_html=True,
+                              )
+                          else:
+                              st.markdown(
+                                  f"<div style='margin:2px 0 2px 4px;font-size:12px;"
+                                  f"color:#9ca3af;'>{_tags}"
+                                  f"<span style='margin-left:4px;'>\u26a0 backbone only "
+                                  f"\u2014 no discriminating mutation here</span></div>",
+                                  unsafe_allow_html=True,
+                              )
                       _assoc = _slot.get("associated", [])
                       if _assoc:
                           st.caption(
@@ -1236,7 +1222,6 @@ def app():
                                   member_blocks=_slot.get("member_blocks", []),
                                   client=wiseLoculus,
                                   location=_hloc,
-                                  reads_threshold=st.session_state.get("acooc_sig_threshold", 5000),
                                   date_range=(start_date, end_date),
                               )
 
@@ -1361,7 +1346,6 @@ def app():
                                               }],
                                               client=wiseLoculus,
                                               location=_loc,
-                                              reads_threshold=0,
                                               date_range=(start_date, end_date),
                                           )
 
