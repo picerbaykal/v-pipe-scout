@@ -367,6 +367,7 @@ def render_scanner_heatmap(
         "Only mutations observed in unexplained co-occurrence patterns are shown."
     )
 
+
 def render_clade_heatmap(
     clade_node: str,
     shared_mutations: list,
@@ -380,15 +381,31 @@ def render_clade_heatmap(
 ) -> None:
     """Signal-over-time for a clade: one small heatmap per family block.
 
-    The shared block confirms the clade is present. Each member/family block
-    below shows that family's discriminating co-occurrence group — when its
-    block lights up alongside shared, that family is driving the signal.
-    Each block is a separate small heatmap with its own title, so labels are
-    always clear and different-amplicon groups aren't misread as one.
+    Within each block the discriminating (★) rows are shown FIRST, in the
+    Blues scale; backbone (high-carrier) rows follow in a muted Greys scale
+    so they read as context, not signal. A block with no ★ row is flagged
+    'backbone only'. Cell tooltips are labelled with date, mutation, carrier
+    count, discriminating-vs-backbone and frequency as a %% (count/coverage).
     """
     import numpy as np
+    import re as _re
     import plotly.graph_objects as go
     from datetime import datetime
+
+    _STAR_MAX = 30   # carriers <= this → discriminating (★)
+
+    # carrier-count lookup across all blocks
+    _mut_car = {}
+    for _b in member_blocks:
+        _mut_car.update(_b.get("mut_carriers", {}))
+
+    def _is_star(m):
+        n = _mut_car.get(m)
+        return n is not None and n <= _STAR_MAX
+
+    def _pos(m):
+        mm = _re.match(r"^(\d+)", m)
+        return int(mm.group(1)) if mm else 0
 
     # blocks to render: split by the reads threshold. Above-threshold blocks
     # show their full heatmap; below-threshold ones collapse to a dimmed line
@@ -432,58 +449,77 @@ def render_clade_heatmap(
     df = df.drop_duplicates(subset=["mutation", "dateFrom"], keep="first")
     freq = df.pivot(index="mutation", columns="dateFrom", values="frequency")
     cov = df.pivot(index="mutation", columns="dateFrom", values="coverage")
+    cnt = df.pivot(index="mutation", columns="dateFrom", values="count")
     cols = list(freq.columns)
     col_labels = [datetime.strptime(c, "%Y-%m-%d").strftime("%b %d") for c in cols]
 
     st.caption(
         "Each block is a co-occurrence group for this clade in one amplicon region. "
-        "Row labels show [number of lineages carrying that mutation]: a low number "
-        "with ★ = discriminating (few variants have it); a high number = backbone "
-        "(broadly shared, not variant-specific). The ★ rows are the ones that "
-        "confirm the variant — if they are dark the variant is present; if only the "
-        "high-number backbone rows are dark, it is just shared mutations. "
+        "Rows are labelled [number of lineages carrying that mutation]: a low number "
+        "with ★ = discriminating (few variants have it), shown first; a high number = "
+        "backbone (broadly shared, context only). The ★ rows are the ones that confirm "
+        "the variant — if they are dark on recent dates the variant is present; if only "
+        "the high-number backbone rows are dark, it is just shared mutations. "
         "Hatched = no coverage that week (not absence)."
     )
-
-    # carrier-count lookup across all blocks: how many lineages carry each mut.
-    # Used to annotate rows so the user sees which are discriminating (few
-    # carriers) vs backbone (many). Discriminating threshold ~30 lineages.
-    _mut_car = {}
-    for _b in member_blocks:
-        _mut_car.update(_b.get("mut_carriers", {}))
 
     def _row_label(m):
         n = _mut_car.get(m)
         if n is None:
             return m
-        if n <= 30:
-            return f"{m} [{n}]★"          # discriminating (star marks it)
-        return f"{m} [{n}]"                # backbone (high count)
+        if n <= _STAR_MAX:
+            # discriminating — bold blue so ★ rows stand out even on one scale
+            return f"<b><span style='color:#185FA5'>{m} [{n}] \u2605</span></b>"
+        # backbone — muted grey label
+        return f"<span style='color:#9ca3af'>{m} [{n}]</span>"
 
     def _one_block(title, subtitle, muts, key):
         rows = [m for m in muts if m in freq.index]
         if not rows:
             return
-        row_labels = [_row_label(m) for m in rows]
-        z, hatch = [], []
-        for m in rows:
-            frow, hrow = [], []
+        # discriminating (★) rows first, backbone after; each sorted by position
+        star_rows = sorted([m for m in rows if _is_star(m)], key=_pos)
+        back_rows = sorted([m for m in rows if not _is_star(m)], key=_pos)
+        ordered = star_rows + back_rows
+        n_star = len(star_rows)
+        row_labels = [_row_label(m) for m in ordered]
+
+        z, hatch, htxt = [], [], []
+        for m in ordered:
+            frow, hrow, trow = [], [], []
+            star = _is_star(m)
+            ncar = _mut_car.get(m, "?")
+            tag = "★ discriminating" if star else "backbone"
             for c in cols:
                 fv = freq.loc[m, c]
                 cvv = cov.loc[m, c] if m in cov.index else 0
+                ct = cnt.loc[m, c] if m in cnt.index else 0
+                dl = datetime.strptime(c, "%Y-%m-%d").strftime("%b %d")
                 if cvv is None or cvv == 0 or (isinstance(cvv, float) and np.isnan(cvv)):
                     frow.append(np.nan); hrow.append(True)
+                    trow.append(f"{dl} · {m} ({tag})<br>no coverage")
                 else:
-                    frow.append(float(fv) if fv == fv else 0.0); hrow.append(False)
-            z.append(frow); hatch.append(hrow)
+                    fval = float(fv) if fv == fv else 0.0
+                    frow.append(fval); hrow.append(False)
+                    trow.append(
+                        f"{dl} · {m} [{ncar}] {tag}<br>"
+                        f"{fval*100:.0f}% ({int(ct):,} / {int(cvv):,} reads)")
+            z.append(frow); hatch.append(hrow); htxt.append(trow)
 
         fig = go.Figure()
+        # single heatmap trace for ALL rows (★ first, then backbone) so rows
+        # pack tightly with no seam. Two separate traces left a visible gap /
+        # a lone detached backbone row. The ★-vs-backbone distinction is carried
+        # by the row labels (★ marker + [carrier count]) and by ordering, not by
+        # a second colour scale. One muted blue ramp for everything.
         fig.add_trace(go.Heatmap(
-            z=z, x=col_labels, y=row_labels, colorscale="Blues", zmin=0, zmax=1,
-            hoverongaps=False, showscale=False, xgap=1, ygap=1,
-        ))
+            z=z, x=col_labels, y=row_labels,
+            text=htxt, hovertemplate="%{text}<extra></extra>",
+            colorscale="Blues", zmin=0, zmax=1, hoverongaps=False,
+            showscale=False, xgap=1, ygap=1))
+        # hatch overlay for no-coverage cells
         hz = [[1 if hatch[i][j] else np.nan for j in range(len(cols))]
-              for i in range(len(rows))]
+              for i in range(len(ordered))]
         fig.add_trace(go.Heatmap(
             z=hz, x=col_labels, y=row_labels,
             colorscale=[[0, "#e5e7eb"], [1, "#e5e7eb"]],
@@ -491,15 +527,27 @@ def render_clade_heatmap(
             hovertemplate="no coverage<extra></extra>", xgap=1, ygap=1,
         ))
         fig.update_layout(
-            height=max(90, 24 * len(rows) + 40),
-            margin=dict(l=90, r=10, t=6, b=24),
+            height=max(90, 24 * len(ordered) + 40),
+            margin=dict(l=110, r=10, t=6, b=24),
             template="plotly_white",
             yaxis=dict(autorange="reversed", tickfont=dict(size=10)),
             xaxis=dict(tickfont=dict(size=9)),
         )
+        # divider between the ★ group (top) and the backbone group (below) so the
+        # two groups read as intentional even though they share one trace/scale.
+        # y is reversed, so the boundary sits below the last ★ row at n_star-0.5.
+        if n_star and len(ordered) > n_star:
+            fig.add_shape(
+                type="line", xref="paper", yref="y",
+                x0=0, x1=1, y0=n_star - 0.5, y1=n_star - 0.5,
+                line=dict(color="#9ca3af", width=1, dash="dot"),
+            )
+        _flag = ("" if n_star else
+                 " · ⚠ backbone only — shared mutations, not variant-specific")
         st.markdown(
             f"<div style='font-size:13px;font-weight:500;margin:8px 0 0;'>{title}"
-            f"<span style='font-size:11px;color:#6b7280;font-weight:400;'> · {subtitle}</span></div>",
+            f"<span style='font-size:11px;color:#6b7280;font-weight:400;'> · "
+            f"{subtitle}{_flag}</span></div>",
             unsafe_allow_html=True,
         )
         st.plotly_chart(fig, use_container_width=True, key=key)
