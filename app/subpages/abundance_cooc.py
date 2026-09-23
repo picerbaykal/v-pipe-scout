@@ -314,15 +314,40 @@ def app():
         # ── Step 3b: Date range + LolliPop params ─────────────────────────────
         _step_label(3, "Date range", done=has_locations)
         default_start, default_end, min_date, max_date = wiseLoculus.get_cached_date_range_with_bounds("abundance_cooc")
+        # quick date-range presets — anchored on the latest available data date
+        # (max_date), clamped to the available window [min_date, max_date].
+        import datetime as _dt
+        def _acooc_set_range(_days):
+            _end = max_date
+            _start = (min_date if _days is None
+                      else max(min_date, _end - _dt.timedelta(days=_days)))
+            st.session_state["acooc_start_date"] = _start
+            st.session_state["acooc_end_date"] = _end
+            st.rerun()
+        _pcol1, _pcol3, _pcolall = st.columns(3)
+        with _pcol1:
+            if st.button("Last month", key="acooc_preset_1m", use_container_width=True):
+                _acooc_set_range(30)
+        with _pcol3:
+            if st.button("Last 3 months", key="acooc_preset_3m", use_container_width=True):
+                _acooc_set_range(90)
+        with _pcolall:
+            if st.button("All", key="acooc_preset_all", use_container_width=True):
+                _acooc_set_range(None)
+        # seed once, then let the widgets read from session_state (the preset
+        # buttons set it). No value= arg → no "default value but also set via
+        # Session State" warning.
+        st.session_state.setdefault("acooc_start_date", default_start)
+        st.session_state.setdefault("acooc_end_date", default_end)
         col_start, col_end = st.columns(2)
         with col_start:
             start_date = st.date_input(
-                "Start", value=default_start, min_value=min_date,
+                "Start", min_value=min_date,
                 max_value=max_date, key="acooc_start_date",
             )
         with col_end:
             end_date = st.date_input(
-                "End", value=default_end, min_value=min_date,
+                "End", min_value=min_date,
                 max_value=max_date, key="acooc_end_date",
             )
         if end_date <= start_date:
@@ -654,8 +679,44 @@ def app():
                 with _ph2:
                     _completed_locs = [loc for loc in location_names if loc in _lr]
                     if _completed_locs:
-                        if st.button("⬇ Download report", key="acooc_dl_report", use_container_width=True):
-                            st.session_state["acooc_show_report"] = True
+                        # build the deconvolution zip inline so the button
+                        # downloads directly (no intermediate report view)
+                        import io as _io, csv as _csv, zipfile as _zip
+                        _zbuf = _io.BytesIO(); _n_dl = 0
+                        with _zip.ZipFile(_zbuf, "w", _zip.ZIP_DEFLATED) as _zf:
+                            for _loc in _completed_locs:
+                                _res = st.session_state.location_results[_loc]
+                                # deconv result is wrapped by location name; unwrap
+                                if isinstance(_res, dict) and _loc in _res and isinstance(_res[_loc], dict):
+                                    _res = _res[_loc]
+                                _rows = []
+                                for _variant, _data in _res.items():
+                                    if _variant == "undetermined":
+                                        continue
+                                    for _e in (_data.get("timeseriesSummary", []) or []):
+                                        _rows.append({
+                                            "location": _loc, "variant": _variant,
+                                            "date": _e.get("date", ""),
+                                            "proportion": _e.get("proportion", ""),
+                                            "proportion_lower": _e.get("proportionLower", _e.get("ci_lower", "")),
+                                            "proportion_upper": _e.get("proportionUpper", _e.get("ci_upper", "")),
+                                        })
+                                if not _rows:
+                                    continue
+                                _sio = _io.StringIO()
+                                _w = _csv.DictWriter(_sio, fieldnames=["location","variant","date","proportion","proportion_lower","proportion_upper"])
+                                _w.writeheader(); _w.writerows(_rows)
+                                _safe = _loc.split("(")[0].strip().replace(" ", "_")
+                                _zf.writestr(f"deconvolution_{_safe}.csv", _sio.getvalue())
+                                _n_dl += 1
+                        if _n_dl:
+                            st.download_button(
+                                "⬇ Download deconvolution (CSV)",
+                                data=_zbuf.getvalue(),
+                                file_name="vpipe_scout_deconvolution.zip",
+                                mime="application/zip",
+                                key="acooc_download_zip",
+                                use_container_width=True)
 
             def _agg_bar(name, n_done, color):
                 _frac = n_done / _n_tot if _n_tot else 0
@@ -1348,6 +1409,14 @@ def app():
                                           expanded=False,
                                       ):
                                           from components.scanner_heatmap import render_clade_heatmap
+                                          # carrier count per mutation (how many
+                                          # lineages carry it) so the novel heatmap
+                                          # can mark discriminating (★) rows instead
+                                          # of labelling everything backbone. Uses
+                                          # the signatures already cached on the page.
+                                          _nov_sigs = st.session_state.get("acooc_all_sigs_cache") or {}
+                                          _nov_car = ({_m: sum(1 for _s in _nov_sigs.values() if _m in _s)
+                                                       for _m in _pmuts} if _nov_sigs else {})
                                           render_clade_heatmap(
                                               clade_node=f"novel_{_loc}_{_pi}",
                                               shared_mutations=[],
@@ -1356,6 +1425,7 @@ def app():
                                                   "discriminating": _pmuts,
                                                   "member_count": 1,
                                                   "reads": _pat.get("count", 0),
+                                                  "mut_carriers": _nov_car,
                                               }],
                                               client=wiseLoculus,
                                               location=_loc,
@@ -1373,45 +1443,6 @@ def app():
                   disabled=_outstanding,  # avoid rerun races during a scan
               )
 
-
-            # ── Download report (triggered by button in progress header) ───────
-            if st.session_state.get("acooc_show_report"):
-                _completed_locs2 = [loc for loc in location_names if loc in st.session_state.get("location_results",{})]
-                if _completed_locs2:
-                    import plotly.graph_objects as go
-                    from plotly.subplots import make_subplots
-                    import math
-                    _ncols = 2
-                    _nrows = math.ceil(len(_completed_locs2)/_ncols)
-                    _fig = make_subplots(rows=_nrows, cols=_ncols, subplot_titles=_completed_locs2,
-                        vertical_spacing=0.12, horizontal_spacing=0.08)
-                    for _i, _loc in enumerate(_completed_locs2):
-                        _row = _i//_ncols+1; _col = _i%_ncols+1
-                        _res = st.session_state.location_results[_loc]
-                        for _variant, _data in _res.items():
-                            if _variant == "undetermined": continue
-                            _ts = _data.get("timeseriesSummary",[])
-                            if not _ts: continue
-                            _fig.add_trace(go.Scatter(
-                                x=[e.get("date") for e in _ts],
-                                y=[e.get("proportion",0) for e in _ts],
-                                name=_variant, mode="lines+markers",
-                                marker=dict(size=4), showlegend=(_i==0)),
-                                row=_row, col=_col)
-                    _fig.update_layout(height=300*_nrows, template="plotly_white",
-                        title_text="Variant Proportion Estimates — All Locations")
-                    st.plotly_chart(_fig, use_container_width=True)
-                    import io
-                    try:
-                        _buf = io.BytesIO()
-                        _fig.write_image(_buf, format="pdf")
-                        st.download_button("⬇ Download PDF", data=_buf.getvalue(),
-                            file_name="vpipe_scout_report.pdf", mime="application/pdf",
-                            key="acooc_download_pdf")
-                    except Exception:
-                        st.caption("Install kaleido for PDF export.")
-                if st.button("Close report", key="acooc_close_report"):
-                    st.session_state["acooc_show_report"] = False
 
 
 if __name__ == "__main__":
