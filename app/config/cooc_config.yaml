@@ -9,17 +9,23 @@ scope:
   # scanner able to detect OT variants missing from the panel.
   use_tracked_variants: true
 
-  # amp_dict_cutoff: build the co-occurrence position set from ALL pango
-  # lineages designated on/after this date, rather than just the 29 cowwid
-  # variants. This lets the scanner detect sublineages and emerging variants,
-  # not only the hand-curated tracked set.
-  #   null        -> use cowwid (via use_tracked_variants above)
-  #   "2024-01-01" -> ~1234 lineages, 2141 positions (~2x query time)
-  #   "2025-01-01" -> ~511 lineages, 1263 positions
-  # Positions are the cheap axis; date range and locations dominate run time.
-  amp_dict_cutoff: "2024-01-01"
+# Add this block to app/config/cooc_config.yaml to override the "not found in
+# WW" verdict thresholds without a rebuild. The code defaults to exactly these
+# values if the block is absent. After editing, restart streamlit (the verdict
+# is applied in the UI; no worker re-scan needed to retune these).
+presence:
+  # co-occurrence path (primary — used when the haplotype can be observed)
+  confirm_freq: 0.01        # co-occurrence freq (present/co_covered) >= this -> confirmed
+  confirm_min_present: 10   # ...and >= 10 co-occurring reads
+  absent_min_cov: 3000      # co_covered >= this means co-occurrence could look;
+                            #   below it, fall back to the constellation
+  absent_max_present: 2     # co-occurring reads < this = haplotype absent
 
-  # NOTE: `weeks` and `weekly_buckets` were removed 2026-08 — they were leftovers
-  # from the slow-LAPIS era and nothing reads them any more. The scan runs over
-  # the full date-picker range, enumerated per real sampling date. Bound the
-  # range in the UI date picker, not here.
+  # constellation fallback (used when co-occurrence is blind — distinctive
+  # mutations too spread out to co-occur). Fraction of the readable distinctive
+  # constellation present below which the variant is "not found in WW".
+  con_floor: 0.5
+# NOTE: the per-mutation "testable" coverage (3000 reads) and "present" frequency
+# (1%) used to build con_present/con_testable are set in the WORKER
+# (process/cooc.py -> constellation_counts defaults). Changing those needs a
+# worker restart + re-scan; con_floor above only needs a streamlit restart. 

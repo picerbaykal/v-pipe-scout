@@ -47,7 +47,9 @@ from process.amplicons import (
     group_positions_by_amplicon,
     load_amplicons,
 )
-from process.cooc import annotate_cooc_dataframe, panel_completeness_by_date
+from process.cooc import (annotate_cooc_dataframe, panel_completeness_by_date,
+                          distinctive_within_panel, accumulate_panel_presence,
+                          constellation_counts)
 from utils.config import get_wiseloculus_url
 
 logger = logging.getLogger(__name__)
@@ -212,6 +214,8 @@ def run_cooc_panel_completeness(
     variant_signatures = _build_variant_signatures(
         variants, pango_loader, cowwid_variants
     )
+    distinctive = distinctive_within_panel(variant_signatures)
+    presence_acc = {}
     logger.info(
         f"[cooc][{location}] amp_dict from "
         f"{'reference list' if reference_variants else 'panel'}: "
@@ -315,6 +319,7 @@ def run_cooc_panel_completeness(
                 ].copy()
                 if not unexp.empty:
                     per_date_unexplained.append(unexp)
+            accumulate_panel_presence(annotated, distinctive, presence_acc)
             del df, rows, annotated
 
         async with aiohttp.ClientSession(
@@ -358,6 +363,12 @@ def run_cooc_panel_completeness(
             "unexplained_counts": [],
             "completeness": [],
             "unexplained_patterns": [],
+            "panel_presence": {
+                v: {"present": 0, "co_covered": 0,
+                    "distinctive": int(len(distinctive.get(v, ()))),
+                    "con_present": 0, "con_testable": 0}
+                for v in variants
+            },
         }
 
     combined = pd.concat(per_batch_results, ignore_index=True)
@@ -389,4 +400,16 @@ def run_cooc_panel_completeness(
         "unexplained_counts": per_date["unexplained_count"].astype(int).tolist(),
         "completeness": per_date["completeness"].astype(float).tolist(),
         "unexplained_patterns": unexplained_agg.to_dict("records"),
+        "panel_presence": {
+            v: {"present": int((presence_acc.get(v) or {}).get("present", 0)),
+                "co_covered": int((presence_acc.get(v) or {}).get("co_covered", 0)),
+                "distinctive": int(len(distinctive.get(v, ()))),
+                "con_present": int(constellation_counts(
+                    (presence_acc.get(v) or {}).get("mut_cov"),
+                    (presence_acc.get(v) or {}).get("mut_pres"))[0]),
+                "con_testable": int(constellation_counts(
+                    (presence_acc.get(v) or {}).get("mut_cov"),
+                    (presence_acc.get(v) or {}).get("mut_pres"))[1])}
+            for v in variants
+        },
     }

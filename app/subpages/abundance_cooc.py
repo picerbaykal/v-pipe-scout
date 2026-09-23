@@ -870,7 +870,8 @@ def app():
                           "distinctive mutations co-occurring on reads to back it up? "
                           "Confirmed = yes; oscillating = swaps with a near-identical "
                           "relative (trust the sum); can't confirm = no distinctive "
-                          "haplotype (blind spot).")
+                          "haplotype (blind spot); ▲ not found in WW = distinctive "
+                          "haplotype was co-covered but never co-occurred in your data.")
                       if not _cooc_ready:
                           st.info("⏳ Waiting for the co-occurrence scan to finish…")
                       if _cooc_ready and all_selected_variants:
@@ -891,47 +892,129 @@ def app():
                                   _osc = oscillating_pairs(all_selected_variants, _sigs)
                                   _dec_vars = [v for v in _dec.keys()
                                                if v != "undetermined" and v in _sigs]
+                                  # verdict thresholds — calibrated on real
+                                  # data (Alpha -> not_found; current variants
+                                  # -> confirmed). Override in cooc_config.yaml.
+                                  try:
+                                      from utils.config import get_cooc_setting as _gcs
+                                  except Exception:
+                                      _gcs = None
+                                  def _ppcfg(_k, _d):
+                                      try:
+                                          _val = _gcs(_k, _d) if _gcs else _d
+                                          return _d if _val is None else _val
+                                      except Exception:
+                                          return _d
+                                  _PP_CONF_FREQ = float(_ppcfg("presence.confirm_freq", 0.01))
+                                  _PP_CONF_MINP = int(_ppcfg("presence.confirm_min_present", 10))
+                                  _PP_ABS_COV = int(_ppcfg("presence.absent_min_cov", 3000))
+                                  _PP_ABS_MAXP = int(_ppcfg("presence.absent_max_present", 2))
+                                  _PP_CON_FLOOR = float(_ppcfg("presence.con_floor", 0.5))
+                                  _pp = (_cooc_res or {}).get("panel_presence", {}) or {}
                                   _rows = []
                                   for _v in _dec_vars:
-                                      _status, _reason = annotate_variant(
-                                          _v, _idx, _found_nodes, _osc)
-                                      # mean abundance for this variant
+                                      _pi = _pp.get(_v, {}) or {}
+                                      _pres = int(_pi.get("present", 0) or 0)
+                                      _cov = int(_pi.get("co_covered", 0) or 0)
+                                      _nd = int(_pi.get("distinctive", 0) or 0)
+                                      _con_p = int(_pi.get("con_present", 0) or 0)
+                                      _con_t = int(_pi.get("con_testable", 0) or 0)
+                                      _frac = (_pres / _cov) if _cov else 0.0
+                                      _sib = _osc.get(_v, [])
+                                      if _frac >= _PP_CONF_FREQ and _pres >= _PP_CONF_MINP:
+                                          _status = "confirmed"
+                                          _reason = f"co-occurs in {_frac*100:.1f}% of {_cov:,} covered reads"
+                                      elif _nd < 2:
+                                          _status = "cant_confirm"
+                                          _reason = ("no distinctive haplotype (blind spot)"
+                                                     + (f" — near-identical to {', '.join(_sib)}; "
+                                                        "trust the sum" if _sib else ""))
+                                      elif _cov < _PP_ABS_COV:
+                                          # co-occurrence blind (distinctive muts
+                                          # don't co-occur) -> constellation fallback
+                                          if _con_t < 2:
+                                              _status = "cant_confirm"
+                                              _reason = "too few readable distinctive positions — no data"
+                                          elif (_con_p / _con_t) < _PP_CON_FLOOR:
+                                              _status = "not_found"
+                                              _reason = f"constellation absent — {_con_p}/{_con_t} distinctive mutations present"
+                                          else:
+                                              _status = "detectable"
+                                              _reason = f"{_con_p}/{_con_t} distinctive mutations present but not co-occurring — needs external check"
+                                      elif _pres < _PP_ABS_MAXP:
+                                          _status = "not_found"
+                                          _reason = f"looked at {_cov:,} reads; haplotype not co-occurring — not found"
+                                      elif _sib:
+                                          _status = "oscillating"
+                                          _reason = f"oscillates with {', '.join(_sib)} — trust the sum"
+                                      else:
+                                          _status = "detectable"
+                                          _reason = f"weak co-occurrence ({_frac*100:.2f}%)"
                                       _ts = _dec.get(_v, {}).get("timeseriesSummary", [])
                                       _ab = ([e.get("proportion", 0) for e in _ts]
                                              if _ts else [])
                                       _abmean = (sum(_ab) / len(_ab)) if _ab else 0.0
-                                      _rows.append((_v, _status, _reason, _abmean))
+                                      _rows.append((_v, _status, _reason, _abmean,
+                                                    _cov, _frac, _nd, _con_p, _con_t))
                                   if _rows:
                                       # confirmed first, then oscillating, then blind
                                       _order = {"confirmed": 0, "oscillating": 1,
-                                                "cant_confirm": 2}
+                                                "detectable": 2, "cant_confirm": 3,
+                                                "not_found": 4}
                                       _rows.sort(key=lambda r: (_order.get(r[1], 3),
                                                                 -r[3]))
                                       _meta = {
                                           "confirmed":   ("#0f6e56", "#e6f4ef", "✓ confirmed"),
                                           "oscillating": ("#ba7517", "#fdf4e6", "⚠ oscillating"),
+                                          "detectable":  ("#6b7280", "#f3f4f6", "· detectable"),
                                           "cant_confirm":("#6b7280", "#f3f4f6", "· can't confirm"),
+                                          "not_found":   ("#b45309", "#fff7ed", "▲ not found in WW"),
                                       }
-                                      _html = ("<div style='border:0.5px solid #e5e7eb;"
-                                               "border-radius:8px;overflow:hidden;'>")
-                                      for _i, (_v, _s, _r, _ab) in enumerate(_rows):
+                                      _th = ("padding:4px 8px;font-weight:600;"
+                                             "color:#6b7280;text-align:left;")
+                                      _html = (
+                                          "<table style='width:100%;border-collapse:collapse;"
+                                          "font-size:12px;'><thead><tr style='border-bottom:"
+                                          "1px solid #e5e7eb;'>"
+                                          f"<th style='{_th}'>Variant</th>"
+                                          f"<th style='{_th}'>Abund.</th>"
+                                          f"<th style='{_th}' title='distinctive mutations "
+                                          "(unique within the panel)'>Distinct.</th>"
+                                          f"<th style='{_th}' title='haplotype frequency "
+                                          "(present / co-covered reads); blank when the "
+                                          "distinctive mutations are too spread out to "
+                                          "co-occur'>Co-occurrence</th>"
+                                          f"<th style='{_th}' title='distinctive mutations "
+                                          "present / testable individually'>Constellation</th>"
+                                          f"<th style='{_th}'>Verdict</th>"
+                                          "</tr></thead><tbody>")
+                                      for _row in _rows:
+                                          (_v, _s, _r, _ab, _cov, _frac,
+                                           _nd, _con_p, _con_t) = _row
                                           _fg, _bg, _lbl = _meta.get(
                                               _s, ("#6b7280", "#f3f4f6", _s))
-                                          _sep = ("border-top:0.5px solid #f0f0f0;"
-                                                  if _i else "")
+                                          if _cov >= _PP_ABS_COV:
+                                              _cooc_cell = (
+                                                  f"{_frac*100:.0f}% <span style='color:#9ca3af;'>"
+                                                  f"({_cov:,})</span>")
+                                          else:
+                                              _cooc_cell = "<span style='color:#c9c7bf;'>—</span>"
+                                          _con_cell = (f"{_con_p}/{_con_t}" if _con_t
+                                                       else "<span style='color:#c9c7bf;'>—</span>")
+                                          _rt = _r.replace("'", "&#39;")
+                                          _td = "padding:5px 8px;border-bottom:0.5px solid #f0f0f0;"
                                           _html += (
-                                              f"<div style='display:flex;align-items:center;"
-                                              f"gap:10px;padding:7px 12px;{_sep}'>"
-                                              f"<span style='font-weight:600;font-size:13px;"
-                                              f"min-width:78px;'>{_v}</span>"
-                                              f"<span style='color:#6b7280;font-size:12px;"
-                                              f"min-width:42px;'>{_ab*100:.0f}%</span>"
-                                              f"<span style='background:{_bg};color:{_fg};"
-                                              f"font-size:11px;font-weight:600;padding:1px 8px;"
-                                              f"border-radius:10px;white-space:nowrap;'>{_lbl}</span>"
-                                              f"<span style='color:#9ca3af;font-size:11px;'>"
-                                              f"{_r}</span></div>")
-                                      _html += "</div>"
+                                              f"<tr title='{_rt}'>"
+                                              f"<td style='{_td}font-weight:600;'>{_v}</td>"
+                                              f"<td style='{_td}color:#6b7280;'>{_ab*100:.0f}%</td>"
+                                              f"<td style='{_td}color:#9ca3af;'>{_nd}</td>"
+                                              f"<td style='{_td}'>{_cooc_cell}</td>"
+                                              f"<td style='{_td}'>{_con_cell}</td>"
+                                              f"<td style='{_td}'><span style='background:{_bg};"
+                                              f"color:{_fg};font-size:11px;font-weight:600;"
+                                              f"padding:1px 8px;border-radius:10px;"
+                                              f"white-space:nowrap;'>{_lbl}</span></td></tr>")
+                                      _html += "</tbody></table>"
                                       st.markdown(_html, unsafe_allow_html=True)
                           except Exception as _e:
                               st.caption(f"(co-occurrence check unavailable: {_e})")
