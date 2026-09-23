@@ -423,10 +423,35 @@ def render_clade_heatmap(
 
     _star_blocks = [b for b in member_blocks if _blk_has_star(b)]
     _back_blocks = [b for b in member_blocks if not _blk_has_star(b)]
-    # discriminating-first ordering: most specific (lowest carrier) block first,
-    # then by reads as a tiebreak.
-    _star_blocks.sort(key=lambda b: (_blk_min_carrier(b), -b.get("reads", 0)))
-    _back_blocks.sort(key=lambda b: -b.get("reads", 0))
+
+    # Group blocks by family (family_root): all blocks of one family are shown
+    # together, families ordered by their MOST discriminating block (lowest
+    # carrier count), and within a family by genome position — so the same
+    # family's regions read left-to-right instead of being scattered.
+    def _blk_fam(b):
+        return b.get("family_root") or b.get("member", "").split(" @ ")[0]
+
+    def _blk_startpos(b):
+        ps = [_pos(m) for m in b.get("discriminating", [])]
+        return min(ps) if ps else 0
+
+    _fam_rank = {}
+    for _b in _star_blocks:
+        _f = _blk_fam(_b)
+        _c = _blk_min_carrier(_b)
+        if _f not in _fam_rank or _c < _fam_rank[_f]:
+            _fam_rank[_f] = _c
+    _star_blocks.sort(key=lambda b: (_fam_rank.get(_blk_fam(b), 10**9),
+                                     _blk_fam(b), _blk_startpos(b)))
+    # backbone-only regions: same family grouping, then position
+    _bfam_rank = {}
+    for _b in _back_blocks:
+        _f = _blk_fam(_b)
+        _r = -_b.get("reads", 0)
+        if _f not in _bfam_rank or _r < _bfam_rank[_f]:
+            _bfam_rank[_f] = _r
+    _back_blocks.sort(key=lambda b: (_bfam_rank.get(_blk_fam(b), 0),
+                                     _blk_fam(b), _blk_startpos(b)))
 
     _toggle_key = f"clade_showall_{clade_node}_{location}"
     _show_all = st.session_state.get(_toggle_key, False)
