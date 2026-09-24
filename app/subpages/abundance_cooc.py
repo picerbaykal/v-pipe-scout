@@ -1407,20 +1407,44 @@ def app():
                               _render_finding(_slot, "#dc2626", "#fef2f2", "#fecaca",
                                               _is_sub=True)
 
-                  # ---- Matched a lineage but no discriminating co-occurrence ----
+                  # ---- Unresolved / noise (grey umbrella) ----
+                  # Mirror the completeness graph's grey band: the "matched but
+                  # not co-occurrence-confirmed" lineages (🟣) and the "too broad
+                  # to name" patterns (◦) are both part of the grey noise band, so
+                  # show them as subsections under one umbrella. Streamlit can't
+                  # nest expanders, so the subgroups are sections, not sub-expanders.
                   _mnh_list = sorted(_agg_mnh.values(), key=lambda x: -x["reads"])
-                  if _mnh_list:
-                      _mnh_reads = sum(m["reads"] for m in _mnh_list)
-                      with st.expander(
-                          f"🟣 Matched but not co-occurrence-confirmed — "
-                          f"{len(_mnh_list)} lineage(s) · {_mnh_reads:,} reads",
-                          expanded=False,
-                      ):
+                  _mnh_reads = sum(m["reads"] for m in _mnh_list)
+                  _unres_list = sorted(_agg_unres.values(), key=lambda x: -x["reads"])
+                  _ur_reads = sum(u["reads"] for u in _unres_list)
+                  _grey_n = len(_mnh_list) + len(_unres_list)
+                  _grey_reads = _mnh_reads + _ur_reads
+                  with st.expander(
+                      f"⚪ Unresolved / noise — {_grey_n} finding(s) · {_grey_reads:,} reads",
+                      expanded=False,
+                  ):
+                      st.caption(
+                          "The grey band of the completeness graph, itemised: lineages "
+                          "we can name but co-occurrence can't confirm, plus patterns "
+                          "too broad to name."
+                      )
+                      # ── 🟣 matched but not co-occurrence-confirmed ──────────
+                      st.markdown(
+                          f"<div style='font-weight:600;color:#7c3aed;margin:8px 0 2px;'>"
+                          f"🟣 Matched but not co-occurrence-confirmed"
+                          f"<span style='color:#6b7280;font-weight:400;font-size:0.8rem;'> · "
+                          f"{len(_mnh_list)} lineage(s) · {_mnh_reads:,} reads</span></div>",
+                          unsafe_allow_html=True,
+                      )
+                      if not _mnh_list:
+                          st.caption("None — every matched lineage had a discriminating "
+                                     "co-occurrence block (or nothing matched).")
+                      else:
                           st.caption(
-                              "These lineages match some observed mutations, but their "
-                              "distinguishing mutations don't co-occur on reads — so "
-                              "co-occurrence can't confirm them (they may still be present; "
-                              "deconvolution is the tool to quantify them)."
+                              "Match some observed mutations, but their distinguishing "
+                              "mutations don't co-occur on reads — so co-occurrence can't "
+                              "confirm them (they may still be present; deconvolution "
+                              "quantifies them)."
                           )
                           for _m in _mnh_list[:15]:
                               _lbl = f"{_m['node']} clade" if _m["member_count"] > 1 else _m["node"]
@@ -1433,15 +1457,17 @@ def app():
                                   f"{_m['reads']:,} reads · matched: {_muts}</span></div>",
                                   unsafe_allow_html=True,
                               )
-
-                  # ---- Unresolved ----
-                  _unres_list = sorted(_agg_unres.values(), key=lambda x: -x["reads"])
-                  if _unres_list:
-                      _ur_reads = sum(u["reads"] for u in _unres_list)
-                      with st.expander(
-                          f"⚪ Unresolved — {len(_unres_list)} pattern(s) · {_ur_reads:,} reads",
-                          expanded=False,
-                      ):
+                      # ── ◦ too broad to name (unresolved) ───────────────────
+                      st.markdown(
+                          f"<div style='font-weight:600;color:#6b7280;margin:12px 0 2px;'>"
+                          f"◦ Too broad to name"
+                          f"<span style='font-weight:400;font-size:0.8rem;'> · "
+                          f"{len(_unres_list)} pattern(s) · {_ur_reads:,} reads</span></div>",
+                          unsafe_allow_html=True,
+                      )
+                      if not _unres_list:
+                          st.caption("None — no co-occurrence patterns were too broad to name.")
+                      else:
                           st.caption(
                               "Co-occurring mutations match many lineages across "
                               "unrelated clades — too broad to name."

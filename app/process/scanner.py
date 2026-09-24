@@ -41,6 +41,12 @@ MIN_CLADE_DEPTH = 6
 # Minimum fingerprint size for co-occurrence (2 = haplotype, 1 = allele freq).
 MIN_FINGERPRINT = 2
 
+# A mutation is discriminating (★) if few lineages carry it. A co-occurrence
+# block counts as evidence only if it holds at least one such mutation; a block
+# whose mutations are all high-carrier backbone can't confirm a specific variant.
+# Kept in sync with _STAR_MAX in components/scanner_heatmap.py.
+STAR_CARRIER_MAX = 30
+
 # Cached position parser: extract the integer position from a mutation string
 # like "22599C" -> 22599. Called millions of times, so cache aggressively and
 # avoid regex (plain scan of leading digits is far faster).
@@ -279,7 +285,6 @@ def scan_unexplained_patterns(
     clade_hits: Dict[str, dict] = {}
     unresolved_hits: Dict[frozenset, dict] = {}
     novel_reads = 0
-    novel_reads_by_date: Dict[str, int] = {}
     novel_patterns: List[dict] = []
     total_unexplained = 0
 
@@ -295,7 +300,6 @@ def scan_unexplained_patterns(
         count = int(row["count"])
         if count < min_read_count:
             continue
-        d = row.get("date", "")
         total_unexplained += count
         if len(present) >= 2:
             observed_patterns.append((frozenset(present), count))
@@ -311,9 +315,8 @@ def scan_unexplained_patterns(
 
         if kind == "novel":
             novel_reads += count
-            novel_reads_by_date[d] = novel_reads_by_date.get(d, 0) + count
             novel_patterns.append(
-                {"count": count, "date": d,
+                {"count": count, "date": row.get("date", ""),
                  "mutations": sorted(fingerprint)[:12]}
             )
             continue
@@ -348,10 +351,8 @@ def scan_unexplained_patterns(
                 "observed_mutations": set(),
                 "designation": "",
                 "candidates": set(),
-                "reads_by_date": {},
             }
         slot["total_reads"] += count
-        slot["reads_by_date"][d] = slot["reads_by_date"].get(d, 0) + count
         slot["pattern_count"] += 1
         slot["observed_mutations"].update(fingerprint)
         slot["candidates"].update(candidates)
@@ -363,61 +364,62 @@ def scan_unexplained_patterns(
         for s in clade_hits.values()
     ]
 
-    # nest clades that are inside another reported clade. e.g. PY.1.1 sits
-    # inside LF.7 — show it as a sub-finding of LF.7, not a separate top-level
-    # entry, so the same branch isn't reported multiple times.
-    _by_node = {c["node"]: c for c in _all_clades}
-    _nodes = set(_by_node)
+    # de-duplicate co-occurrence blocks across findings. A recombinant like XFG
+    # (no parent chain) gets pulled in as an "associated" member of its backbone
+    # clade (LF.7), so the SAME discriminating group is emitted both under LF.7
+    # and under XFG's own finding. Assign each group to exactly one owner — the
+    # finding whose node IS the group's driver (family_root), else the most
+    # specific (deepest) finding — and strip it from the rest.
+    _dedupe_member_blocks(_all_clades, tree)
+
+    # ── classify each finding on its OWN merits (flattened, no nesting) ─────
+    # The pango tree nests findings (JN.1 ⊃ LF.7 ⊃ LF.7.9). Nesting let a tiny
+    # backbone parent (JN.1, ~2.5k reads) decide the fate of a huge descendant
+    # (LF.7, ~715k) — with the ★ rule that either hid LF.7 or dropped its reads.
+    # So classify EVERY finding node independently:
+    #   has a discriminating (★) block   -> confirmed (co-occurrence-confirmed)
+    #   no ★ block (backbone / no block) -> matched-no-haplotype (violet)
+    # A ★ block is an observed amplicon group carrying a mutation few lineages
+    # hold (carrier <= STAR_CARRIER_MAX); an all-backbone block (e.g. LF.7's
+    # "@ 7842 [101 lineages]") can't confirm a specific variant.
     for c in _all_clades:
-        c["sub_findings"] = []
+        c["member_resolved"] = bool(c.get("member_blocks"))
+        c["sub_findings"] = []      # flattened: each node stands on its own
         c["parent_clade"] = None
-        cur = tree.parent.get(c["node"], "")
-        seen = set()
-        while cur and cur not in seen:
-            seen.add(cur)
-            if cur in _nodes:
-                c["parent_clade"] = cur
-                break
-            cur = tree.parent.get(cur, "")
 
-    top_level = []
-    for c in _all_clades:
-        if c["parent_clade"]:
-            _by_node[c["parent_clade"]]["sub_findings"].append(c)
-        else:
-            top_level.append(c)
+    def _block_is_discriminating(b):
+        mc = b.get("mut_carriers", {}) or {}
+        return any(isinstance(v, int) and 0 < v <= STAR_CARRIER_MAX
+                   for v in mc.values())
 
-    # flag whether each clade resolved to a specific member (has blocks) or
-    # is only the clade backbone (panel-worthy at clade level, member unknown)
-    for c in _all_clades:
-        c["member_resolved"] = len(c.get("member_blocks", [])) > 0
+    def _has_disc_block(c):
+        return any(_block_is_discriminating(b)
+                   for b in (c.get("member_blocks", []) or []))
 
-    # A clade is a confirmed finding only if it has at least one discriminating
-    # co-occurrence block (a specific + observed amplicon group). Clades that
-    # were assigned only by a fingerprint match but have no discriminating
-    # block (e.g. KW.1.2, PA.1 — flagged by a couple of broad mutations) are
-    # NOT co-occurrence-confirmed. Drop them from the confident findings and
-    # record them as unresolved so their reads aren't silently lost.
-    confirmed = []
-    matched_no_haplotype = []   # resolved to a lineage but no discriminating
-                                # co-occurrence block (like KW.1.2, PA.1) — the
-                                # variant may be present but co-occurrence can't
-                                # confirm it (its distinguishing muts don't
-                                # co-occur). Distinct from "too broad".
-    for c in top_level:
-        # a clade counts if it, OR any of its sub-findings, has a block
-        has_block = bool(c.get("member_blocks")) or any(
-            sf.get("member_blocks") for sf in c.get("sub_findings", []))
-        if has_block:
-            confirmed.append(c)
-        else:
-            matched_no_haplotype.append({
-                "node": c["node"],
-                "relationship": c.get("relationship", ""),
-                "member_count": c.get("member_count", 1),
-                "total_reads": c["total_reads"],
-                "observed_mutations": c["observed_mutations"][:8],
-            })
+    confirmed = [c for c in _all_clades if _has_disc_block(c)]
+    _backbone = [c for c in _all_clades if not _has_disc_block(c)]
+
+    # collapse a backbone lineage chain to its single most-informative node:
+    # among backbone findings in an ancestor/descendant relationship keep only
+    # the highest-read one (LF.7 715k over its parent JN.1 2.5k and its child
+    # LF.7.9 81k), so the violet list isn't flooded with the same branch.
+    def _related(a, b):
+        return a == b or tree.is_descendant(a, b) or tree.is_descendant(b, a)
+
+    _backbone.sort(key=lambda c: -c["total_reads"])
+    _kept_backbone = []
+    for c in _backbone:
+        if any(_related(c["node"], k["node"]) for k in _kept_backbone):
+            continue
+        _kept_backbone.append(c)
+
+    matched_no_haplotype = [{
+        "node": c["node"],
+        "relationship": c.get("relationship", ""),
+        "member_count": c.get("member_count", 1),
+        "total_reads": c["total_reads"],
+        "observed_mutations": c["observed_mutations"][:8],
+    } for c in _kept_backbone]
 
     resolved_clade = sorted(confirmed, key=lambda x: -x["total_reads"])
     matched_no_haplotype.sort(key=lambda x: -x["total_reads"])
@@ -427,7 +429,6 @@ def scan_unexplained_patterns(
 
     novel = {
         "total_reads": novel_reads,
-        "reads_by_date": novel_reads_by_date,
         "top_patterns": sorted(
             novel_patterns, key=lambda x: -x["count"]
         )[:10],
@@ -763,7 +764,6 @@ def _finalize_clade(s: dict, tree: "_Tree", all_sigs: Dict[str, Set[str]],
         "associated_members": associated[:10],
         "plottable_members": plottable,
         "total_reads": s["total_reads"],
-        "reads_by_date": s.get("reads_by_date", {}),
         "signal_reads": top_reads,
         "pattern_count": s["pattern_count"],
         "observed_mutations": sorted(s["observed_mutations"]),
@@ -778,6 +778,49 @@ def _finalize_clade(s: dict, tree: "_Tree", all_sigs: Dict[str, Set[str]],
         "trend_series": trend_series,
         "peak_date": peak_date,
     }
+
+
+def _dedupe_member_blocks(all_clades: List[dict], tree: "_Tree") -> None:
+    """Ensure each discriminating co-occurrence group appears under ONE finding.
+
+    The same amplicon group can be built under several findings (a recombinant
+    is an associated member of its backbone clade AND its own finding). We key
+    blocks by their exact mutation set and, when a group occurs more than once,
+    keep it only under the owner finding:
+
+      1. the finding whose node equals the block's family_root (the true driver);
+      2. else the finding with the deepest (most specific) node;
+      3. ties broken by more co-occurrence reads.
+
+    Blocks are removed in place from every non-owner finding. Findings left with
+    no blocks fall out of the confident set downstream (matched_no_haplotype).
+    """
+    from collections import defaultdict as _dd
+    occ = _dd(list)                       # group-key -> [(clade, block), ...]
+    for c in all_clades:
+        for b in c.get("member_blocks", []) or []:
+            key = frozenset(b.get("discriminating", []))
+            if len(key) >= 2:
+                occ[key].append((c, b))
+
+    for key, lst in occ.items():
+        if len(lst) <= 1:
+            continue
+        # owner preference: node == family_root wins outright
+        owner = next((cb for cb in lst if cb[0]["node"] == cb[1].get("family_root")),
+                     None)
+        if owner is None:
+            # deepest node, then most reads
+            owner = max(lst, key=lambda cb: (tree.depth(cb[0]["node"]),
+                                             cb[1].get("reads", 0)))
+        owner_clade = owner[0]
+        for c, b in lst:
+            if c is owner_clade:
+                continue
+            c["member_blocks"] = [x for x in c.get("member_blocks", [])
+                                  if frozenset(x.get("discriminating", [])) != key]
+    # member_resolved / has_block are recomputed downstream from the surviving
+    # member_blocks, so nothing else needs updating here.
 
 
 def _count_novel(patterns, panel_union, all_sigs, tree, min_read_count,
@@ -818,8 +861,7 @@ def _summary(clade, unresolved, novel) -> str:
 def _empty_result() -> dict:
     return {
         "resolved_clade": [], "matched_no_haplotype": [], "unresolved": [],
-        "novel": {"total_reads": 0, "pattern_count": 0, "top_patterns": [],
-                  "reads_by_date": {}},
+        "novel": {"total_reads": 0, "pattern_count": 0, "top_patterns": []},
         "total_unexplained_reads": 0,
         "summary": "No unexplained patterns.",
     }
