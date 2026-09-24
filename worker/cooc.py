@@ -214,7 +214,9 @@ def run_cooc_panel_completeness(
     variant_signatures = _build_variant_signatures(
         variants, pango_loader, cowwid_variants
     )
-    distinctive = distinctive_within_panel(variant_signatures)
+    from process.cooc import _global_carrier_counts as _gcc
+    distinctive = distinctive_within_panel(
+        variant_signatures, _gcc(pango_loader))
     presence_acc = {}
     logger.info(
         f"[cooc][{location}] amp_dict from "

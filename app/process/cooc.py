@@ -227,20 +227,66 @@ def panel_completeness_by_date(
 import re as _re_presence
 
 
-def distinctive_within_panel(variant_signatures: Dict[str, Set[str]]) -> Dict[str, Set[str]]:
-    """variant -> mutations that NO OTHER panel member carries. These are the
-    positions co-occurrence uses to tell panel members apart and to test a
-    variant's presence. Keeping current variants in the panel subtracts their
-    shared mutations, so an extinct variant (B.1.1.7) is judged only on its
-    genuinely-unique positions."""
+# A distinctive mutation must be globally RARE to count — carried by at most this
+# many pango lineages. Matches the scanner's ★ discriminating bar. Positions more
+# common than this (E484K, the N-gene triplet, ...) are shared with currently-
+# circulating lineages, so they cannot confirm a specific (possibly extinct)
+# panel variant. Tune here if the scanner's STAR_CARRIER_MAX changes.
+_DISTINCT_STAR_MAX = 30
+
+_GLOBAL_CARRIER = {}
+
+
+def _global_carrier_counts(pango_loader):
+    """substitution -> number of pango lineages carrying it. Computed once per
+    process from the pango summary (the same ~5k-lineage reference every scan
+    sees), then cached. Degrades to {} on any error, which restores the old
+    panel-relative behaviour rather than breaking the scan."""
+    global _GLOBAL_CARRIER
+    if _GLOBAL_CARRIER:
+        return _GLOBAL_CARRIER
+    carrier = {}
+    try:
+        for _lin in pango_loader.get_raw_data():
+            for _m in (pango_loader.get_signature(_lin) or []):
+                if _re_presence.match(r"^\d+[ACGT]$", _m):
+                    carrier[_m] = carrier.get(_m, 0) + 1
+    except Exception:
+        return {}
+    _GLOBAL_CARRIER = carrier
+    return carrier
+
+
+def distinctive_within_panel(variant_signatures, carrier_counts=None,
+                             star_max=_DISTINCT_STAR_MAX):
+    """variant -> mutations that both (a) NO OTHER panel member carries and, when
+    `carrier_counts` is given, (b) are GLOBALLY RARE (carried by <= star_max
+    lineages). These are the positions co-occurrence uses to test a variant's
+    presence.
+
+    Panel-relative uniqueness alone is unsafe in a small panel: a variant's
+    "distinctive vs the other members" set can be dominated by mutations that
+    modern circulating lineages carry, which then co-occur in the reads and
+    falsely confirm an extinct variant (B.1.1.7, B.1.351). Intersecting with the
+    global-rarity bar leaves only genuinely-defining positions, so an extinct
+    variant is judged on mutations that are actually absent from today's WW.
+
+    A variant with no globally-rare distinctive mutation gets an empty set — it
+    cannot be told apart from the circulating background, so it is left
+    unconfirmable (the verdict layer reads that as a blind spot / not found)
+    rather than confirmed off shared signal. Without carrier_counts the old
+    panel-relative behaviour is preserved."""
     panel = list(variant_signatures)
-    out: Dict[str, Set[str]] = {}
+    out = {}
     for v in panel:
-        others: Set[str] = set()
+        others = set()
         for w in panel:
             if w != v:
                 others |= (variant_signatures.get(w) or set())
-        out[v] = (variant_signatures.get(v) or set()) - others
+        d = (variant_signatures.get(v) or set()) - others
+        if carrier_counts:
+            d = {m for m in d if carrier_counts.get(m, 0) <= star_max}
+        out[v] = d
     return out
 
 

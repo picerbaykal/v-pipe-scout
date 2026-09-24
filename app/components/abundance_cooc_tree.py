@@ -336,8 +336,12 @@ def render_panel_tree(
     # run recomputes verdicts. Stops stale colours lingering after the panel,
     # dates, or locations change.
     _ran_panel = st.session_state.get("acooc_ran_panel")
-    _stale = (_ran_panel is None
-              or sorted(set(selected_variants)) != sorted(set(_ran_panel)))
+    _has_cooc = bool(st.session_state.get("acooc_cooc_results"))
+    _stale = (
+        _ran_panel is None                                       # nothing run yet
+        or not _has_cooc                                         # run just cleared results
+        or sorted(set(selected_variants)) != sorted(set(_ran_panel))  # panel changed
+    )
     if _stale:
         variant_status = {}
 

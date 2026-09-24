@@ -80,7 +80,8 @@ def cached_fetch_locations() -> list:
 
 
 def _render_composition(cooc_result: dict, scanner_result: dict, key: str = "",
-                        show_legend: bool = True, show_caption: bool = True) -> None:
+                        show_legend: bool = True, show_caption: bool = True,
+                        panel_union=None) -> None:
     """Normalized (0-100%) per-date composition: explained / addable / novel /
     noise. Green height = completeness; other bands = what the gap is made of.
     Empty/low-read dates dropped. Built from existing outputs — scanner untouched."""
@@ -88,7 +89,8 @@ def _render_composition(cooc_result: dict, scanner_result: dict, key: str = "",
         from process.completeness_composition import compute_completeness_composition
     except Exception:
         return
-    rows = compute_completeness_composition(cooc_result, scanner_result or {})
+    rows = compute_completeness_composition(cooc_result, scanner_result or {},
+                                            panel_union=panel_union)
     if not rows:
         st.caption("Not enough co-occurrence reads to show composition.")
         return
@@ -120,7 +122,8 @@ def _render_composition(cooc_result: dict, scanner_result: dict, key: str = "",
     if show_caption:
         st.caption(
             "Green = explained by your panel (its height = completeness) · "
-            "red = addable (scanner found it) · blue = novel · grey = noise.")
+            "red = addable (scanner found it) · blue = novel · "
+            "grey = unresolved (beyond-panel signal the scanner can't name).")
 
 
 def _step_label(n: int, label: str, done: bool = False, active: bool = False) -> None:
@@ -270,10 +273,15 @@ def app():
 
         # ── Step 2: Variant tree ──────────────────────────────────────────────
         _step_label(2, "Variant tree", done=has_variants)
+        st.caption("Your panel (structural). Per-city co-occurrence verdicts are "
+                   "coloured on the tree under each city's deconvolution plot.")
+        # structural tree only — always black, updates live with the selection
+        # (no verdicts here, so it never flickers and needs no run).
         render_panel_tree(
             selected_variants=all_selected_variants,
             yaml_variants=curated_variants,
             pango_loader=cached_get_pango_loader(),
+            variant_status={},
         )
 
         st.markdown("---")
@@ -920,6 +928,7 @@ def app():
                                   _PP_ABS_COV = int(_ppcfg("presence.absent_min_cov", 3000))
                                   _PP_ABS_MAXP = int(_ppcfg("presence.absent_max_present", 2))
                                   _PP_CON_FLOOR = float(_ppcfg("presence.con_floor", 0.5))
+                                  _PP_ABS_FREQ = float(_ppcfg("presence.absent_max_freq", 0.001))
                                   _pp = (_cooc_res or {}).get("panel_presence", {}) or {}
                                   _rows = []
                                   for _v in _dec_vars:
@@ -951,9 +960,18 @@ def app():
                                           else:
                                               _status = "detectable"
                                               _reason = f"{_con_p}/{_con_t} distinctive mutations present but not co-occurring — needs external check"
-                                      elif _pres < _PP_ABS_MAXP:
-                                          _status = "not_found"
-                                          _reason = f"looked at {_cov:,} reads; haplotype not co-occurring — not found"
+                                      elif _pres < _PP_ABS_MAXP or _frac < _PP_ABS_FREQ:
+                                          # not present: almost no supporting reads, or (at high depth)
+                                          # co-occurrence far below the confirm bar — a few homoplastic
+                                          # reads out of a huge pile. Stay "detectable" only if the
+                                          # constellation is independently present (mutations show up
+                                          # individually but do not co-occur); otherwise not found.
+                                          if _con_t >= 2 and (_con_p / _con_t) >= _PP_CON_FLOOR:
+                                              _status = "detectable"
+                                              _reason = f"{_con_p}/{_con_t} distinctive mutations present but not co-occurring — needs external check"
+                                          else:
+                                              _status = "not_found"
+                                              _reason = f"looked at {_cov:,} reads; haplotype not co-occurring — not found"
                                       elif _sib:
                                           _status = "oscillating"
                                           _reason = f"oscillates with {', '.join(_sib)} — trust the sum"
@@ -971,9 +989,19 @@ def app():
                                   st.session_state["acooc_not_found"] = [
                                       {"variant": _r0[0], "reason": _r0[2], "abmean": _r0[3]}
                                       for _r0 in _rows if _r0[1] == "not_found"]
-                                  # stash verdicts for the variant tree colouring
+                                  # stash verdicts (still used by the orange
+                                  # "not found in WW" band on the scanner list).
                                   st.session_state["acooc_verdicts"] = {
                                       _r0[0]: _r0[1] for _r0 in _rows}
+                                  # ── per-city verdict tree: fed DIRECTLY with this
+                                  #    city's verdicts (not via session state), so it
+                                  #    is stable and shows THIS city's colours. ──
+                                  _city_status = {_r0[0]: _r0[1] for _r0 in _rows}
+                                  render_panel_tree(
+                                      selected_variants=all_selected_variants,
+                                      yaml_variants=curated_variants,
+                                      pango_loader=cached_get_pango_loader(),
+                                      variant_status=_city_status)
                                   if _rows:
                                       # confirmed first, then oscillating, then blind
                                       _order = {"confirmed": 0, "oscillating": 1,
@@ -1033,7 +1061,9 @@ def app():
                                               f"padding:1px 8px;border-radius:10px;"
                                               f"white-space:nowrap;'>{_lbl}</span></td></tr>")
                                       _html += "</tbody></table>"
-                                      st.markdown(_html, unsafe_allow_html=True)
+                                      with st.expander("Details — co-occurrence check table",
+                                                       expanded=False):
+                                          st.markdown(_html, unsafe_allow_html=True)
                           except Exception as _e:
                               st.caption(f"(co-occurrence check unavailable: {_e})")
 
@@ -1119,6 +1149,19 @@ def app():
                       ("#2563eb", "novel (investigate)"),
                       ("#9ca3af", "unresolved / noise"),
                   ]
+                  # panel union (city-independent) for the near-panel split —
+                  # a read that is a panel variant + <2 stray mutations counts
+                  # toward completeness, not the grey gap.
+                  _pl_pu = cached_get_pango_loader()
+                  _panel_union = set()
+                  # use the panel that was RUN (frozen with the cached results),
+                  # not the live selection — so editing the panel without
+                  # re-running doesn't silently change the completeness graph.
+                  for _puv in (st.session_state.get("acooc_ran_panel")
+                               or all_selected_variants):
+                      for _pum in (_pl_pu.get_signature(_puv) or []):
+                          if _pum and _pum[-1] in "ACGT":
+                              _panel_union.add(_pum)
                   st.markdown(
                       "<div style='display:flex;gap:14px;flex-wrap:wrap;"
                       "font-size:11.5px;color:#6b7280;margin:2px 0 8px;'>"
@@ -1134,7 +1177,8 @@ def app():
                                   f"{_lc}</div>", unsafe_allow_html=True)
                       if _cr_all.get(_lc) is not None and _sr_all.get(_lc) is not None:
                           _render_composition(_cr_all[_lc], _sr_all[_lc], key=_lc,
-                                              show_legend=False, show_caption=False)
+                                              show_legend=False, show_caption=False,
+                                              panel_union=_panel_union)
                       else:
                           st.caption("\u23f3 computing\u2026")
                   if len(_grid_locs) == 1:

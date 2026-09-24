@@ -1,90 +1,39 @@
-"""Completeness composition — per-date, normalized to 0-100%, split into four
+"""Completeness composition — per-date, normalized to 0-100%, split into
 categories, with empty/low-read dates dropped.
 
-  explained : reads the panel accounts for (matched)          → green
-  addable   : gap reads the scanner resolved to a clade       → red (add these)
-  novel     : gap reads the scanner called novel              → violet (investigate)
-  noise     : the rest of the gap (recurrent / homoplastic)   → grey
+  explained : reads the panel accounts for exactly (matched)      → dark green
+  near-panel: a panel variant + <2 stray mutations (fingerprint<2)→ light green
+              (counts toward completeness — no beyond-panel signal; usually
+              homoplasy / sequencing error; watch a rising trend as an early
+              sublineage hint)
+  addable   : gap reads the scanner resolved to a clade           → red (add these)
+  novel     : gap reads matching a novel pattern                  → blue (investigate)
+  noise     : the rest of the gap (fingerprint>=2, unresolved)    → grey
 
-The green height IS the completeness for that date; the other bands show what the
-unexplained gap is made of.
+Completeness for a date is explained + near-panel (both are the panel's variants).
+The remaining bands show what the genuinely-beyond-panel gap is made of — the
+same fingerprint>=2 signal the scanner acts on, so grey here matches the scanner.
 
-Addable is taken DIRECTLY from the scanner's own per-finding read accounting
-(`reads_by_date` on each resolved clade + its sub-findings) and novel from the
-scanner's novel `reads_by_date`. Completeness therefore reflects 100% of what the
-scanner surfaced — a read the scanner counted into a confirmed finding is red, not
-grey — and it does not re-classify anything: `classify_pattern` and the scanner's
-detection are untouched. Reads the scanner did NOT attribute to a finding
-(fingerprint < 2, unresolved, or resolved-without-a-discriminating-block) are not
-in any `reads_by_date`, so they remain in noise — the graph never invents addable
-signal the scanner didn't find.
-
-`noise` is the gap remainder (unexplained − addable − novel), never a threshold,
-so nothing leaks into or out of it.
-
-Legacy fallback: if the scanner result predates `reads_by_date` (e.g. a stale
-Redis result from an old worker), we fall back to the previous 80%-overlap
-matching so nothing crashes. Each row is tagged `_addable_source` so a diagnostic
-can tell which path ran.
+`panel_union` is the set of the panel variants' signature mutations ("{pos}{alt}",
+substitutions). When it's None the near-panel split is skipped (legacy behaviour:
+those reads stay in noise). Built from the EXISTING cooc + scanner result —
+`classify_pattern` and the scanner are untouched.
 """
 
-from typing import Dict, List, Set
+from typing import Dict, List, Set, Optional
 
 _NOVEL_MATCH_FRACTION = 0.8
 
 
-# ── scanner attribution (preferred path) ────────────────────────────────
-
-def _has_reads_by_date(scanner_result: dict) -> bool:
-    """True if the scanner result carries per-date read attribution."""
-    for c in scanner_result.get("resolved_clade", []):
-        if "reads_by_date" in c:
-            return True
-        for sf in c.get("sub_findings", []):
-            if "reads_by_date" in sf:
-                return True
-    if "reads_by_date" in scanner_result.get("novel", {}):
-        return True
-    return False
-
-
-def _addable_by_date(scanner_result: dict) -> Dict[str, int]:
-    """Reads the scanner attributed to confirmed findings, per date.
-
-    Sums each resolved clade's own `reads_by_date` plus those of its
-    sub-findings. Parent and child slots are disjoint (each pattern is
-    assigned to exactly one node in the scanner), so nothing is double
-    counted; summing the whole confirmed branch gives its full read total.
-    """
-    add: Dict[str, int] = {}
-    for c in scanner_result.get("resolved_clade", []):
-        for d, n in (c.get("reads_by_date") or {}).items():
-            add[d] = add.get(d, 0) + int(n)
-        for sf in c.get("sub_findings", []):
-            for d, n in (sf.get("reads_by_date") or {}).items():
-                add[d] = add.get(d, 0) + int(n)
-    return add
-
-
-def _novel_by_date(scanner_result: dict) -> Dict[str, int]:
-    return {d: int(n)
-            for d, n in (scanner_result.get("novel", {}).get("reads_by_date") or {}).items()}
-
-
-# ── legacy 80%-overlap matching (fallback only) ─────────────────────────
-
 def _resolved_groups(scanner_result: dict) -> List[Set[str]]:
+    """Discriminating mutation groups of each resolved finding (from its member
+    blocks) — the same matching the scanner uses."""
     groups: List[Set[str]] = []
     for c in scanner_result.get("resolved_clade", []):
         for b in c.get("member_blocks", []):
             g = set(b.get("discriminating", []))
             if len(g) >= 2:
                 groups.append(g)
-        for sf in c.get("sub_findings", []):
-            for b in sf.get("member_blocks", []):
-                g = set(b.get("discriminating", []))
-                if len(g) >= 2:
-                    groups.append(g)
     return groups
 
 
@@ -93,13 +42,25 @@ def _novel_patterns(scanner_result: dict) -> List[Set[str]]:
             for p in scanner_result.get("novel", {}).get("top_patterns", [])]
 
 
-def _legacy_gap_counts(cooc_result: dict, scanner_result: dict,
-                       dates: List[str]) -> (Dict[str, int], Dict[str, int]):
-    """Old behaviour: re-classify each gap pattern by 80% overlap with a
-    finding's discriminating group (addable) or a novel pattern (novel)."""
+def compute_completeness_composition(cooc_result: dict,
+                                     scanner_result: dict = None,
+                                     min_reads: int = 1000,
+                                     panel_union: Optional[Set[str]] = None) -> List[Dict]:
+    """Per-date normalized composition rows.
+
+    Returns list of dicts (empty/low-read dates dropped):
+      {date, explained, near, addable, novel, noise, total,
+       explained_pct, near_pct, addable_pct, novel_pct, noise_pct}
+    Percentages are of that date's total and sum to 1.0.
+    """
+    dates = cooc_result.get("dates", [])
+    matched = cooc_result.get("matched_counts", [])
+    unexpl = cooc_result.get("unexplained_counts", [])
+    ups = cooc_result.get("unexplained_patterns", [])
+    scanner_result = scanner_result or {}
+
     resolved_groups = _resolved_groups(scanner_result)
     novel_pats = _novel_patterns(scanner_result)
-    ups = cooc_result.get("unexplained_patterns", [])
 
     def gap_category(pat: Set[str]) -> str:
         for g in resolved_groups:
@@ -110,8 +71,15 @@ def _legacy_gap_counts(cooc_result: dict, scanner_result: dict,
                 return "novel"
         return "noise"
 
+    # markers of the scanner's findings — a lone beyond-panel mutation that is one
+    # of these is a partial-coverage read of a REAL (close) variant, not a stray.
+    addable_muts: Set[str] = set().union(*resolved_groups) if resolved_groups else set()
+    novel_muts: Set[str] = set().union(*novel_pats) if novel_pats else set()
+
     add_d = {d: 0 for d in dates}
     nov_d = {d: 0 for d in dates}
+    noi_d = {d: 0 for d in dates}
+    near_d = {d: 0 for d in dates}
     for p in ups:
         d = p.get("date")
         if d not in add_d:
@@ -120,39 +88,29 @@ def _legacy_gap_counts(cooc_result: dict, scanner_result: dict,
         if len(pat) < 2:
             continue
         cnt = int(p.get("count", 0))
+        if panel_union is not None:
+            fp = pat - panel_union
+            if len(fp) < 2:
+                # A single beyond-panel mutation. If it is a MARKER of a scanner
+                # finding, this is a partial-coverage read of that real variant
+                # (e.g. XFG, close to the panel, where most reads catch only one
+                # of its discriminating mutations) -> attribute to addable/novel,
+                # NOT near-panel. Only a mutation that matches no finding is a
+                # benign stray (near-panel homoplasy) that counts to completeness.
+                if fp & addable_muts:
+                    add_d[d] += cnt
+                elif fp & novel_muts:
+                    nov_d[d] += cnt
+                else:
+                    near_d[d] += cnt
+                continue
         cat = gap_category(pat)
         if cat == "addable":
             add_d[d] += cnt
         elif cat == "novel":
             nov_d[d] += cnt
-    return add_d, nov_d
-
-
-# ── main entry point ────────────────────────────────────────────────────
-
-def compute_completeness_composition(cooc_result: dict,
-                                     scanner_result: dict = None,
-                                     min_reads: int = 1000) -> List[Dict]:
-    """Per-date normalized composition rows.
-
-    Returns list of dicts (empty/low-read dates dropped):
-      {date, explained, addable, novel, noise, total,
-       explained_pct, addable_pct, novel_pct, noise_pct, _addable_source}
-    Percentages are of that date's total and sum to 1.0.
-    """
-    dates = cooc_result.get("dates", [])
-    matched = cooc_result.get("matched_counts", [])
-    unexpl = cooc_result.get("unexplained_counts", [])
-    scanner_result = scanner_result or {}
-
-    if _has_reads_by_date(scanner_result):
-        source = "scanner_attribution"
-        add_by_date = _addable_by_date(scanner_result)
-        nov_by_date = _novel_by_date(scanner_result)
-    else:
-        source = "legacy_overlap"
-        add_by_date, nov_by_date = _legacy_gap_counts(
-            cooc_result, scanner_result, dates)
+        else:
+            noi_d[d] += cnt
 
     rows: List[Dict] = []
     for i, d in enumerate(dates):
@@ -161,21 +119,24 @@ def compute_completeness_composition(cooc_result: dict,
         total = m + u
         if total < min_reads:
             continue  # drop empty / low-read dates
-        add = int(add_by_date.get(d, 0))
-        nov = int(nov_by_date.get(d, 0))
-        # addable + novel can't exceed the gap; clamp defensively so noise
-        # (the remainder) never goes negative.
-        add = min(add, u)
-        nov = min(nov, max(0, u - add))
-        noi = max(0, u - add - nov)
+        # near-panel (a panel variant + 1 NON-marker stray mutation) counts as
+        # explained — it is one of the panel's variants, the stray is homoplasy /
+        # batch noise. Marker-carrying single mutations already went to addable/
+        # novel above, so nothing real is hidden here. Folded into green to keep
+        # the graph to four categories that match the scanner list.
+        near = near_d[d]
+        expl = m + near
+        add = add_d[d]
+        nov = nov_d[d]
+        noi = max(0, u - near - add - nov)   # unresolved gap (fingerprint>=2)
         rows.append({
             "date": d,
-            "explained": m, "addable": add, "novel": nov, "noise": noi,
-            "total": total,
-            "explained_pct": m / total,
+            "explained": expl, "near": near, "addable": add, "novel": nov,
+            "noise": noi, "total": total,
+            "explained_pct": expl / total,
+            "near_pct": near / total,   # kept for diagnostics; not a band
             "addable_pct": add / total,
             "novel_pct": nov / total,
             "noise_pct": noi / total,
-            "_addable_source": source,
         })
     return rows
