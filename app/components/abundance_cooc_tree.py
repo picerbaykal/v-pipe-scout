@@ -3,13 +3,18 @@ components/abundance_cooc_tree.py
 
 Phylogenetic variant tree for the Abundance & Co-occurrence tab.
 
-Shows the global variant panel rooted at B:
-- Selected variants — filled blue circles
-- Officially tracked (cowwid OT) variants get an "OT" badge
-- Spine/structural nodes — small grey circles connecting the hierarchy
+Shows the global variant panel rooted at B. Selected (panel) variants are
+coloured by their co-occurrence verdict:
 
-No per-city labels — the panel is global. The only distinction is
-OT (officially tracked) vs not.
+    green  (#16a34a)  confirmed      — co-occurring in the wastewater
+    orange (#b45309)  not found in WW — distinctive haplotype looked for, not seen
+    black  (#1f2430)  selected       — chosen, verdict still pending / inconclusive
+
+Officially-tracked (cowwid) variants get an "OT" badge; tracked-but-not-selected
+variants are hollow blue; spine/structural nodes are small grey circles.
+
+Verdicts come from the Co-occurrence check (session_state["acooc_verdicts"],
+{variant: status}); until a scan has run every selected node shows black.
 """
 from __future__ import annotations
 from collections import defaultdict
@@ -23,6 +28,24 @@ C = {
     "yaml":     "#185FA5",
     "spine":    "#C8C6BE",
 }
+
+# verdict → colour for selected panel nodes. Green is deliberately brighter than
+# the check-table teal so it is clearly distinct from the black "pending" nodes.
+# Orange matches the scanner list's "Not found in wastewater" band (#b45309).
+STATUS_C = {
+    "confirmed": "#16a34a",   # green  — present in WW (confirmed)
+    "not_found": "#b45309",   # orange — not found in WW (looked for, absent)
+    "pending":   "#1f2430",   # black  — chosen, verdict pending
+}
+
+
+def _status_color(v: str, variant_status: dict | None) -> str:
+    s = (variant_status or {}).get(v)
+    if s == "confirmed":
+        return STATUS_C["confirmed"]
+    if s == "not_found":
+        return STATUS_C["not_found"]
+    return STATUS_C["pending"]
 
 
 def _ancestors(v: str, parent_map: dict) -> list[str]:
@@ -63,10 +86,6 @@ def _build_spine(selected_set: set, yaml_set: set, parent_map: dict, recomb_set:
             x = parent_map[x]
         return x
 
-    # A node is kept if its chain reaches B OR terminates at a recombinant root
-    # (e.g. NB.1.8.1 → ... → XDV, a recombinant with no parent). Previously only
-    # B-reaching nodes were kept, so NB.1.8.1 (rooted at XDV) was dropped from the
-    # tree. Recombinant chain-roots are then attached under B so they render.
     def keeps(v):
         r = chain_root(v)
         return r == root or (r.startswith("X"))
@@ -74,7 +93,6 @@ def _build_spine(selected_set: set, yaml_set: set, parent_map: dict, recomb_set:
     needed = {v for v in needed if keeps(v)}
     needed.add(root)
 
-    # recombinant roots that anchor kept chains → attach them under B
     _recomb_roots = {chain_root(v) for v in needed
                      if chain_root(v) != root and chain_root(v).startswith("X")}
     needed |= _recomb_roots
@@ -111,7 +129,8 @@ def _build_spine(selected_set: set, yaml_set: set, parent_map: dict, recomb_set:
     return children, root, needed, kind_of, collapse
 
 
-def _build_svg(children, root, kind_of, collapse, width=340, recombinant_set=None):
+def _build_svg(children, root, kind_of, collapse, width=340,
+               recombinant_set=None, variant_status=None):
     recombinant_set = recombinant_set or set()
     ROW_H, INDENT, X0 = 26, 20, 16
     rows = []
@@ -135,7 +154,12 @@ def _build_svg(children, root, kind_of, collapse, width=340, recombinant_set=Non
 
     assign_rows(root, 0)
     row_y = {rows[i][0]: i * ROW_H + ROW_H // 2 for i in range(len(rows))}
-    total_h = len(rows) * ROW_H + 60
+    total_h = len(rows) * ROW_H + 74   # extra room for the two-row legend
+
+    def node_color(v, kind):
+        if kind in ("panel", "panel_ot"):
+            return _status_color(v, variant_status)
+        return C[kind]
 
     lines_svg, nodes_svg = [], []
 
@@ -157,7 +181,7 @@ def _build_svg(children, root, kind_of, collapse, width=340, recombinant_set=Non
     for v, label, real_v, depth, kind in rows:
         x = X0 + depth * INDENT
         y = row_y[v]
-        color = C[kind]
+        color = node_color(v, kind)
         is_spine = kind == "spine"
         filled = kind in ("panel", "panel_ot")
         fw = "600" if filled else "400"
@@ -222,47 +246,54 @@ def _build_svg(children, root, kind_of, collapse, width=340, recombinant_set=Non
                 f'recomb</text>'
             )
 
-    # legend
-    leg_y = total_h - 34
+    # ── legend (two rows: status swatches, then tracked/OT) ──────────────────
     leg_svg = [
-        f'<line x1="0" y1="{total_h - 48}" x2="{width}" y2="{total_h - 48}" '
+        f'<line x1="0" y1="{total_h - 60}" x2="{width}" y2="{total_h - 60}" '
         f'stroke="#E8E6E0" stroke-width="1"/>'
     ]
-    items = [
-        ("#185FA5", True, "selected"),
-        ("#185FA5", False, "not selected"),
+
+    def _dot(cx, cy, fill, hollow=False):
+        if hollow:
+            return (f'<circle cx="{cx}" cy="{cy}" r="4" fill="white" '
+                    f'stroke="{fill}" stroke-width="1.5"/>')
+        return f'<circle cx="{cx}" cy="{cy}" r="4" fill="{fill}"/>'
+
+    def _txt(x, y, s, fill="#888"):
+        return (f'<text x="{x}" y="{y}" dy="0.35em" font-size="10" fill="{fill}" '
+                f'font-family="-apple-system,BlinkMacSystemFont,\'Segoe UI\',sans-serif">'
+                f'{s}</text>')
+
+    # row 1: verdict colours — wording matches the scanner list / check labels
+    row1_y = total_h - 44
+    row1 = [
+        (STATUS_C["confirmed"], False, "confirmed"),
+        (STATUS_C["not_found"], False, "not found in WW"),
+        (STATUS_C["pending"], False, "selected"),
     ]
     lx = 0
-    for lc, lf, ltxt in items:
-        if lf:
-            leg_svg.append(f'<circle cx="{lx+5}" cy="{leg_y}" r="4" fill="{lc}"/>')
-        else:
-            leg_svg.append(
-                f'<circle cx="{lx+5}" cy="{leg_y}" r="4" fill="white" '
-                f'stroke="{lc}" stroke-width="1.5"/>'
-            )
-        leg_svg.append(
-            f'<text x="{lx+13}" y="{leg_y}" dy="0.35em" font-size="10" fill="#888" '
-            f'font-family="-apple-system,BlinkMacSystemFont,\'Segoe UI\',sans-serif">'
-            f'{ltxt}</text>'
-        )
+    for lc, hollow, ltxt in row1:
+        leg_svg.append(_dot(lx + 5, row1_y, lc, hollow))
+        leg_svg.append(_txt(lx + 13, row1_y, ltxt))
         lx += len(ltxt) * 6 + 26
-    # OT chip in legend
+
+    # row 2: tracked (hollow) + OT chip
+    row2_y = total_h - 26
+    lx = 0
+    leg_svg.append(_dot(lx + 5, row2_y, "#185FA5", hollow=True))
+    leg_svg.append(_txt(lx + 13, row2_y, "tracked, not selected"))
+    lx += len("tracked, not selected") * 6 + 26
     leg_svg.append(
-        f'<rect x="{lx}" y="{leg_y-7}" width="26" height="14" rx="7" fill="#F1EFE8"/>'
-        f'<text x="{lx+13}" y="{leg_y}" dy="0.35em" text-anchor="middle" '
+        f'<rect x="{lx}" y="{row2_y-7}" width="26" height="14" rx="7" fill="#F1EFE8"/>'
+        f'<text x="{lx+13}" y="{row2_y}" dy="0.35em" text-anchor="middle" '
         f'font-size="9" fill="#5F5E5A" '
         f'font-family="-apple-system,BlinkMacSystemFont,\'Segoe UI\',sans-serif">OT</text>'
     )
+    leg_svg.append(_txt(lx + 32, row2_y, "officially tracked"))
+
     leg_svg.append(
-        f'<text x="{lx+32}" y="{leg_y}" dy="0.35em" font-size="10" fill="#888" '
+        f'<text x="0" y="{total_h - 8}" font-size="9" fill="#B4B2A9" '
         f'font-family="-apple-system,BlinkMacSystemFont,\'Segoe UI\',sans-serif">'
-        f'officially tracked</text>'
-    )
-    leg_svg.append(
-        f'<text x="0" y="{total_h - 12}" font-size="10" fill="#B4B2A9" '
-        f'font-family="-apple-system,BlinkMacSystemFont,\'Segoe UI\',sans-serif">'
-        f'OT = Officially Tracked (cowwid surveillance panel)</text>'
+        f'colour = co-occurrence verdict · black until a scan has run</text>'
     )
 
     svg = (
@@ -285,22 +316,26 @@ def render_panel_tree(
     scanner_results: dict | None = None,
     cooc_only: set | None = None,
     scanner_added_for: dict | None = None,
+    variant_status: dict | None = None,
 ):
     """
-    Render the global variant tree. Only distinction: OT vs not-OT.
+    Render the global variant tree, colouring selected nodes by their
+    co-occurrence verdict.
+
+    variant_status: {variant: status} from the Co-occurrence check
+        ("confirmed" -> green, "not_found" -> orange, anything else / missing
+        -> black "pending"). Falls back to session_state["acooc_verdicts"].
     (scanner_results, cooc_only, scanner_added_for kept for signature
     compatibility but unused.)
     """
+    if variant_status is None:
+        variant_status = st.session_state.get("acooc_verdicts", {}) or {}
+
     selected_set = set(selected_variants)
     yaml_set = set(yaml_variants)
 
     raw = pango_loader.get_raw_data()
     parent_map = {v: e.get("parent", "") for v, e in raw.items() if e.get("parent")}
-
-    # Recombinants (X*, no parent in pango data) are NOT anchored into the main
-    # tree — that computation crashed. They are rendered in a SEPARATE
-    # "Recombinants" section (see render_panel_tree), grouped by family, so the
-    # main bifurcating tree stays clean and cheap. Nothing to do here.
 
     all_known = set(raw.keys())
     for v in list(selected_set) + list(yaml_set):
@@ -324,11 +359,7 @@ def render_panel_tree(
         st.caption("Select at least one variant to build the tree.")
         return
 
-    # Identify recombinants (X* with no parent in the data). A recombinant's
-    # descendants (XFG.1, XFG.3.1.7…) trace back to the recombinant root by name.
     def _recomb_root(v):
-        # the top-level X* ancestor of v (e.g. XFG.3.1.7 -> XFG), if v is in an
-        # X* family whose root has no parent
         head = v.split(".")[0]
         if head.startswith("X") and head in raw and not raw.get(head, {}).get("parent"):
             return head
@@ -342,13 +373,14 @@ def render_panel_tree(
     # ── main bifurcating tree (non-recombinants) ──
     if result:
         children, root, needed, kind_of, collapse = result
-        _html, _h = _build_svg(children, root, kind_of, collapse)
+        _html, _h = _build_svg(children, root, kind_of, collapse,
+                               variant_status=variant_status)
         components.html(_html, height=_h + 20, scrolling=True)
     elif not recomb_members:
         st.caption("Select at least one variant to build the tree.")
         return
 
-    # ── separate Recombinants section (grouped by family) ──
+    # ── separate Recombinants section (grouped by family), coloured by verdict ──
     selected_recomb = {v for v in selected_variants if v in recomb_members}
     if selected_recomb:
         from collections import defaultdict as _dd
@@ -358,13 +390,15 @@ def render_panel_tree(
         st.caption("Recombinants (mixed ancestry — shown separately from the tree):")
         for froot in sorted(fam):
             members = sorted(fam[froot])
-            # show family root then its selected members indented
             lines = []
             for m in members:
                 is_ot = m in set(yaml_variants)
                 badge = " · OT" if is_ot else ""
                 indent = "&nbsp;&nbsp;&nbsp;" if m != froot else ""
-                lines.append(f"{indent}● <b>{m}</b>{badge}")
+                _mc = _status_color(m, variant_status)
+                lines.append(
+                    f"{indent}<span style='color:{_mc};'>●</span> "
+                    f"<b style='color:{_mc};'>{m}</b>{badge}")
             st.markdown(
                 f"<div style='border:0.5px solid #e5e7eb;border-radius:8px;"
                 f"padding:6px 10px;margin:4px 0;font-size:13px;'>"

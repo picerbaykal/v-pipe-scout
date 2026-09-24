@@ -889,9 +889,24 @@ def app():
                                   _pmap = {l: _pl.get_raw_data().get(l, {}).get("parent", "")
                                            for l in _sigs}
                                   _idx = VariantIndex(_sigs, _pmap)
-                                  _osc = oscillating_pairs(all_selected_variants, _sigs)
+                                  # Undesignated panel nodes (e.g. BA.3.2 — only
+                                  # BA.3.2.1/.2 are in raw_data, so BA.3.2 isn't a
+                                  # key in _sigs) were silently dropped here. Reuse
+                                  # the SAME get_signature fallback the worker's
+                                  # _build_variant_signatures uses, in a local copy,
+                                  # so every deconv/panel variant is checked and none
+                                  # vanish. (Local copy → the cached _sigs used
+                                  # elsewhere, e.g. scanner classification, is intact.)
+                                  _csigs = dict(_sigs)
+                                  for _cv in _dec.keys():
+                                      if _cv != "undetermined" and _cv not in _csigs:
+                                          _cfb = _pl.get_signature(_cv) or set()
+                                          _sub = {m for m in _cfb if m and m[-1] in "ACGT"}
+                                          if _sub:
+                                              _csigs[_cv] = _sub
+                                  _osc = oscillating_pairs(all_selected_variants, _csigs)
                                   _dec_vars = [v for v in _dec.keys()
-                                               if v != "undetermined" and v in _sigs]
+                                               if v != "undetermined" and v in _csigs]
                                   # verdict thresholds — calibrated on real
                                   # data (Alpha -> not_found; current variants
                                   # -> confirmed). Override in cooc_config.yaml.
@@ -956,6 +971,14 @@ def app():
                                       _abmean = (sum(_ab) / len(_ab)) if _ab else 0.0
                                       _rows.append((_v, _status, _reason, _abmean,
                                                     _cov, _frac, _nd, _con_p, _con_t))
+                                  # stash "not found in WW" panel variants for the
+                                  # orange band on the scanner list below.
+                                  st.session_state["acooc_not_found"] = [
+                                      {"variant": _r0[0], "reason": _r0[2], "abmean": _r0[3]}
+                                      for _r0 in _rows if _r0[1] == "not_found"]
+                                  # stash verdicts for the variant tree colouring
+                                  st.session_state["acooc_verdicts"] = {
+                                      _r0[0]: _r0[1] for _r0 in _rows}
                                   if _rows:
                                       # confirmed first, then oscillating, then blind
                                       _order = {"confirmed": 0, "oscillating": 1,
@@ -1389,7 +1412,7 @@ def app():
                   _sub_list = sorted(_agg_sub.values(), key=lambda x: -x["reads"])
                   _addable_n = len(_new_list) + len(_sub_list)
                   with st.expander(
-                      f"🔴 Not in your panel — {_addable_n} finding(s)",
+                      f":red[■] Not in your panel — {_addable_n} finding(s)",
                       expanded=st.session_state.get("acooc_exp_missing", False),
                   ):
                       if not _addable_n:
@@ -1407,6 +1430,33 @@ def app():
                               _render_finding(_slot, "#dc2626", "#fef2f2", "#fecaca",
                                               _is_sub=True)
 
+                  # ---- Not found in wastewater (orange, panel-side) ----
+                  # Panel variants you selected whose distinctive haplotype was
+                  # co-covered but never co-occurred (or constellation absent) —
+                  # evidence of absence. Sourced from the Co-occurrence check above.
+                  _nf_list = st.session_state.get("acooc_not_found", []) or []
+                  with st.expander(
+                      f":orange[▲] Not found in wastewater — {len(_nf_list)} variant(s)",
+                      expanded=False,
+                  ):
+                      if not _nf_list:
+                          st.caption("None — every panel variant with a distinctive "
+                                     "haplotype was found co-occurring (or is a blind spot).")
+                      else:
+                          st.caption(
+                              "You selected these, but their distinctive mutations were "
+                              "looked for and not seen co-occurring in your data — evidence "
+                              "of absence, not just missing coverage.")
+                          for _nf in _nf_list:
+                              st.markdown(
+                                  f"<div style='background:#fff7ed;border:1px solid #fed7aa;"
+                                  f"border-radius:6px;padding:6px 10px;margin:3px 0;font-size:0.82rem;'>"
+                                  f"<span style='font-weight:600;color:#b45309;'>{_nf['variant']}</span>"
+                                  f"<span style='color:#6b7280;margin-left:8px;'>"
+                                  f"{_nf['abmean']*100:.0f}% deconv · {_nf['reason']}</span></div>",
+                                  unsafe_allow_html=True,
+                              )
+
                   # ---- Unresolved / noise (grey umbrella) ----
                   # Mirror the completeness graph's grey band: the "matched but
                   # not co-occurrence-confirmed" lineages (🟣) and the "too broad
@@ -1420,7 +1470,7 @@ def app():
                   _grey_n = len(_mnh_list) + len(_unres_list)
                   _grey_reads = _mnh_reads + _ur_reads
                   with st.expander(
-                      f"⚪ Unresolved / noise — {_grey_n} finding(s) · {_grey_reads:,} reads",
+                      f":gray[■] Unresolved / noise — {_grey_n} finding(s) · {_grey_reads:,} reads",
                       expanded=False,
                   ):
                       st.caption(
@@ -1431,7 +1481,7 @@ def app():
                       # ── 🟣 matched but not co-occurrence-confirmed ──────────
                       st.markdown(
                           f"<div style='font-weight:600;color:#7c3aed;margin:8px 0 2px;'>"
-                          f"🟣 Matched but not co-occurrence-confirmed"
+                          f"■ Matched but not co-occurrence-confirmed"
                           f"<span style='color:#6b7280;font-weight:400;font-size:0.8rem;'> · "
                           f"{len(_mnh_list)} lineage(s) · {_mnh_reads:,} reads</span></div>",
                           unsafe_allow_html=True,
@@ -1460,7 +1510,7 @@ def app():
                       # ── ◦ too broad to name (unresolved) ───────────────────
                       st.markdown(
                           f"<div style='font-weight:600;color:#6b7280;margin:12px 0 2px;'>"
-                          f"◦ Too broad to name"
+                          f"■ Too broad to name"
                           f"<span style='font-weight:400;font-size:0.8rem;'> · "
                           f"{len(_unres_list)} pattern(s) · {_ur_reads:,} reads</span></div>",
                           unsafe_allow_html=True,
@@ -1486,7 +1536,7 @@ def app():
 
                   # ---- Novel ----
                   with st.expander(
-                      f"🔵 Novel — no pango match ({_novel_total:,} reads)",
+                      f":blue[■] Novel — no pango match ({_novel_total:,} reads)",
                       expanded=False,
                   ):
                       if _novel_total == 0:
