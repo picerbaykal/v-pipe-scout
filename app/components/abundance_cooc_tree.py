@@ -331,6 +331,16 @@ def render_panel_tree(
     if variant_status is None:
         variant_status = st.session_state.get("acooc_verdicts", {}) or {}
 
+    # Reset the colouring whenever the panel differs from the last completed run
+    # (or nothing has run): every selected node shows black (pending) until a new
+    # run recomputes verdicts. Stops stale colours lingering after the panel,
+    # dates, or locations change.
+    _ran_panel = st.session_state.get("acooc_ran_panel")
+    _stale = (_ran_panel is None
+              or sorted(set(selected_variants)) != sorted(set(_ran_panel)))
+    if _stale:
+        variant_status = {}
+
     selected_set = set(selected_variants)
     yaml_set = set(yaml_variants)
 
