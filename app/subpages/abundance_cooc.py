@@ -511,6 +511,7 @@ def app():
         from components.multi_location_results import (
             render_single_location_result,
             render_location_progress,
+            render_location_grid,
         )
 
         location_tasks = st.session_state.get("acooc_location_tasks", {})
@@ -788,23 +789,14 @@ def app():
               if ("acooc_selected_city" not in st.session_state or
                       st.session_state.get("acooc_selected_city") not in _city_options):
                   st.session_state["acooc_selected_city"] = _city_options[0] if _city_options else ""
-              if len(location_names) > 1:
-                  _city_labels = [loc.split("(")[0].strip() for loc in location_names]
-                  _cur_idx = 0
-                  _cur_city = st.session_state.get("acooc_selected_city", "")
-                  for _ci, _loc in enumerate(location_names):
-                      if f"📍 {_loc}" == _cur_city:
-                          _cur_idx = _ci
-                  _pick = st.radio("City", options=list(range(len(location_names))),
-                                   format_func=lambda i: _city_labels[i],
-                                   index=_cur_idx, horizontal=True,
-                                   key="acooc_city_radio", label_visibility="collapsed")
-                  st.session_state["acooc_selected_city"] = f"📍 {location_names[_pick]}"
+              # City radio removed — the deconv plots for all cities are shown
+              # together in a small-multiples grid below.
 
               _selected = st.session_state.get("acooc_selected_city", _city_options[0] if _city_options else "")
               st.markdown("<hr style='margin:6px 0 10px;opacity:.15;'>", unsafe_allow_html=True)
 
-              def _city_tab_content(location, task_id):
+              def _city_tab_content(location, task_id, show_deconv=True,
+                                    show_similarity=True):
                   """Shared content for both active and idle city tab fragments."""
                   _cooc_tasks_map = st.session_state.get("acooc_cooc_tasks", {})
                   _cooc_results = st.session_state.get("acooc_cooc_results", {})
@@ -814,16 +806,19 @@ def app():
                   _scanner_tasks_map = st.session_state.get("acooc_scanner_tasks", {})
 
                   # ── deconvolution (primary output) ────────────────────────────
-                  st.markdown("#### Variant deconvolution")
-                  st.caption("Primary output — estimated variant proportions over time.")
-                  if location in st.session_state.location_results:
-                      render_single_location_result(
-                          location, st.session_state.location_results[location]
-                      )
-                  else:
-                      render_location_progress(
-                          location, task_id, celery_app, redis_client
-                      )
+                  # In the multi-city grid the deconv plots are drawn once by
+                  # render_location_grid; here only when show_deconv is set.
+                  if show_deconv:
+                      st.markdown("#### Variant deconvolution")
+                      st.caption("Primary output — estimated variant proportions over time.")
+                      if location in st.session_state.location_results:
+                          render_single_location_result(
+                              location, st.session_state.location_results[location]
+                          )
+                      else:
+                          render_location_progress(
+                              location, task_id, celery_app, redis_client
+                          )
 
                   # ── co-occurrence check per deconvolution variant ─────────────
                   # Annotate each deconvolution result with whether co-occurrence
@@ -1042,8 +1037,9 @@ def app():
                           except Exception as _e:
                               st.caption(f"(co-occurrence check unavailable: {_e})")
 
-                  # ── Jaccard (signature similarity) ────────────────────────────
-                  if len(all_selected_variants) >= 2:
+                  # ── Jaccard (signature similarity) — city-independent, so it's
+                  #    shown once above the tabs (show_similarity=False here). ──
+                  if show_similarity and len(all_selected_variants) >= 2:
                       st.markdown("---")
                       st.markdown("<div style='font-weight:600;font-size:13px;'>"
                                   "🧬 Signature similarity (Jaccard)</div>",
@@ -1060,9 +1056,31 @@ def app():
                   # scanner results shown in a combined summary below all city tabs
                   # (not per-tab) — see the "Scanner findings" section after the tabs
 
-              _active_loc = _selected.replace("📍 ", "")
-              if _active_loc in location_tasks:
-                  _city_tab_content(_active_loc, location_tasks[_active_loc])
+              # ── signature-similarity matrix: city-independent, shown ONCE
+              #    above the tabs (not repeated per city). ──
+              if len(all_selected_variants) >= 2:
+                  st.markdown("<div style='font-weight:600;font-size:13px;'>"
+                              "🧬 Signature similarity (Jaccard)</div>",
+                              unsafe_allow_html=True)
+                  st.caption("How much each pair of panel variants shares mutations "
+                             "— high similarity means deconvolution may struggle to "
+                             "tell them apart. (Same for every city.)")
+                  with st.expander("Show similarity heatmap", expanded=False):
+                      render_jaccard_heatmap(
+                          variants=all_selected_variants,
+                          pango_loader=cached_get_pango_loader(),
+                      )
+              # ── per-city TABS: each tab is one city's full-size deconvolution
+              #    plot (with confidence bands) plus that city's co-occurrence
+              #    check. Replaces the radio and the small-multiples grid. ──
+              _dtabs = st.tabs([loc for loc in location_names])
+              for _dtab, _loc in zip(_dtabs, location_names):
+                  with _dtab:
+                      if _loc in location_tasks:
+                          _city_tab_content(_loc, location_tasks[_loc],
+                                            show_deconv=True, show_similarity=False)
+                      else:
+                          st.caption("Not started.")
 
 
             if _active_section == "Co-occurrence results":
@@ -1091,21 +1109,32 @@ def app():
                   st.caption("How much of each city's co-occurrence signal your panel "
                              "explains (green) vs the rest. Green = explained · red = "
                              "addable (scanner found it) · blue = novel · grey = noise.")
-                  # Consistent layout: reserve a slot for EVERY selected city
-                  # so plots are the same size and labelled from the start,
-                  # regardless of which city finishes first. Cities still
-                  # computing show a placeholder in their slot. Legend on the
-                  # first ready plot only.
+                  # One shared legend ABOVE the grid; every plot has
+                  # show_legend=False and the same fixed height, so all plot areas
+                  # are identical. (Previously the legend went on the first plot
+                  # only and ate into its fixed height, making it shorter.)
+                  _comp_leg = [
+                      ("#0F6E56", "explained by panel"),
+                      ("#dc2626", "addable (not in panel)"),
+                      ("#2563eb", "novel (investigate)"),
+                      ("#9ca3af", "unresolved / noise"),
+                  ]
+                  st.markdown(
+                      "<div style='display:flex;gap:14px;flex-wrap:wrap;"
+                      "font-size:11.5px;color:#6b7280;margin:2px 0 8px;'>"
+                      + "".join(
+                          f"<span><span style='display:inline-block;width:11px;"
+                          f"height:11px;border-radius:2px;background:{_c};"
+                          f"vertical-align:-1px;margin-right:5px;'></span>{_t}</span>"
+                          for _c, _t in _comp_leg)
+                      + "</div>", unsafe_allow_html=True)
                   _grid_locs = list(location_names)
-                  _legend_used = [False]
                   def _one_city(_lc):
                       st.markdown(f"<div style='font-size:12px;font-weight:600;'>"
                                   f"{_lc}</div>", unsafe_allow_html=True)
                       if _cr_all.get(_lc) is not None and _sr_all.get(_lc) is not None:
                           _render_composition(_cr_all[_lc], _sr_all[_lc], key=_lc,
-                                              show_legend=not _legend_used[0],
-                                              show_caption=False)
-                          _legend_used[0] = True
+                                              show_legend=False, show_caption=False)
                       else:
                           st.caption("\u23f3 computing\u2026")
                   if len(_grid_locs) == 1:

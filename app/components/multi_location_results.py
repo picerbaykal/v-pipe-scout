@@ -105,6 +105,89 @@ def render_single_location_result(location: str, result_data: Any) -> None:
         return
 
 
+def _shared_variant_legend(color_map: Dict[str, str]) -> None:
+    """One horizontal legend for the whole deconv grid (each plot has
+    show_legend=False, so this is the only legend)."""
+    items = "".join(
+        f"<span style='display:inline-flex;align-items:center;margin:0 14px 4px 0;"
+        f"white-space:nowrap;font-size:12px;color:#374151;'>"
+        f"<span style='display:inline-block;width:18px;height:3px;border-radius:2px;"
+        f"background:{c};margin-right:6px;'></span>{v}</span>"
+        for v, c in color_map.items())
+    st.markdown(
+        "<div style='display:flex;flex-wrap:wrap;align-items:center;"
+        "padding:2px 2px 8px;'>" + items + "</div>", unsafe_allow_html=True)
+
+
+def render_location_grid(location_results: Dict[str, Any], location_names,
+                         location_tasks: Dict[str, str],
+                         celery_app, redis_client) -> None:
+    """Deconvolution plots for ALL selected cities as a small-multiples grid.
+
+    - one shared legend on top (per-plot legends off)
+    - consistent variant colours across every city
+    - equal plot heights
+    - dynamic columns: 1 city -> one big plot; 2-4 -> 2 cols; 5-6 -> 3 cols
+    Cities still computing show their progress in-slot.
+    """
+    names = list(location_names)
+    if not names:
+        st.info("Select at least one location.")
+        return
+
+    cmap = build_variant_color_map(location_results, names)
+    if cmap:
+        _shared_variant_legend(cmap)
+
+    n = len(names)
+    # keep plots readable: at most 2 columns (1 city = one big plot). Overview
+    # plots are LINES ONLY (bands muddy at small size); the focus view shows bands.
+    ncols = 1 if n == 1 else 2
+    height = 480 if n == 1 else 340
+
+    def _one(loc):
+        st.markdown(f"<div style='font-size:12.5px;font-weight:600;margin-bottom:2px;'>"
+                    f"{loc}</div>", unsafe_allow_html=True)
+        if loc in location_results:
+            rd = location_results[loc]
+            vd = rd.get(loc) if isinstance(rd, dict) and loc in rd else rd
+            fig = create_variant_plot(vd, loc, color_map=cmap, show_legend=False,
+                                      height=height, title="", show_bands=False)
+            if fig is not None:
+                fig.update_layout(margin=dict(t=10, b=36, l=48, r=12))
+                st.plotly_chart(fig, use_container_width=True,
+                                key=f"deconv_grid_{loc}")
+            else:
+                st.caption("No plottable deconvolution data.")
+        elif loc in location_tasks:
+            render_location_progress(loc, location_tasks[loc], celery_app, redis_client)
+        else:
+            st.caption("Not started.")
+
+    with st.container():
+        for i in range(0, n, ncols):
+            cols = st.columns(ncols)
+            for j, loc in enumerate(names[i:i + ncols]):
+                with cols[j]:
+                    _one(loc)
+
+    # ── focus one city at full size (with confidence bands) — a reliable zoom,
+    # since the plotly modebar zoom is fiddly on small grid plots ──
+    ready = [l for l in names if l in location_results]
+    if len(ready) > 1:
+        st.markdown("<div style='margin-top:6px'></div>", unsafe_allow_html=True)
+        focus = st.selectbox("🔍 Focus one city (full size, with confidence bands)",
+                             ["—"] + ready, key="acooc_deconv_focus")
+        if focus and focus != "—":
+            rd = location_results[focus]
+            vd = rd.get(focus) if isinstance(rd, dict) and focus in rd else rd
+            fig = create_variant_plot(vd, focus, color_map=cmap, show_legend=True,
+                                      height=520, title=f"{focus}", show_bands=True)
+            if fig is not None:
+                st.plotly_chart(fig, use_container_width=True,
+                                key=f"deconv_focus_{focus}")
+
+
 def render_location_progress(location: str, task_id: str, celery_app, redis_client) -> None:
     """
     Render progress for a location that's still processing.
@@ -162,13 +245,51 @@ def render_location_progress(location: str, task_id: str, celery_app, redis_clie
         st.rerun()
 
 
-def create_variant_plot(variants_data: Dict[str, Any], location: str) -> Optional[go.Figure]:
+def _fallback_palette():
+    return px.colors.qualitative.Bold if hasattr(px.colors.qualitative, 'Bold') else [
+        "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+        "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"
+    ]
+
+
+def build_variant_color_map(location_results: Dict[str, Any],
+                            location_names) -> Dict[str, str]:
+    """One colour per variant, STABLE across every city, so a shared legend and
+    small-multiples grid stay consistent (create_variant_plot otherwise colours
+    by per-city index, which would give the same variant different colours in
+    different cities). Variants are ordered first-seen across cities;
+    'undetermined' is always grey and last."""
+    seen = []
+    for loc in location_names:
+        rd = location_results.get(loc) or {}
+        vd = rd.get(loc) if isinstance(rd, dict) and loc in rd else rd
+        if isinstance(vd, dict):
+            for v in vd.keys():
+                if v != "undetermined" and v not in seen:
+                    seen.append(v)
+    palette = _fallback_palette()
+    palette = palette * (len(seen) // len(palette) + 1)
+    cmap = {v: palette[i] for i, v in enumerate(seen)}
+    cmap["undetermined"] = "#9ca3af"
+    return cmap
+
+
+def create_variant_plot(variants_data: Dict[str, Any], location: str,
+                        color_map: Optional[Dict[str, str]] = None,
+                        show_legend: bool = True,
+                        height: int = 500,
+                        title: Optional[str] = None,
+                        show_bands: bool = True) -> Optional[go.Figure]:
     """
     Create plotly figure for variant abundance over time.
 
     Args:
         variants_data: Dictionary containing variant time series data
         location: Location name for the title
+        color_map: optional {variant: colour} for consistent colours across cities
+        show_legend: draw the per-figure legend (False when a shared legend is used)
+        height: figure height in px
+        title: figure title override (None -> default per-location title)
 
     Returns:
         Plotly figure object or None if no valid data
@@ -179,11 +300,8 @@ def create_variant_plot(variants_data: Dict[str, Any], location: str) -> Optiona
 
     fig = go.Figure()
 
-    # Color palette for variants
-    colors = px.colors.qualitative.Bold if hasattr(px.colors.qualitative, 'Bold') else [
-        "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
-        "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"
-    ]
+    # Color palette for variants (fallback when no color_map is given)
+    colors = _fallback_palette()
 
     # Ensure we have enough colors
     if len(variants_data) > len(colors):
@@ -294,8 +412,10 @@ def create_variant_plot(variants_data: Dict[str, Any], location: str) -> Optiona
                 continue
 
             all_dates.extend(dates)
-            color_idx = i % len(colors)
-            color = colors[color_idx]
+            if color_map and variant_name in color_map:
+                color = color_map[variant_name]
+            else:
+                color = colors[i % len(colors)]
 
             # Add line plot for this variant
             fig.add_trace(go.Scatter(
@@ -310,7 +430,9 @@ def create_variant_plot(variants_data: Dict[str, Any], location: str) -> Optiona
             ))
 
             # Add shaded confidence interval if we have different upper/lower bounds
-            if any(l != u for l, u in zip(lower_bounds, upper_bounds)):
+            # (skipped in the small-multiples grid — the overlapping bands are
+            # muddy at small size; the focused single-city view shows them)
+            if show_bands and any(l != u for l, u in zip(lower_bounds, upper_bounds)):
                 rgba_color = get_rgba_color(color, 0.2)
 
                 fig.add_trace(go.Scatter(
@@ -336,7 +458,8 @@ def create_variant_plot(variants_data: Dict[str, Any], location: str) -> Optiona
 
     # Update layout
     fig.update_layout(
-        title=f"Variant Proportion Estimates - {location}",
+        title=(title if title is not None
+               else f"Variant Proportion Estimates - {location}"),
         xaxis_title="Date",
         yaxis_title="Estimated Proportion",
         yaxis=dict(
@@ -344,7 +467,9 @@ def create_variant_plot(variants_data: Dict[str, Any], location: str) -> Optiona
             range=[0, 1]
         ),
         legend_title="Variants",
-        height=500,
+        showlegend=show_legend,
+        height=height,
+        margin=dict(t=42, b=40, l=50, r=16),
         template="plotly_white",
         hovermode="x unified"
     )
