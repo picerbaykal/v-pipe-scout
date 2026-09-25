@@ -38,6 +38,14 @@ logger = logging.getLogger(__name__)
 # Depth is measured as number of parent hops from the node to the tree root.
 MIN_CLADE_DEPTH = 6
 
+# 2026-09: many candidates can still name a clade when they collapse into ONE
+# family (>= this share of candidates inside the dominant clade's subtree),
+# whatever its depth — recombinant families (XFG, depth 0) and their hundreds of
+# Nextclade sublineages would otherwise always be "unresolved". Backbone
+# fingerprints spread over unrelated clades (e.g. 62% under XBB.1) stay
+# unresolved. Specificity is enforced later by the ★ rule and MIN_FINDING_READS.
+MIN_FAMILY_SHARE = 0.9
+
 # Minimum fingerprint size for co-occurrence (2 = haplotype, 1 = allele freq).
 MIN_FINGERPRINT = 2
 
@@ -45,7 +53,47 @@ MIN_FINGERPRINT = 2
 # block counts as evidence only if it holds at least one such mutation; a block
 # whose mutations are all high-carrier backbone can't confirm a specific variant.
 # Kept in sync with _STAR_MAX in components/scanner_heatmap.py.
-STAR_CARRIER_MAX = 30
+STAR_CARRIER_MAX = 30   # legacy global count; kept only for the UI heatmap ★
+
+# 2026-09: a block is discriminating when one of its mutations is rare OUTSIDE
+# the finding's own family (own sublineages never count against it — the global
+# count above breaks on the granular Nextclade tree, e.g. PQ.16.1.1). Carriers
+# under a different recombinant root (X..) mostly inherited the mutation and are
+# tolerated in larger numbers. Same rule as the co-occurrence check.
+STAR_OUTSIDE_MAX = 5
+STAR_OUT_REC_MAX = 60
+
+# A finding needs at least this many reads to be confirmed; below it a couple
+# of reads matching by chance (B.1.617.2 on 2 reads, BA.2.87.1) would be named.
+MIN_FINDING_READS = 100
+
+_REC_ROOT_PREFIX = "X"
+
+
+def beyond_panel(present, panel_sigs) -> set:
+    """Mutations on a read that its BEST-MATCHING panel variant does not carry.
+
+    `panel_sigs` is {variant: signature}. The read is compared with each panel
+    variant separately and the one sharing the most mutations is used, so the
+    result does not depend on which OTHER variants are in the panel (an extinct
+    control can no longer hide a real variant by contributing mutations to a
+    pooled set). A plain set is accepted for backward compatibility and treated
+    as the old pooled panel union."""
+    present = set(present)
+    if not panel_sigs:
+        return present
+    if isinstance(panel_sigs, (set, frozenset)):
+        return present - panel_sigs
+    # Ties are common (a read covering only mutations several panel variants
+    # share). Resolve them deterministically — never by dict/set order, which
+    # changes between worker restarts — by removing the mutations of EVERY
+    # variant tied for closest.
+    best_n = max(len(present & sig) for sig in panel_sigs.values())
+    tied: Set[str] = set()
+    for sig in panel_sigs.values():
+        if len(present & sig) == best_n:
+            tied |= sig
+    return present - tied
 
 # Cached position parser: extract the integer position from a mutation string
 # like "22599C" -> 22599. Called millions of times, so cache aggressively and
@@ -125,6 +173,35 @@ class _Tree:
             return None
         return max(common, key=self.depth)
 
+    def rec_root(self, node: str) -> Optional[str]:
+        """Topmost recombinant (X..) root above or at node, if any. Memoised:
+        called for every candidate/carrier, thousands of times per scan."""
+        memo = self.__dict__.setdefault("_rroot", {})
+        if node in memo:
+            return memo[node]
+        cur, found, seen = node, None, set()
+        while cur and cur not in seen:
+            seen.add(cur)
+            if cur.startswith("X") and "." not in cur:
+                found = cur
+            cur = self.parent.get(cur, "")
+        memo[node] = found
+        return found
+
+    def family(self, node: str) -> Set[str]:
+        """node plus all descendants (memoised)."""
+        memo = self.__dict__.setdefault("_fam", {})
+        if node in memo:
+            return memo[node]
+        fam, stack = {node}, [node]
+        while stack:
+            for ch in self.children.get(stack.pop(), []):
+                if ch not in fam:
+                    fam.add(ch)
+                    stack.append(ch)
+        memo[node] = fam
+        return fam
+
     def dominant_clade(
         self, nodes: List[str], min_fraction: float = 0.6
     ) -> Optional[str]:
@@ -154,6 +231,7 @@ def _assign(
     all_sigs: Dict[str, Set[str]],
     tree: _Tree,
     candidates_fn=None,
+    panel_set: Optional[Set[str]] = None,
 ) -> Tuple[Optional[str], str, List[str]]:
     """Assign a fingerprint to the tightest clade it supports.
 
@@ -193,7 +271,32 @@ def _assign(
     # Many candidates (> 15) → only meaningful if they collapse to a
     # reasonably deep common clade; otherwise it's genuinely too broad.
     clade = tree.dominant_clade(candidates)
-    if clade is None or tree.depth(clade) < MIN_CLADE_DEPTH:
+    if clade is None:
+        return None, "unresolved", candidates
+    # recombinants under a DIFFERENT recombinant root (e.g. XFY, XFV descending
+    # from XFG but parentless in the tree) inherited these mutations: they are
+    # relatives, not competitors, so they don't dilute the family share
+    root = tree.rec_root(clade)
+    counted = [c for c in candidates
+               if not (tree.rec_root(c) and tree.rec_root(c) != root)]
+    fam = tree.family(clade)
+    share = (len([c for c in counted if c in fam]) / len(counted)) if counted else 0.0
+    def _holds_panel(c):
+        fam_c = tree.family(c)
+        return any(p in fam_c and p != c for p in (panel_set or ()))
+
+    if tree.depth(clade) < MIN_CLADE_DEPTH and _holds_panel(clade):
+        # a shallow clade containing a panel variant (the root, JN.1, …) holds
+        # everything by construction — backbone the panel covers, not a finding
+        return None, "unresolved", candidates
+    if tree.depth(clade) < MIN_CLADE_DEPTH and share < MIN_FAMILY_SHARE:
+        # The tightest 60% clade holds too few (e.g. XFG.1 among XFG.1 + XFG.3
+        # sublineages): fall back to the tightest clade holding >= 90% of them —
+        # unless it contains a panel variant, in which case it is backbone the
+        # panel already covers (B, JN.1 would always qualify) -> unresolved.
+        wide = tree.dominant_clade(counted, min_fraction=MIN_FAMILY_SHARE) if counted else None
+        if wide and not _holds_panel(wide) and wide not in (panel_set or ()):
+            return wide, "clade", candidates
         return None, "unresolved", candidates
     return clade, "clade", candidates
 
@@ -209,7 +312,8 @@ def _panel_relationship(
     """
     if node in panel_set:
         return "in_panel", node
-    for pv in panel_set:
+    # deepest panel ancestor first; sorted so the result never depends on set order
+    for pv in sorted(panel_set, key=lambda v: (-tree.depth(v), v)):
         if tree.is_descendant(node, pv):
             return "sublineage", pv
     return "new_lineage", None
@@ -250,9 +354,14 @@ def scan_unexplained_patterns(
     panel_set = set(panel_variants)
     tree = _Tree(panel_parent_map)
 
-    panel_union: Set[str] = set()
-    for pv in panel_set:
-        panel_union |= all_lineage_signatures.get(pv, set())
+    panel_sigs: Dict[str, Set[str]] = {
+        pv: all_lineage_signatures.get(pv, set()) for pv in panel_set}
+    _missing = sorted(pv for pv, sg in panel_sigs.items() if not sg)
+    logger.info(
+        f"[scanner] panel={sorted(panel_set)} lineages={len(all_lineage_signatures)} "
+        f"patterns={0 if unexplained_patterns is None else len(unexplained_patterns)} "
+        f"min_read_count={min_read_count}"
+        + (f" PANEL VARIANTS WITHOUT SIGNATURE: {_missing}" if _missing else ""))
 
     patterns = unexplained_patterns
     if patterns is None or patterns.empty:
@@ -295,22 +404,39 @@ def scan_unexplained_patterns(
     observed_patterns: List = []   # list of (frozenset(muts), count)
     observed_dated: List = []      # list of (frozenset(muts), count, date)
 
+    # min_read_count applies to the TOTAL reads carrying a fingerprint, not to
+    # each raw pattern: the same signal is split into many small patterns by
+    # read coverage (which panel positions a read happens to span), so a
+    # per-pattern threshold drops real variants piece by piece (XFG's ~50k spike
+    # reads vanished at min_read_count=500). Single raw patterns below
+    # _NOISE_FLOOR reads are still ignored as noise.
+    _NOISE_FLOOR = 2
+    _rows = []
+    fp_total: Dict[frozenset, int] = {}
     for _, row in patterns.iterrows():
         present = set(row["confirmed_present"])
         count = int(row["count"])
-        if count < min_read_count:
+        fp = frozenset(beyond_panel(present, panel_sigs))
+        _rows.append((row, present, count, fp))
+        if count >= _NOISE_FLOOR:
+            fp_total[fp] = fp_total.get(fp, 0) + count
+
+    for row, present, count, fingerprint in _rows:
+        if count < _NOISE_FLOOR:
             continue
         total_unexplained += count
         if len(present) >= 2:
             observed_patterns.append((frozenset(present), count))
             observed_dated.append((frozenset(present), count, row.get("date", "")))
 
-        fingerprint = present - panel_union
         if len(fingerprint) < MIN_FINGERPRINT:
             continue  # not co-occurrence beyond panel
+        if fp_total.get(fingerprint, 0) < min_read_count:
+            continue  # too little evidence for this fingerprint overall
+        fingerprint = set(fingerprint)
 
         node, kind, candidates = _assign(
-            fingerprint, all_lineage_signatures, tree, _candidates_for
+            fingerprint, all_lineage_signatures, tree, _candidates_for, panel_set
         )
 
         if kind == "novel":
@@ -358,9 +484,14 @@ def scan_unexplained_patterns(
         slot["candidates"].update(candidates)
 
     # ── build output lists ────────────────────────────────────────────────
+    # one cache shared by all findings of this scan (same patterns, same tree):
+    # identical groups / member signatures recur across hundreds of members on
+    # the granular Nextclade tree, so each is evaluated once. Speed only.
+    _scan_cache: dict = {}
     _all_clades = [
         _finalize_clade(s, tree, all_lineage_signatures, observed_patterns,
-                        observed_dated, _carrier_count, _candidates_for)
+                        observed_dated, _carrier_count, _candidates_for,
+                        cache=_scan_cache)
         for s in clade_hits.values()
     ]
 
@@ -369,8 +500,10 @@ def scan_unexplained_patterns(
     # clade (LF.7), so the SAME discriminating group is emitted both under LF.7
     # and under XFG's own finding. Assign each group to exactly one owner — the
     # finding whose node IS the group's driver (family_root), else the most
-    # specific (deepest) finding — and strip it from the rest.
-    _dedupe_member_blocks(_all_clades, tree)
+    # specific (deepest) finding — and strip it from the rest. Runs AFTER the ★
+    # annotation below, so a block goes to the finding where it is ★ (XFG's
+    # 8350C block must stay with XFG, not with its descendant XFG.1, under which
+    # 8350C is shared with the rest of XFG and would be ★ nowhere).
 
     # ── classify each finding on its OWN merits (flattened, no nesting) ─────
     # The pango tree nests findings (JN.1 ⊃ LF.7 ⊃ LF.7.9). Nesting let a tiny
@@ -387,17 +520,71 @@ def scan_unexplained_patterns(
         c["sub_findings"] = []      # flattened: each node stands on its own
         c["parent_clade"] = None
 
+    _fam_cache: Dict[str, Set[str]] = {}
+    _rroot_cache: Dict[str, Optional[str]] = {}
+
+    def _family(root):
+        if root not in _fam_cache:
+            fam, stack = {root}, [root]
+            while stack:
+                for ch in tree.children.get(stack.pop(), []):
+                    if ch not in fam:
+                        fam.add(ch)
+                        stack.append(ch)
+            _fam_cache[root] = fam
+        return _fam_cache[root]
+
+    def _rroot(lin):
+        if lin not in _rroot_cache:
+            x, found, seen = lin, None, set()
+            while x and x not in seen:
+                seen.add(x)
+                head = x.split(".")[0]
+                if head.startswith(_REC_ROOT_PREFIX) and head == x:
+                    found = x
+                x = tree.parent.get(x, "")
+            _rroot_cache[lin] = found
+        return _rroot_cache[lin]
+
+    def _annotate_outside(c):
+        """Per block and mutation: carriers outside the finding's family."""
+        for b in c.get("member_blocks", []) or []:
+            fam = _family(c["node"]) | _family(b.get("family_root") or c["node"])
+            roots = {_rroot(c["node"]), _rroot(b.get("family_root") or c["node"])}
+            out = {}
+            for m in b.get("discriminating", []):
+                outside = _mut_index.get(m, set()) - fam
+                n_rec = sum(1 for l in outside if _rroot(l) and _rroot(l) not in roots)
+                out[m] = (len(outside) - n_rec, n_rec)
+            b["mut_outside"] = {m: v[0] for m, v in out.items()}
+            # ★ per mutation, by the same rule the scanner confirms with — the
+            # UI reads this instead of re-deriving it from global carrier counts
+            b["mut_star"] = {m: (v[0] <= STAR_OUTSIDE_MAX and v[1] <= STAR_OUT_REC_MAX)
+                             for m, v in out.items()}
+            b["_outside_pairs"] = out
+
     def _block_is_discriminating(b):
-        mc = b.get("mut_carriers", {}) or {}
-        return any(isinstance(v, int) and 0 < v <= STAR_CARRIER_MAX
-                   for v in mc.values())
+        # the ★ evidence itself must rest on enough reads (XFG.1 was "confirmed"
+        # on a 6-read ★ block while the finding had 57k shared-mutation reads)
+        if int(b.get("reads", 0) or 0) < MIN_FINDING_READS:
+            return False
+        return any(o <= STAR_OUTSIDE_MAX and r <= STAR_OUT_REC_MAX
+                   for o, r in (b.get("_outside_pairs") or {}).values())
 
     def _has_disc_block(c):
         return any(_block_is_discriminating(b)
                    for b in (c.get("member_blocks", []) or []))
 
+    for c in _all_clades:
+        _annotate_outside(c)
+    _dedupe_member_blocks(_all_clades, tree, _block_is_discriminating)
+    # too few reads to name anything: dropped (their reads stay in the grey gap)
+    _all_clades = [c for c in _all_clades if c["total_reads"] >= MIN_FINDING_READS]
     confirmed = [c for c in _all_clades if _has_disc_block(c)]
     _backbone = [c for c in _all_clades if not _has_disc_block(c)]
+    for c in _all_clades:
+        for b in c.get("member_blocks", []) or []:
+            b.pop("_outside_pairs", None)
 
     # collapse a backbone lineage chain to its single most-informative node:
     # among backbone findings in an ancestor/descendant relationship keep only
@@ -433,12 +620,16 @@ def scan_unexplained_patterns(
             novel_patterns, key=lambda x: -x["count"]
         )[:10],
     }
-    novel["pattern_count"] = _count_novel(
-        patterns, panel_union, all_lineage_signatures, tree, min_read_count,
-        _candidates_for
-    )
+    # same rule as the main loop (fingerprint totals), so counts always agree
+    novel["pattern_count"] = len(novel_patterns)
 
     summary = _summary(resolved_clade, unresolved, novel)
+    logger.info(
+        f"[scanner] reads={total_unexplained:,} fingerprints>=2={sum(1 for f in fp_total if len(f) >= 2)} "
+        f"passing={sum(1 for f, n in fp_total.items() if len(f) >= 2 and n >= min_read_count)} | "
+        f"confirmed={[c['node'] for c in resolved_clade]} "
+        f"named_not_specific={[c['node'] for c in matched_no_haplotype]} "
+        f"unresolved={len(unresolved)} novel={novel['pattern_count']}")
 
     result = {
         "resolved_clade": resolved_clade,
@@ -490,7 +681,8 @@ def _finalize_clade(s: dict, tree: "_Tree", all_sigs: Dict[str, Set[str]],
                     observed_patterns: List = None,
                     observed_dated: List = None,
                     carrier_count: Dict[str, int] = None,
-                    candidates_fn=None) -> dict:
+                    candidates_fn=None,
+                    cache: Optional[dict] = None) -> dict:
     """Build the clade finding with per-member co-occurrence blocks.
 
     Selection rule for which members to plot:
@@ -507,6 +699,25 @@ def _finalize_clade(s: dict, tree: "_Tree", all_sigs: Dict[str, Set[str]],
     observed_patterns = observed_patterns or []
     observed_dated = observed_dated or []
     carrier_count = carrier_count or {}
+    cache = {} if cache is None else cache
+    _c_groups = cache.setdefault("groups", {})      # restricted sig -> groups
+    _c_obs = cache.setdefault("observed", {})       # group -> bool
+    _c_reads = cache.setdefault("reads", {})        # group -> int
+    _c_carr = cache.setdefault("carriers", {})      # group -> carriers
+    if "universe" not in cache:
+        # every mutation that appears in some observed pattern; a member's
+        # groups depend only on its signature restricted to this set
+        cache["universe"] = set().union(*(op for op, _c in observed_patterns)) \
+            if observed_patterns else set()
+    if "pos_index" not in cache:
+        # position -> mutations carried by any lineage (for absent markers)
+        _pi: Dict[int, Set[str]] = {}
+        for _sl in all_sigs.values():
+            for _mm in _sl:
+                _pi.setdefault(_mut_pos(_mm), set()).add(_mm)
+        cache["pos_index"] = _pi
+    _universe = cache["universe"]
+    _pos_index = cache["pos_index"]
     node = s["node"]
     candidates = sorted(s["candidates"])
     phylo = [c for c in candidates
@@ -537,7 +748,11 @@ def _finalize_clade(s: dict, tree: "_Tree", all_sigs: Dict[str, Set[str]],
         This replaces distance-based clustering, which merged mutations that never
         actually co-occur (e.g. BA.3.2.2's 25699..27259 chained into one group no
         read could cover), hiding real tight combos like {26645T,26718T,26771T}."""
-        sig_no_indel = {m for m in member_sig if "-" not in m and "+" not in m}
+        sig_no_indel = frozenset(m for m in member_sig
+                                 if "-" not in m and "+" not in m and m in _universe)
+        hit = _c_groups.get(sig_no_indel)
+        if hit is not None:
+            return hit
         seen = set()
         out = []
         for op, _cnt in observed_patterns:
@@ -545,6 +760,7 @@ def _finalize_clade(s: dict, tree: "_Tree", all_sigs: Dict[str, Set[str]],
             if len(inter) >= 2 and inter not in seen:
                 seen.add(inter)
                 out.append(inter)
+        _c_groups[sig_no_indel] = out
         return out
 
     def _is_observed(group):
@@ -552,23 +768,31 @@ def _finalize_clade(s: dict, tree: "_Tree", all_sigs: Dict[str, Set[str]],
         # most of it (>= 80%), not necessarily all. Dense discriminating groups
         # (e.g. NB.1.8.1's 24-mut spike) rarely appear in full on one pattern
         # due to coverage/variation, but a strong partial match is real signal.
+        key = frozenset(group)
+        if key in _c_obs:
+            return _c_obs[key]
         g = set(group)
         best = 0.0
         for op, _cnt in observed_patterns:
             inter = len(g & op)
             if inter >= 2:
                 best = max(best, inter / len(g))
-        return best >= 0.8
+        _c_obs[key] = best >= 0.8
+        return _c_obs[key]
 
     def _group_reads(group):
         # total co-occurrence reads where this group appears (fractional >=80%)
         # — the region's signal strength, used for the UI threshold slider.
+        key = frozenset(group)
+        if key in _c_reads:
+            return _c_reads[key]
         g = set(group)
         total = 0
         for op, cnt in observed_patterns:
             inter = len(g & op)
             if inter >= 2 and inter / len(g) >= 0.8:
                 total += cnt
+        _c_reads[key] = total
         return total
 
     # for each member, find its best specific+observed amplicon group(s)
@@ -576,15 +800,32 @@ def _finalize_clade(s: dict, tree: "_Tree", all_sigs: Dict[str, Set[str]],
     # Specificity counts carriers OUTSIDE the clade family — sibling
     # descendants (PQ.* for NB.1.8.1) sharing the group are the same family,
     # not "other" variants, so they don't count against specificity.
-    family = set(members)
+    # the finding's family = its candidate members PLUS every descendant of its
+    # node in the tree: a group carried by the node's own sublineages (XFG's
+    # 8350C, carried by all ~380 XFG lineages) must not count as "outside" just
+    # because this finding's reads matched only some of them (e.g. the 22899A
+    # subset) — otherwise the variant's ★ block is never built.
+    family = set(members) | tree.family(node)
+    _node_root = tree.rec_root(node)
+    _nout: dict = {}
     combo_to_members = {}   # frozenset(group) -> {members, n_other, n_total}
     for m in members:
         for g in _amplicon_groups(member_sigs[m]):
-            if candidates_fn is not None:
-                carriers = candidates_fn(g)
-            else:
-                carriers = [l for l, sg in all_sigs.items() if g.issubset(sg)]
-            n_outside = sum(1 for l in carriers if l not in family)
+            carriers = _c_carr.get(g)
+            if carriers is None:
+                if candidates_fn is not None:
+                    carriers = candidates_fn(g)
+                else:
+                    carriers = [l for l, sg in all_sigs.items() if g.issubset(sg)]
+                _c_carr[g] = carriers
+            # recombinants under a different root (XFY, XFV … from XFG) inherited
+            # the group: relatives, not competitors — same rule as the ★ markers
+            n_outside = _nout.get(g)
+            if n_outside is None:
+                n_outside = sum(1 for l in carriers
+                                if l not in family
+                                and not (tree.rec_root(l) and tree.rec_root(l) != _node_root))
+                _nout[g] = n_outside
             if n_outside > 15:
                 continue          # not specific (many non-family carriers)
             if not _is_observed(g):
@@ -609,14 +850,10 @@ def _finalize_clade(s: dict, tree: "_Tree", all_sigs: Dict[str, Set[str]],
         lo, hi = gpos[0] - 20, gpos[-1] + 20
         fam_sig = set().union(*(all_sigs.get(m, set()) for m in fam))
         absent = set()
-        for l, sl in all_sigs.items():
-            if l in fam:
-                continue
-            for mm in sl:
-                p = _mut_pos(mm)
-                if lo <= p <= hi and mm not in fam_sig:
-                    if carrier_count.get(mm, 999) <= 60:
-                        absent.add(mm)
+        for p in range(lo, hi + 1):
+            for mm in _pos_index.get(p, ()):
+                if mm not in fam_sig and carrier_count.get(mm, 999) <= 60:
+                    absent.add(mm)
         _raw_blocks.append({
             "members": fam,
             "n_outside": info["n_other"],
@@ -640,6 +877,14 @@ def _finalize_clade(s: dict, tree: "_Tree", all_sigs: Dict[str, Set[str]],
         #   small (<=15)       -> "XFG family @ 4184 [9 lineages]"
         #   broad (>15)        -> "NB.1.8.1 clade @ 8299 [68 lineages]"
         root = fam[0] if len(fam) == 1 else _clade_root_of(fam, tree)
+        # recombinants have no parent, so a group carried by the node's family
+        # AND by recombinants that inherited it has no common ancestor and the
+        # label fell back to the shortest name (e.g. "XHA" for XFG's 8350C
+        # block). If the label lies outside the node's family while some of the
+        # carriers are inside it, label it by the finding's node instead.
+        _nfam = tree.family(node)
+        if root not in _nfam and any(m in _nfam for m in fam):
+            root = node
         if ntot == 1:
             label = f"{root} @ {b['region_start']}"
         elif ntot <= 15:
@@ -780,7 +1025,8 @@ def _finalize_clade(s: dict, tree: "_Tree", all_sigs: Dict[str, Set[str]],
     }
 
 
-def _dedupe_member_blocks(all_clades: List[dict], tree: "_Tree") -> None:
+def _dedupe_member_blocks(all_clades: List[dict], tree: "_Tree",
+                          is_star_block=None) -> None:
     """Ensure each discriminating co-occurrence group appears under ONE finding.
 
     The same amplicon group can be built under several findings (a recombinant
@@ -806,9 +1052,21 @@ def _dedupe_member_blocks(all_clades: List[dict], tree: "_Tree") -> None:
     for key, lst in occ.items():
         if len(lst) <= 1:
             continue
-        # owner preference: node == family_root wins outright
-        owner = next((cb for cb in lst if cb[0]["node"] == cb[1].get("family_root")),
-                     None)
+        # owner preference:
+        #   0. a finding under which this block is ★ (rare outside ITS family);
+        #      deepest such finding, then most reads
+        #   1. node == family_root
+        #   2. deepest node, then most reads
+        owner = None
+        if is_star_block is not None:
+            starred = [cb for cb in lst if is_star_block(cb[1])]
+            if starred:
+                owner = max(starred, key=lambda cb: (tree.depth(cb[0]["node"]),
+                                                     cb[1].get("reads", 0),
+                                                     cb[0]["node"]))
+        if owner is None:
+            owner = next((cb for cb in lst
+                          if cb[0]["node"] == cb[1].get("family_root")), None)
         if owner is None:
             # deepest node, then most reads
             owner = max(lst, key=lambda cb: (tree.depth(cb[0]["node"]),
@@ -823,7 +1081,7 @@ def _dedupe_member_blocks(all_clades: List[dict], tree: "_Tree") -> None:
     # member_blocks, so nothing else needs updating here.
 
 
-def _count_novel(patterns, panel_union, all_sigs, tree, min_read_count,
+def _count_novel(patterns, panel_sigs, all_sigs, tree, min_read_count,
                  candidates_fn=None) -> int:
     n = 0
     all_sig_list = list(all_sigs.values()) if candidates_fn is None else None
@@ -831,7 +1089,7 @@ def _count_novel(patterns, panel_union, all_sigs, tree, min_read_count,
         count = int(row["count"])
         if count < min_read_count:
             continue
-        fp = set(row["confirmed_present"]) - panel_union
+        fp = beyond_panel(row["confirmed_present"], panel_sigs)
         if len(fp) < MIN_FINGERPRINT:
             continue
         if candidates_fn is not None:

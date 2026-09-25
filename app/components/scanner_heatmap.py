@@ -3,12 +3,13 @@
 Two views of a scanner finding's signal over time:
 
 1. DEFAULT — read-level HAPLOTYPES.  For each co-occurrence block that carries a
-   discriminating (★) mutation, we show the actual base COMBINATIONS that
-   co-occur on reads at that block's positions, ordered by read count.  A read
-   that carries all of the block's mutations is the VARIANT haplotype; one that
-   carries a ★ but not the rest is a partial★ (sublineage / dropout); one that
-   carries none of the ★ is a co-circulating relative (shares the backbone, not
-   the variant).  Striking rows are shown, the long tail is folded.
+   ★ marker (a mutation rare outside the finding's own family — the scanner
+   decides this and ships it as block["mut_star"]), we show the actual base
+   COMBINATIONS that co-occur on reads at that block's positions, ordered by read
+   count.  A read that carries all of the block's mutations is the VARIANT
+   haplotype; one that carries a ★ but not the rest is partial ★ (sublineage /
+   dropout); one that carries none of the ★ is a relative (only shared
+   mutations — a co-circulating lineage, not the variant).
 
 2. DETAIL (behind a button) — the older per-MUTATION heatmap: one row per
    mutation showing its individual frequency trajectory and coverage.  Useful
@@ -27,7 +28,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-_STAR_MAX = 30          # carriers <= this → discriminating (★)
+_STAR_MAX = 30          # legacy fallback only: results without block["mut_star"]
 _MAX_POS = 5            # cap positions per haplotype block (keeps coverage high)
 _TOP_N = 5             # dominant combos always shown by default
 _MIN_READS = 50         # combos below this fold into "other"
@@ -156,16 +157,40 @@ def _fetch_haplotypes(client, location, date_range, positions: Tuple[int, ...]):
     return result
 
 
-def _hap_positions(blk_muts: List[str], mut_car: Dict[str, int]):
+def _star_info(member_blocks):
+    """(is_star(m), outside(m)) from the scanner's blocks.
+
+    ★ = rare outside the finding's own family (block["mut_star"], set by the
+    scanner with the same rule it confirms findings with). outside(m) = number of
+    lineages outside the family carrying m. Older results without these fields
+    fall back to the legacy global carrier count <= _STAR_MAX."""
+    star, outside, car = {}, {}, {}
+    for b in member_blocks or []:
+        star.update(b.get("mut_star", {}) or {})
+        outside.update(b.get("mut_outside", {}) or {})
+        car.update(b.get("mut_carriers", {}) or {})
+
+    def is_star(m):
+        if m in star:
+            return bool(star[m])
+        n = car.get(m)
+        return n is not None and n <= _STAR_MAX
+
+    def n_outside(m):
+        return outside.get(m, car.get(m))
+
+    return is_star, n_outside
+
+
+def _hap_positions(blk_muts: List[str], is_star, n_outside):
     """Choose <= _MAX_POS positions for a block: all ★ positions, then fill with
-    the lowest-carrier (most informative) backbone positions.  Returns
-    (positions, mut_base{pos->alt}, star_pos set)."""
+    the shared mutations carried by the fewest lineages outside the family.
+    Returns (positions, mut_base{pos->alt}, star_pos set)."""
     pos_alt, star_pos = {}, set()
     for m in blk_muts:
         p = _pos(m)
         pos_alt[p] = m[-1]
-        n = mut_car.get(m)
-        if n is not None and n <= _STAR_MAX:
+        if is_star(m):
             star_pos.add(p)
     all_pos = sorted(pos_alt)
     if len(all_pos) <= _MAX_POS:
@@ -173,7 +198,7 @@ def _hap_positions(blk_muts: List[str], mut_car: Dict[str, int]):
     else:
         stars = sorted(star_pos)[:_MAX_POS]
         back = sorted((p for p in all_pos if p not in star_pos),
-                      key=lambda p: mut_car.get(f"{p}{pos_alt[p]}", 10**9))
+                      key=lambda p: n_outside(f"{p}{pos_alt[p]}") or 10**9)
         keep = sorted(stars + back[:max(0, _MAX_POS - len(stars))])
     return keep, {p: pos_alt[p] for p in keep}, {p for p in keep if p in star_pos}
 
@@ -236,13 +261,13 @@ def _one_haplotype_block(positions, mut_base, star_pos, dates, per_date, covered
             return (f"<span style='color:#b45309'>{combo_s}{star} · "
                     f"{n:,} ({pct:.1f}%) partial</span>")
         return (f"<span style='color:#9ca3af'>{combo_s} · "
-                f"{n:,} ({pct:.1f}%) relative</span>")
+                f"{n:,} ({pct:.1f}%) relative (shared only)</span>")
 
     row_labels, z, hz, htxt = [], [], [], []
     for combo, n, n_mut, has_star, is_var in keep:
         row_labels.append(_row_label(combo, n, n_mut, has_star, is_var))
         frow, hrow, trow = [], [], []
-        tag = "VARIANT" if is_var else ("partial★" if has_star else "relative")
+        tag = "VARIANT" if is_var else ("partial ★" if has_star else "relative")
         for d, dl in zip(dates, col_labels):
             tot = covered.get(d, 0)
             c = per_date.get(d, {}).get(combo, 0)
@@ -287,22 +312,22 @@ def _one_haplotype_block(positions, mut_base, star_pos, dates, per_date, covered
             st.markdown("  \n".join(_lines))
 
 
-def _render_haplotype_blocks(clade_node, star_blocks, mut_car, client,
+def _render_haplotype_blocks(clade_node, star_blocks, is_star, n_outside, client,
                              location, date_range):
     """DEFAULT view: one haplotype table per ★-block, strongest (most reads)
     first and open, the rest collapsed.  Blocks are ordered by read count."""
     blocks = sorted(star_blocks, key=lambda b: -b.get("reads", 0))
     st.caption(
         "Read-level haplotypes — the actual base combinations that co-occur on "
-        "reads. **VARIANT** (blue) carries every block mutation; **partial ★** "
-        "(orange) carries the discriminating marker on an incomplete background "
-        "(sublineage / dropout); **relative** (grey) shares the backbone but not "
-        "the ★, so it is a co-circulating lineage, not this variant. Hatched = "
-        "no coverage that week."
+        "reads. ★ = specific marker (rare outside this family). **VARIANT** "
+        "(blue) carries every mutation of the group; **partial ★** (orange) "
+        "carries the ★ marker but not all the rest (sublineage / dropout); "
+        "**relative** (grey) carries only shared mutations, no ★ — a "
+        "co-circulating lineage, not this one. Grey cells = no coverage that week."
     )
     for i, b in enumerate(blocks):
         muts = list(b.get("discriminating", []))
-        positions, mut_base, star_pos = _hap_positions(muts, mut_car)
+        positions, mut_base, star_pos = _hap_positions(muts, is_star, n_outside)
         if len(positions) < 2:
             continue
         name = b.get("member", "?")
@@ -329,20 +354,14 @@ def _render_haplotype_blocks(clade_node, star_blocks, mut_car, client,
 def _render_per_mutation_blocks(clade_node, shared_mutations, member_blocks,
                                 client, location, date_range,
                                 max_muts_per_block=25):
-    _mut_car = {}
-    for _b in member_blocks:
-        _mut_car.update(_b.get("mut_carriers", {}))
-
-    def _is_star(m):
-        n = _mut_car.get(m)
-        return n is not None and n <= _STAR_MAX
+    _is_star, _n_out = _star_info(member_blocks)
 
     def _blk_has_star(b):
         return any(_is_star(m) for m in b.get("discriminating", []))
 
     def _blk_min_carrier(b):
-        cs = [_mut_car.get(m, 10**9) for m in b.get("discriminating", [])
-              if _mut_car.get(m) is not None]
+        cs = [_n_out(m) for m in b.get("discriminating", [])
+              if _n_out(m) is not None]
         return min(cs) if cs else 10**9
 
     _star_blocks = [b for b in member_blocks if _blk_has_star(b)]
@@ -373,8 +392,8 @@ def _render_per_mutation_blocks(clade_node, shared_mutations, member_blocks,
 
     _n_back = len(_back_blocks)
     if _n_back:
-        _lbl = (f"Hide backbone-only regions ({_n_back})" if _show_all
-                else f"Show backbone-only regions (+{_n_back})")
+        _lbl = (f"Hide groups with only shared mutations ({_n_back})" if _show_all
+                else f"Show groups with only shared mutations (+{_n_back})")
         if st.button(_lbl, key=f"btn_pm_{_toggle_key}"):
             st.session_state[_toggle_key] = not _show_all
             st.rerun()
@@ -399,16 +418,17 @@ def _render_per_mutation_blocks(clade_node, shared_mutations, member_blocks,
     col_labels = [datetime.strptime(c, "%Y-%m-%d").strftime("%b %d") for c in cols]
 
     st.caption(
-        "Per-mutation frequency (count / coverage) by week. Rows labelled "
-        "[carriers]: low + ★ = discriminating (shown first); high = backbone "
-        "(context). Hatched = no coverage that week."
+        "Per-mutation frequency (reads with the mutation / reads covering it) by "
+        "week. [n] = lineages outside this family carrying it: ★ = specific "
+        "marker (rare outside the family, shown first); the rest are shared "
+        "mutations (context). Grey cells = no coverage that week."
     )
 
     def _row_label(m):
-        n = _mut_car.get(m)
+        n = _n_out(m)
         if n is None:
             return m
-        if n <= _STAR_MAX:
+        if _is_star(m):
             return f"<b><span style='color:#185FA5'>{m} [{n}] ★</span></b>"
         return f"<span style='color:#9ca3af'>{m} [{n}]</span>"
 
@@ -426,8 +446,8 @@ def _render_per_mutation_blocks(clade_node, shared_mutations, member_blocks,
         for m in ordered:
             frow, hrow, trow = [], [], []
             star = _is_star(m)
-            ncar = _mut_car.get(m, "?")
-            tag = "★ discriminating" if star else "backbone"
+            ncar = _n_out(m) if _n_out(m) is not None else "?"
+            tag = "★ specific marker" if star else "shared mutation"
             for c in cols:
                 fv = freq.loc[m, c]
                 cvv = cov.loc[m, c] if m in cov.index else 0
@@ -439,7 +459,7 @@ def _render_per_mutation_blocks(clade_node, shared_mutations, member_blocks,
                 else:
                     fval = float(fv) if fv == fv else 0.0
                     frow.append(fval); hrow.append(False)
-                    trow.append(f"{dl} · {m} [{ncar}] {tag}<br>"
+                    trow.append(f"{dl} · {m} ({tag}, {ncar} outside family)<br>"
                                 f"{fval*100:.0f}% ({int(ct):,} / {int(cvv):,} reads)")
             z.append(frow); hatch.append(hrow); htxt.append(trow)
 
@@ -465,7 +485,7 @@ def _render_per_mutation_blocks(clade_node, shared_mutations, member_blocks,
                           y0=n_star - 0.5, y1=n_star - 0.5,
                           line=dict(color="#9ca3af", width=1, dash="dot"))
         _flag = ("" if n_star else
-                 " · ⚠ backbone only — shared mutations, not variant-specific")
+                 " · no ★ marker — only shared mutations")
         st.markdown(
             f"<div style='font-size:13px;font-weight:500;margin:8px 0 0;'>{title}"
             f"<span style='font-size:11px;color:#6b7280;font-weight:400;'> · "
@@ -496,13 +516,7 @@ def render_clade_heatmap(
     DEFAULT = read-level haplotype tables (one per ★-block, strongest open).
     A button reveals the older per-mutation heatmap for coverage detail.
     """
-    _mut_car = {}
-    for _b in member_blocks:
-        _mut_car.update(_b.get("mut_carriers", {}))
-
-    def _is_star(m):
-        n = _mut_car.get(m)
-        return n is not None and n <= _STAR_MAX
+    _is_star, _n_out = _star_info(member_blocks)
 
     def _blk_has_star(b):
         return any(_is_star(m) for m in b.get("discriminating", []))
@@ -511,11 +525,12 @@ def render_clade_heatmap(
 
     if not _star_blocks:
         st.caption(
-            "Every co-occurrence group here is backbone (shared) only, so no "
-            "discriminating haplotype can be shown. See per-mutation detail below."
+            "No ★ marker here: every group seen on reads contains only shared "
+            "mutations, so no haplotype specific to this finding can be shown. "
+            "See the per-mutation detail below."
         )
     else:
-        _render_haplotype_blocks(clade_node, _star_blocks, _mut_car, client,
+        _render_haplotype_blocks(clade_node, _star_blocks, _is_star, _n_out, client,
                                  location, date_range)
 
     # ── DETAIL: old per-mutation heatmap, opt-in ────────────────────────────

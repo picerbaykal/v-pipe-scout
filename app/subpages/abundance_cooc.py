@@ -98,16 +98,23 @@ def _render_composition(cooc_result: dict, scanner_result: dict, key: str = "",
     dates = [r["date"] for r in rows]
     layers = [
         ("explained by panel", "explained_pct", "#0F6E56", "rgba(15,110,86,0.85)"),
+        ("panel variant + 1 change", "near_pct", "#f59e0b", "rgba(245,158,11,0.60)"),
         ("addable (not in panel)", "addable_pct", "#dc2626", "rgba(220,38,38,0.55)"),
         ("novel (investigate)", "novel_pct", "#2563eb", "rgba(37,99,235,0.45)"),
         ("unresolved / noise", "noise_pct", "#9ca3af", "rgba(156,163,175,0.40)"),
     ]
     fig = go.Figure()
+    _near_txt = ["<br>".join(f"{_l} ({_n:,} reads)" for _l, _n in r.get("near_top", []))
+                 for r in rows]
     for name, _fld, line_c, fill_c in layers:
+        _is_near = _fld == "near_pct"
         fig.add_trace(go.Scatter(
-            x=dates, y=[r[_fld] for r in rows], name=name, mode="lines",
+            x=dates, y=[r.get(_fld, 0) for r in rows], name=name, mode="lines",
             stackgroup="one", line=dict(width=0.5, color=line_c), fillcolor=fill_c,
-            hovertemplate="%{x|%Y-%m-%d}<br>" + name + " %{y:.0%}<extra></extra>"))
+            customdata=_near_txt if _is_near else None,
+            hovertemplate=("%{x|%Y-%m-%d}<br>" + name + " %{y:.1%}"
+                           + ("<br>%{customdata}" if _is_near else "")
+                           + "<extra></extra>")))
     fig.update_layout(
         height=234, margin=dict(t=18, b=26, l=46, r=12),
         template="plotly_white",
@@ -122,8 +129,10 @@ def _render_composition(cooc_result: dict, scanner_result: dict, key: str = "",
     if show_caption:
         st.caption(
             "Green = explained by your panel (its height = completeness) · "
-            "red = addable (scanner found it) · blue = novel · "
-            "grey = unresolved (beyond-panel signal the scanner can't name).")
+            "amber = a panel variant with one change (hover to see which; a growing "
+            "band = a sublineage spreading) · red = addable (scanner found it) · "
+            "blue = novel · grey = unresolved (beyond-panel signal the scanner "
+            "can't name).")
 
 
 def _step_label(n: int, label: str, done: bool = False, active: bool = False) -> None:
@@ -953,15 +962,15 @@ def app():
                                           _evid = "no data"
                                           _reason = "no check data for this variant — re-run the scan"
                                       elif _nd == 0:
-                                          _evid = "no specific markers"
+                                          _evid = "no ★ markers"
                                           _reason = ("every mutation of this variant is shared with another panel "
                                                      "variant or common outside its family, so reads cannot single it out"
                                                      + (f"; near-identical to {', '.join(_sib)} — trust the sum" if _sib else ""))
                                       elif _nm == 0:
-                                          _evid = f"0 of {_nd} markers measurable"
+                                          _evid = f"0 of {_nd} ★ markers measurable"
                                           _reason = f"too few reads on its markers to measure — {_mtxt}"
                                       else:
-                                          _evid = f"{_np} of {_nm} markers present"
+                                          _evid = f"{_np} of {_nm} ★ markers present"
                                           _reason = (f"{_np} of {_nm} measurable markers present"
                                                      + (f" ({_nd - _nm} not measurable)" if _nd > _nm else "")
                                                      + f" — {_mtxt}")
@@ -995,10 +1004,10 @@ def app():
                                           "confirmed":    ("#0f6e56", "#e6f4ef", "✓ confirmed"),
                                           "inconsistent": ("#6d28d9", "#f3effd", "≠ inconsistent"),
                                           "cant_confirm": ("#6b7280", "#f3f4f6", "· can&#39;t confirm"),
-                                          "not_found":    ("#b45309", "#fff7ed", "▲ not found in WW"),
+                                          "not_found":    ("#b45309", "#fff7ed", "✗ not found in WW"),
                                       }
                                       _ev_tip = (
-                                          "A marker is a mutation that only this panel variant carries (its own "
+                                          "A ★ marker is a mutation that only this panel variant carries (its own "
                                           "sublineages do not count against it). Counted over all dates in this city: "
                                           f"present = at least {_ccfg['present_freq'] * 100:.0f}% of the reads covering "
                                           "the marker carry it, AND those reads also match the variant at neighbouring "
@@ -1109,7 +1118,8 @@ def app():
               if _ready_locs:
                   st.markdown("#### Panel completeness")
                   st.caption("How much of each city's co-occurrence signal your panel "
-                             "explains (green) vs the rest. Green = explained · red = "
+                             "explains (green) vs the rest. Green = explained · amber = a "
+                             "panel variant with one change (hover for which) · red = "
                              "addable (scanner found it) · blue = novel · grey = noise.")
                   # One shared legend ABOVE the grid; every plot has
                   # show_legend=False and the same fixed height, so all plot areas
@@ -1117,6 +1127,7 @@ def app():
                   # only and ate into its fixed height, making it shorter.)
                   _comp_leg = [
                       ("#0F6E56", "explained by panel"),
+                      ("#f59e0b", "panel variant + 1 change"),
                       ("#dc2626", "addable (not in panel)"),
                       ("#2563eb", "novel (investigate)"),
                       ("#9ca3af", "unresolved / noise"),
@@ -1125,7 +1136,7 @@ def app():
                   # a read that is a panel variant + <2 stray mutations counts
                   # toward completeness, not the grey gap.
                   _pl_pu = cached_get_pango_loader()
-                  _panel_union = set()
+                  _panel_union = {}   # {variant: signature}
                   # use the panel that was RUN (frozen with the cached results),
                   # not the live selection — so editing the panel without
                   # re-running doesn't silently change the completeness graph.
@@ -1133,7 +1144,7 @@ def app():
                                or all_selected_variants):
                       for _pum in (_pl_pu.get_signature(_puv) or []):
                           if _pum and _pum[-1] in "ACGT":
-                              _panel_union.add(_pum)
+                              _panel_union.setdefault(_puv, set()).add(_pum)
                   st.markdown(
                       "<div style='display:flex;gap:14px;flex-wrap:wrap;"
                       "font-size:11.5px;color:#6b7280;margin:2px 0 8px;'>"
@@ -1293,17 +1304,22 @@ def app():
                               else:
                                   break
                           return int(_d) if _d else 0
-                      _pc_car = {}
+                      _pc_car, _pc_flag, _pc_out = {}, {}, {}
                       for _blk in _c.get("member_blocks", []):
                           _pc_car.update(_blk.get("mut_carriers", {}))
+                          _pc_flag.update(_blk.get("mut_star", {}) or {})
+                          _pc_out.update(_blk.get("mut_outside", {}) or {})
+                      # ★ = rare outside the finding's own family, decided by the
+                      # scanner (mut_star); legacy results fall back to <= 30
                       _pc_star = sorted(
                           {_m for _blk in _c.get("member_blocks", [])
                            for _m in _blk.get("discriminating", [])
-                           if _pc_car.get(_m, 999) <= _STAR_MAX},
+                           if (_pc_flag[_m] if _m in _pc_flag
+                               else _pc_car.get(_m, 999) <= _STAR_MAX)},
                           key=_pcpos)
                       _slot["per_city"][_loc] = {
                           "star": _pc_star,
-                          "car": {_m: _pc_car.get(_m) for _m in _pc_star},
+                          "car": {_m: _pc_out.get(_m, _pc_car.get(_m)) for _m in _pc_star},
                       }
 
                   for _loc, _res in _scan_res_all.items():
@@ -1394,16 +1410,16 @@ def app():
                               st.markdown(
                                   f"<div style='margin:2px 0 2px 4px;font-size:12px;"
                                   f"color:#374151;'>{_tags}"
-                                  f"<span style='margin-left:4px;'>{_n} discriminating "
-                                  f"mutation{'s' if _n != 1 else ''}</span></div>",
+                                  f"<span style='margin-left:4px;'>{_n} ★ marker"
+                                  f"{'s' if _n != 1 else ''} seen on reads</span></div>",
                                   unsafe_allow_html=True,
                               )
                           else:
                               st.markdown(
                                   f"<div style='margin:2px 0 2px 4px;font-size:12px;"
                                   f"color:#9ca3af;'>{_tags}"
-                                  f"<span style='margin-left:4px;'>\u26a0 backbone only "
-                                  f"\u2014 no discriminating mutation here</span></div>",
+                                  f"<span style='margin-left:4px;'>\u00b7 no \u2605 marker "
+                                  f"seen on reads here (only shared mutations)</span></div>",
                                   unsafe_allow_html=True,
                               )
                       _assoc = _slot.get("associated", [])
@@ -1520,26 +1536,26 @@ def app():
                   ):
                       st.caption(
                           "The grey band of the completeness graph, itemised: lineages "
-                          "we can name but co-occurrence can't confirm, plus patterns "
+                          "we can name but not confirm with a ★ marker, plus patterns "
                           "too broad to name."
                       )
                       # ── 🟣 matched but not co-occurrence-confirmed ──────────
                       st.markdown(
                           f"<div style='font-weight:600;color:#7c3aed;margin:8px 0 2px;'>"
-                          f"■ Matched but not co-occurrence-confirmed"
+                          f"■ Named, not specific"
                           f"<span style='color:#6b7280;font-weight:400;font-size:0.8rem;'> · "
                           f"{len(_mnh_list)} lineage(s) · {_mnh_reads:,} reads</span></div>",
                           unsafe_allow_html=True,
                       )
                       if not _mnh_list:
-                          st.caption("None — every matched lineage had a discriminating "
-                                     "co-occurrence block (or nothing matched).")
+                          st.caption("None — every named lineage had a ★ marker seen on reads "
+                                     "(or nothing was named).")
                       else:
                           st.caption(
-                              "Match some observed mutations, but their distinguishing "
-                              "mutations don't co-occur on reads — so co-occurrence can't "
-                              "confirm them (they may still be present; deconvolution "
-                              "quantifies them)."
+                              "Their mutations point to this lineage, but they are shared "
+                              "with a bigger family (e.g. its parent) and no ★ marker is "
+                              "seen on reads — so we can't tell which family member it is "
+                              "(it may still be present; deconvolution quantifies it)."
                           )
                           for _m in _mnh_list[:15]:
                               _lbl = f"{_m['node']} clade" if _m["member_count"] > 1 else _m["node"]

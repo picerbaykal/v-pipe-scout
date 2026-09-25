@@ -1,28 +1,47 @@
 """Completeness composition — per-date, normalized to 0-100%, split into
 categories, with empty/low-read dates dropped.
 
-  explained : reads the panel accounts for exactly (matched)      → dark green
-  near-panel: a panel variant + <2 stray mutations (fingerprint<2)→ light green
-              (counts toward completeness — no beyond-panel signal; usually
-              homoplasy / sequencing error; watch a rising trend as an early
-              sublineage hint)
-  addable   : gap reads the scanner resolved to a clade           → red (add these)
-  novel     : gap reads matching a novel pattern                  → blue (investigate)
-  noise     : the rest of the gap (fingerprint>=2, unresolved)    → grey
+  explained  : reads the panel accounts for exactly (matched)       → green
+  near-panel : "panel variant + 1 change" — a single panel variant
+               explains the read except at exactly one position
+               (process.cooc.near_panel_label, decided per read in
+               the worker)                                          → teal
+               Shown as its OWN band, not added to explained: a thin flat
+               band is noise; a growing one is a sublineage of a panel
+               variant spreading (e.g. "XFG + 22896C").
+  addable    : gap reads the scanner resolved to a clade            → red (add these)
+  novel      : gap reads matching a novel pattern                   → blue (investigate)
+  noise      : the rest of the gap                                  → grey
 
-Completeness for a date is explained + near-panel (both are the panel's variants).
-The remaining bands show what the genuinely-beyond-panel gap is made of — the
-same fingerprint>=2 signal the scanner acts on, so grey here matches the scanner.
+`panel_union` is {variant: signature} for the panel ("{pos}{alt}" substitutions);
+a read's beyond-panel mutations are those its BEST-MATCHING panel variant lacks
+(process.scanner.beyond_panel — the same definition the scanner uses, so an
+extinct control in the panel can't hide a real variant). A plain set is still
+accepted and treated as the old pooled union. A pattern with fewer than 2
+beyond-panel mutations is not seen by the scanner; if its one outside mutation is a scanner-finding marker it is a
+partial read of that finding (addable / novel), otherwise its near-panel reads
+(near_count) are teal and the rest is noise.
 
-`panel_union` is the set of the panel variants' signature mutations ("{pos}{alt}",
-substitutions). When it's None the near-panel split is skipped (legacy behaviour:
-those reads stay in noise). Built from the EXISTING cooc + scanner result —
-`classify_pattern` and the scanner are untouched.
+Legacy results without `near_count` (scans from before 2026-09-25) keep the old
+rule: every such read counts as near-panel.
 """
 
-from typing import Dict, List, Set, Optional
+from collections import defaultdict
+from typing import Dict, List, Set, Optional, Union
+
+try:
+    from process.scanner import beyond_panel
+except Exception:                                   # pragma: no cover
+    def beyond_panel(present, panel_sigs):
+        present = set(present)
+        if isinstance(panel_sigs, dict):
+            if not panel_sigs:
+                return present
+            return present - max(panel_sigs.values(), key=lambda s: len(present & s))
+        return present - set(panel_sigs or ())
 
 _NOVEL_MATCH_FRACTION = 0.8
+_NEAR_TOP = 3
 
 
 def _resolved_groups(scanner_result: dict) -> List[Set[str]]:
@@ -37,6 +56,20 @@ def _resolved_groups(scanner_result: dict) -> List[Set[str]]:
     return groups
 
 
+def _star_markers(scanner_result: dict) -> Set[str]:
+    """★ markers of the confirmed findings (block["mut_star"] from the scanner;
+    older results without it fall back to every block mutation)."""
+    out: Set[str] = set()
+    for c in scanner_result.get("resolved_clade", []):
+        for b in c.get("member_blocks", []):
+            flags = b.get("mut_star")
+            if flags is None:
+                out |= set(b.get("discriminating", []))
+            else:
+                out |= {m for m, f in flags.items() if f}
+    return out
+
+
 def _novel_patterns(scanner_result: dict) -> List[Set[str]]:
     return [set(p.get("mutations", []))
             for p in scanner_result.get("novel", {}).get("top_patterns", [])]
@@ -45,12 +78,14 @@ def _novel_patterns(scanner_result: dict) -> List[Set[str]]:
 def compute_completeness_composition(cooc_result: dict,
                                      scanner_result: dict = None,
                                      min_reads: int = 1000,
-                                     panel_union: Optional[Set[str]] = None) -> List[Dict]:
+                                     panel_union: Optional[Union[Set[str], Dict[str, Set[str]]]] = None
+                                     ) -> List[Dict]:
     """Per-date normalized composition rows.
 
     Returns list of dicts (empty/low-read dates dropped):
       {date, explained, near, addable, novel, noise, total,
-       explained_pct, near_pct, addable_pct, novel_pct, noise_pct}
+       explained_pct, near_pct, addable_pct, novel_pct, noise_pct,
+       near_top: [(label, reads), ...]  — largest "variant + 1 change" groups}
     Percentages are of that date's total and sum to 1.0.
     """
     dates = cooc_result.get("dates", [])
@@ -71,15 +106,19 @@ def compute_completeness_composition(cooc_result: dict,
                 return "novel"
         return "noise"
 
-    # markers of the scanner's findings — a lone beyond-panel mutation that is one
-    # of these is a partial-coverage read of a REAL (close) variant, not a stray.
-    addable_muts: Set[str] = set().union(*resolved_groups) if resolved_groups else set()
-    novel_muts: Set[str] = set().union(*novel_pats) if novel_pats else set()
+    # A lone beyond-panel mutation counts for a finding only if it is one of that
+    # finding's ★ markers (a partial read of a real variant). A SHARED mutation
+    # that merely appears in a finding's group, or in a small novel pattern (e.g.
+    # XFG's 21653C inside a 2-mutation novel pattern), would otherwise repaint
+    # every read of the variant that carries it. Novel is about a combination,
+    # so a lone mutation is never attributed to it.
+    addable_muts: Set[str] = _star_markers(scanner_result)
+    novel_muts: Set[str] = set()
 
     add_d = {d: 0 for d in dates}
     nov_d = {d: 0 for d in dates}
-    noi_d = {d: 0 for d in dates}
     near_d = {d: 0 for d in dates}
+    near_lab = {d: defaultdict(int) for d in dates}
     for p in ups:
         d = p.get("date")
         if d not in add_d:
@@ -89,28 +128,36 @@ def compute_completeness_composition(cooc_result: dict,
             continue
         cnt = int(p.get("count", 0))
         if panel_union is not None:
-            fp = pat - panel_union
+            fp = beyond_panel(pat, panel_union)
             if len(fp) < 2:
-                # A single beyond-panel mutation. If it is a MARKER of a scanner
-                # finding, this is a partial-coverage read of that real variant
-                # (e.g. XFG, close to the panel, where most reads catch only one
-                # of its discriminating mutations) -> attribute to addable/novel,
-                # NOT near-panel. Only a mutation that matches no finding is a
-                # benign stray (near-panel homoplasy) that counts to completeness.
                 if fp & addable_muts:
                     add_d[d] += cnt
                 elif fp & novel_muts:
                     nov_d[d] += cnt
+                elif "near_count" in p:
+                    ncnt = int(p.get("near_count", 0) or 0)
+                    lab = p.get("near_label") or ""
+                    # the ONE change vs the best-matching panel variant; if it is
+                    # a scanner-finding marker the read is a partial read of that
+                    # finding -> red/blue, independent of who else is in the panel
+                    chg = lab.split(" + ", 1)[1] if " + " in lab else ""
+                    if ncnt and chg and chg in addable_muts:
+                        add_d[d] += ncnt
+                    elif ncnt and chg and chg in novel_muts:
+                        nov_d[d] += ncnt
+                    else:
+                        near_d[d] += ncnt
+                        if ncnt and lab:
+                            near_lab[d][lab] += ncnt
+                    # the pattern's other reads fall through to noise below
                 else:
-                    near_d[d] += cnt
+                    near_d[d] += cnt          # legacy result: old rule
                 continue
         cat = gap_category(pat)
         if cat == "addable":
             add_d[d] += cnt
         elif cat == "novel":
             nov_d[d] += cnt
-        else:
-            noi_d[d] += cnt
 
     rows: List[Dict] = []
     for i, d in enumerate(dates):
@@ -119,24 +166,20 @@ def compute_completeness_composition(cooc_result: dict,
         total = m + u
         if total < min_reads:
             continue  # drop empty / low-read dates
-        # near-panel (a panel variant + 1 NON-marker stray mutation) counts as
-        # explained — it is one of the panel's variants, the stray is homoplasy /
-        # batch noise. Marker-carrying single mutations already went to addable/
-        # novel above, so nothing real is hidden here. Folded into green to keep
-        # the graph to four categories that match the scanner list.
         near = near_d[d]
-        expl = m + near
         add = add_d[d]
         nov = nov_d[d]
-        noi = max(0, u - near - add - nov)   # unresolved gap (fingerprint>=2)
+        noi = max(0, u - near - add - nov)
+        top = sorted(near_lab[d].items(), key=lambda kv: -kv[1])[:_NEAR_TOP]
         rows.append({
             "date": d,
-            "explained": expl, "near": near, "addable": add, "novel": nov,
+            "explained": m, "near": near, "addable": add, "novel": nov,
             "noise": noi, "total": total,
-            "explained_pct": expl / total,
-            "near_pct": near / total,   # kept for diagnostics; not a band
+            "explained_pct": m / total,
+            "near_pct": near / total,
             "addable_pct": add / total,
             "novel_pct": nov / total,
             "noise_pct": noi / total,
+            "near_top": top,
         })
     return rows
