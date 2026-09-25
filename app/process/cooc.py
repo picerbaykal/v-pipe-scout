@@ -115,6 +115,45 @@ def classify_pattern(
     return "unexplained"
 
 
+def near_panel_label(
+    confirmed_present: Set[str],
+    confirmed_absent: Set[str],
+    variant_signatures: Dict[str, Set[str]],
+) -> str:
+    """For an UNEXPLAINED read: "variant + 1 change" label, else "".
+
+    Compared with each panel variant SEPARATELY (not against the pooled panel
+    mutations), the read differs from the best-matching variant at exactly one
+    position:
+      extra   a mutation on the read the variant doesn't have (a new mutation,
+              or another base where the variant has its own) -> "XFG + 22896C"
+      missing a mutation of the variant, read shows reference there
+                                                        -> "XFG − 23021G"
+    Needs >= 2 of the variant's mutations on the read so the match means
+    something. Reads differing at 2+ positions from every variant return "".
+    Independent of which other variants are in the panel."""
+    best = None
+    for name, sig in variant_signatures.items():
+        if len(confirmed_present & sig) < 2:
+            continue
+        extra = confirmed_present - sig
+        missing = sig & confirmed_absent
+        n = len(extra) + len(missing)
+        if n == 1 and best is None:
+            best = (name, extra, missing)
+        elif n == 1 and best is not None:
+            # tie between variants: keep the one sharing more mutations
+            if len(confirmed_present & sig) > len(confirmed_present &
+                                                   variant_signatures[best[0]]):
+                best = (name, extra, missing)
+    if best is None:
+        return ""
+    name, extra, missing = best
+    if extra:
+        return f"{name} + {next(iter(extra))}"
+    return f"{name} − {next(iter(missing))}"
+
+
 # ── Per-batch DataFrame processing ──────────────────────────────────────
 
 def annotate_cooc_dataframe(
@@ -157,12 +196,15 @@ def annotate_cooc_dataframe(
                 continue
         cp, ca = row_to_confirmed_sets(row, positions, amp_dict, include_dels)
         classification = classify_pattern(cp, ca, variant_signatures)
+        near = (near_panel_label(cp, ca, variant_signatures)
+                if classification == "unexplained" else "")
         annotated_rows.append({
             "date": row["date"],
             "count": row["count"],
             "confirmed_present": sorted(cp),
             "confirmed_absent": sorted(ca),
             "classification": classification,
+            "near": near,
         })
 
     if dropped:
