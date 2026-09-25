@@ -869,12 +869,11 @@ def app():
                           "margin:6px 0 2px;'>Co-occurrence check</div>",
                           unsafe_allow_html=True)
                       st.caption(
-                          "Does each panel variant's deconvolution abundance have "
-                          "distinctive mutations co-occurring on reads to back it up? "
-                          "Confirmed = yes; oscillating = swaps with a near-identical "
-                          "relative (trust the sum); can't confirm = no distinctive "
-                          "haplotype (blind spot); ▲ not found in WW = distinctive "
-                          "haplotype was co-covered but never co-occurred in your data.")
+                          "Are the reads backing each panel variant? Based only on reads, not on "
+                          "the abundance: each variant's specific markers (mutations only it "
+                          "carries) are checked for presence on reads that also match it at "
+                          "neighbouring positions. Hover the table for details; per-date "
+                          "evidence is in the heatmaps.")
                       if not _cooc_ready:
                           st.info("⏳ Waiting for the co-occurrence scan to finish…")
                       if _cooc_ready and all_selected_variants:
@@ -929,61 +928,48 @@ def app():
                                   _PP_ABS_MAXP = int(_ppcfg("presence.absent_max_present", 2))
                                   _PP_CON_FLOOR = float(_ppcfg("presence.con_floor", 0.5))
                                   _PP_ABS_FREQ = float(_ppcfg("presence.absent_max_freq", 0.001))
-                                  _pp = (_cooc_res or {}).get("panel_presence", {}) or {}
+                                  _pc = (_cooc_res or {}).get("panel_check", {}) or {}
+                                  from process.cooc import (check_verdicts as _check_verdicts,
+                                                            _check_cfg as _check_cfg_fn)
+                                  _ccfg = _check_cfg_fn()
                                   _rows = []
                                   for _v in _dec_vars:
-                                      _pi = _pp.get(_v, {}) or {}
-                                      _pres = int(_pi.get("present", 0) or 0)
-                                      _cov = int(_pi.get("co_covered", 0) or 0)
-                                      _nd = int(_pi.get("distinctive", 0) or 0)
-                                      _con_p = int(_pi.get("con_present", 0) or 0)
-                                      _con_t = int(_pi.get("con_testable", 0) or 0)
-                                      _frac = (_pres / _cov) if _cov else 0.0
+                                      _ci = _pc.get(_v)
                                       _sib = _osc.get(_v, [])
-                                      if _frac >= _PP_CONF_FREQ and _pres >= _PP_CONF_MINP:
-                                          _status = "confirmed"
-                                          _reason = f"co-occurs in {_frac*100:.1f}% of {_cov:,} covered reads"
-                                      elif _nd < 2:
-                                          _status = "cant_confirm"
-                                          _reason = ("no distinctive haplotype (blind spot)"
-                                                     + (f" — near-identical to {', '.join(_sib)}; "
-                                                        "trust the sum" if _sib else ""))
-                                      elif _cov < _PP_ABS_COV:
-                                          # co-occurrence blind (distinctive muts
-                                          # don't co-occur) -> constellation fallback
-                                          if _con_t < 2:
-                                              _status = "cant_confirm"
-                                              _reason = "too few readable distinctive positions — no data"
-                                          elif (_con_p / _con_t) < _PP_CON_FLOOR:
-                                              _status = "not_found"
-                                              _reason = f"constellation absent — {_con_p}/{_con_t} distinctive mutations present"
-                                          else:
-                                              _status = "detectable"
-                                              _reason = f"{_con_p}/{_con_t} distinctive mutations present but not co-occurring — needs external check"
-                                      elif _pres < _PP_ABS_MAXP or _frac < _PP_ABS_FREQ:
-                                          # not present: almost no supporting reads, or (at high depth)
-                                          # co-occurrence far below the confirm bar — a few homoplastic
-                                          # reads out of a huge pile. Stay "detectable" only if the
-                                          # constellation is independently present (mutations show up
-                                          # individually but do not co-occur); otherwise not found.
-                                          if _con_t >= 2 and (_con_p / _con_t) >= _PP_CON_FLOOR:
-                                              _status = "detectable"
-                                              _reason = f"{_con_p}/{_con_t} distinctive mutations present but not co-occurring — needs external check"
-                                          else:
-                                              _status = "not_found"
-                                              _reason = f"looked at {_cov:,} reads; haplotype not co-occurring — not found"
-                                      elif _sib:
-                                          _status = "oscillating"
-                                          _reason = f"oscillates with {', '.join(_sib)} — trust the sum"
+                                      if _ci is None:
+                                          _res = {"verdict": "cant_confirm", "n_markers": 0, "n_present": 0,
+                                                  "n_measured": 0, "markers": {}}
                                       else:
-                                          _status = "detectable"
-                                          _reason = f"weak co-occurrence ({_frac*100:.2f}%)"
+                                          _res = _check_verdicts(_ci.get("markers") or [], _ci.get("per_date") or {})
+                                      _status = _res["verdict"]
+                                      _nd, _np, _nm = _res["n_markers"], _res["n_present"], _res["n_measured"]
+                                      _sym = {"present": "✓", "absent": "✗", "unmeasured": "?"}
+                                      _mlist = [f"{_k} {(_m['freq'] or 0) * 100:.0f}% {_sym[_m['status']]}"
+                                                if _m["cov"] else f"{_k} no reads ?"
+                                                for _k, _m in _res["markers"].items()]
+                                      _mtxt = " · ".join(_mlist[:6]) + (f" · +{len(_mlist) - 6} more" if len(_mlist) > 6 else "")
+                                      _mcell = "<br>".join(_mlist)
+                                      if _ci is None:
+                                          _evid = "no data"
+                                          _reason = "no check data for this variant — re-run the scan"
+                                      elif _nd == 0:
+                                          _evid = "no specific markers"
+                                          _reason = ("every mutation of this variant is shared with another panel "
+                                                     "variant or common outside its family, so reads cannot single it out"
+                                                     + (f"; near-identical to {', '.join(_sib)} — trust the sum" if _sib else ""))
+                                      elif _nm == 0:
+                                          _evid = f"0 of {_nd} markers measurable"
+                                          _reason = f"too few reads on its markers to measure — {_mtxt}"
+                                      else:
+                                          _evid = f"{_np} of {_nm} markers present"
+                                          _reason = (f"{_np} of {_nm} measurable markers present"
+                                                     + (f" ({_nd - _nm} not measurable)" if _nd > _nm else "")
+                                                     + f" — {_mtxt}")
                                       _ts = _dec.get(_v, {}).get("timeseriesSummary", [])
                                       _ab = ([e.get("proportion", 0) for e in _ts]
                                              if _ts else [])
                                       _abmean = (sum(_ab) / len(_ab)) if _ab else 0.0
-                                      _rows.append((_v, _status, _reason, _abmean,
-                                                    _cov, _frac, _nd, _con_p, _con_t))
+                                      _rows.append((_v, _status, _reason, _abmean, _evid, _mcell))
                                   # stash "not found in WW" panel variants for the
                                   # orange band on the scanner list below.
                                   st.session_state["acooc_not_found"] = [
@@ -1003,67 +989,53 @@ def app():
                                       pango_loader=cached_get_pango_loader(),
                                       variant_status=_city_status)
                                   if _rows:
-                                      # confirmed first, then oscillating, then blind
-                                      _order = {"confirmed": 0, "oscillating": 1,
-                                                "detectable": 2, "cant_confirm": 3,
-                                                "not_found": 4}
-                                      _rows.sort(key=lambda r: (_order.get(r[1], 3),
-                                                                -r[3]))
+                                      _order = {"confirmed": 0, "inconsistent": 1, "cant_confirm": 2, "not_found": 3}
+                                      _rows.sort(key=lambda r: (_order.get(r[1], 2), -r[3]))
                                       _meta = {
-                                          "confirmed":   ("#0f6e56", "#e6f4ef", "✓ confirmed"),
-                                          "oscillating": ("#ba7517", "#fdf4e6", "⚠ oscillating"),
-                                          "detectable":  ("#6b7280", "#f3f4f6", "· detectable"),
-                                          "cant_confirm":("#6b7280", "#f3f4f6", "· can't confirm"),
-                                          "not_found":   ("#b45309", "#fff7ed", "▲ not found in WW"),
+                                          "confirmed":    ("#0f6e56", "#e6f4ef", "✓ confirmed"),
+                                          "inconsistent": ("#6d28d9", "#f3effd", "≠ inconsistent"),
+                                          "cant_confirm": ("#6b7280", "#f3f4f6", "· can&#39;t confirm"),
+                                          "not_found":    ("#b45309", "#fff7ed", "▲ not found in WW"),
                                       }
-                                      _th = ("padding:4px 8px;font-weight:600;"
-                                             "color:#6b7280;text-align:left;")
+                                      _ev_tip = (
+                                          "A marker is a mutation that only this panel variant carries (its own "
+                                          "sublineages do not count against it). Counted over all dates in this city: "
+                                          f"present = at least {_ccfg['present_freq'] * 100:.0f}% of the reads covering "
+                                          "the marker carry it, AND those reads also match the variant at neighbouring "
+                                          f"positions (co-occurrence); absent = under {_ccfg['absent_freq'] * 100:.0f}%; "
+                                          f"markers with fewer than {_ccfg['min_cov']} reads, or in between, are not "
+                                          "measurable. 4 of 5 present = of the 5 measurable markers, 4 are present. "
+                                          f"Confirmed = at least {_ccfg['confirm_share'] * 100:.0f}% present; not found = "
+                                          f"at most {_ccfg['notfound_share'] * 100:.0f}%; in between = inconsistent "
+                                          "(some markers are also carried by something else). Hover a row for its markers.")
+                                      _th = "padding:4px 8px;font-weight:600;color:#6b7280;text-align:left;"
                                       _html = (
-                                          "<table style='width:100%;border-collapse:collapse;"
-                                          "font-size:12px;'><thead><tr style='border-bottom:"
-                                          "1px solid #e5e7eb;'>"
+                                          "<table style='width:100%;border-collapse:collapse;font-size:12px;'>"
+                                          "<thead><tr style='border-bottom:1px solid #e5e7eb;'>"
                                           f"<th style='{_th}'>Variant</th>"
-                                          f"<th style='{_th}'>Abund.</th>"
-                                          f"<th style='{_th}' title='distinctive mutations "
-                                          "(unique within the panel)'>Distinct.</th>"
-                                          f"<th style='{_th}' title='haplotype frequency "
-                                          "(present / co-covered reads); blank when the "
-                                          "distinctive mutations are too spread out to "
-                                          "co-occur'>Co-occurrence</th>"
-                                          f"<th style='{_th}' title='distinctive mutations "
-                                          "present / testable individually'>Constellation</th>"
                                           f"<th style='{_th}'>Verdict</th>"
+                                          f"<th style='{_th}'>Evidence</th>"
                                           "</tr></thead><tbody>")
-                                      for _row in _rows:
-                                          (_v, _s, _r, _ab, _cov, _frac,
-                                           _nd, _con_p, _con_t) = _row
-                                          _fg, _bg, _lbl = _meta.get(
-                                              _s, ("#6b7280", "#f3f4f6", _s))
-                                          if _cov >= _PP_ABS_COV:
-                                              _cooc_cell = (
-                                                  f"{_frac*100:.0f}% <span style='color:#9ca3af;'>"
-                                                  f"({_cov:,})</span>")
-                                          else:
-                                              _cooc_cell = "<span style='color:#c9c7bf;'>—</span>"
-                                          _con_cell = (f"{_con_p}/{_con_t}" if _con_t
-                                                       else "<span style='color:#c9c7bf;'>—</span>")
+                                      _td = "padding:5px 8px;border-bottom:0.5px solid #f0f0f0;"
+                                      for _v, _s, _r, _ab, _evid, _mcell in _rows:
+                                          _fg, _bg, _lbl = _meta.get(_s, ("#6b7280", "#f3f4f6", _s))
                                           _rt = _r.replace("'", "&#39;")
-                                          _td = "padding:5px 8px;border-bottom:0.5px solid #f0f0f0;"
                                           _html += (
-                                              f"<tr title='{_rt}'>"
+                                              "<tr>"
                                               f"<td style='{_td}font-weight:600;'>{_v}</td>"
-                                              f"<td style='{_td}color:#6b7280;'>{_ab*100:.0f}%</td>"
-                                              f"<td style='{_td}color:#9ca3af;'>{_nd}</td>"
-                                              f"<td style='{_td}'>{_cooc_cell}</td>"
-                                              f"<td style='{_td}'>{_con_cell}</td>"
-                                              f"<td style='{_td}'><span style='background:{_bg};"
-                                              f"color:{_fg};font-size:11px;font-weight:600;"
-                                              f"padding:1px 8px;border-radius:10px;"
-                                              f"white-space:nowrap;'>{_lbl}</span></td></tr>")
+                                              f"<td style='{_td}'><span style='background:{_bg};color:{_fg};"
+                                              "font-size:11px;font-weight:600;padding:1px 8px;border-radius:10px;"
+                                              f"white-space:nowrap;'>{_lbl}</span></td>"
+                                              + (f"<td style='{_td}color:#4b5563;'><details><summary style='cursor:pointer;'>"
+                                               f"{_evid}</summary><div style='margin-top:4px;font-size:11px;"
+                                               f"line-height:1.6;color:#6b7280;'>{_mcell or _r}</div></details></td></tr>"
+                                               if _mcell else f"<td style='{_td}color:#4b5563;' title='{_rt}'>{_evid}</td></tr>"))
                                       _html += "</tbody></table>"
-                                      with st.expander("Details — co-occurrence check table",
-                                                       expanded=False):
+                                      with st.expander("Details — co-occurrence check table", expanded=False):
                                           st.markdown(_html, unsafe_allow_html=True)
+                                          st.caption(_ev_tip.replace("Hover a row for its markers.", "")
+                                                     + " Click the evidence of a row to see its markers "
+                                                     "(✓ present, ✗ absent, ? not measurable).")
                           except Exception as _e:
                               st.caption(f"(co-occurrence check unavailable: {_e})")
 

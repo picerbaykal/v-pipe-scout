@@ -26,6 +26,13 @@ should help, but the combined fetch+classify wall time with this change has
 not yet been measured for a full sweep. Treat "~5s" as aspirational until
 re-benchmarked; do not assume the scope.weeks clamp removal is safe for the
 worst-case scenario (all variants, all cities, 6 months) without testing it.
+
+2026-09: adds the new per-variant co-occurrence check ("panel_check" in the
+result): specific markers chosen with own-family-excluded carrier counts
+(process.cooc.specific_markers) and raw per-date marker counts
+(process.cooc.accumulate_check_stats). Verdicts are derived in the UI via
+process.cooc.check_verdicts so thresholds can be retuned without a re-scan.
+The legacy "panel_presence" block is still returned unchanged.
 """
 
 import asyncio
@@ -49,7 +56,8 @@ from process.amplicons import (
 )
 from process.cooc import (annotate_cooc_dataframe, panel_completeness_by_date,
                           distinctive_within_panel, accumulate_panel_presence,
-                          constellation_counts)
+                          constellation_counts,
+                          specific_markers, accumulate_check_stats)
 from utils.config import get_wiseloculus_url
 
 logger = logging.getLogger(__name__)
@@ -149,6 +157,15 @@ def _build_variant_signatures(
     return sigs
 
 
+def _sig_positions(sig: set) -> set:
+    out = set()
+    for m in sig or ():
+        mm = re.match(r"^(\d+)[ACGT]$", m)
+        if mm:
+            out.add(int(mm.group(1)))
+    return out
+
+
 def run_cooc_panel_completeness(
     location: str,
     start_date: datetime,
@@ -168,13 +185,16 @@ def run_cooc_panel_completeness(
         progress_callback: Optional callback(step, message) for progress reporting.
 
     Returns:
-        Dict with keys: location, dates, matched_counts, unexplained_counts, completeness.
-        All list values are aligned by index (one entry per date).
+        Dict with keys: location, dates, matched_counts, unexplained_counts, completeness,
+        unexplained_patterns, panel_presence (legacy) and panel_check (new check:
+        per variant {"markers": [...], "per_date": {date: {marker: [cov, hit,
+        link_n, link_ok]}}}). List values are aligned by index (one per date).
     """
     if bed_path is None:
-        bed_path = "/app_shared/data/ArticV542inserts.bed h"
+        bed_path = "/app_shared/data/ArticV542inserts.bed"
 
     from utils.config import get_cooc_setting
+
 
     # NOTE: the former `scope.weeks` start-date clamp has been removed.
     # Co-occurrence queries are now fast enough (~5s full sweep) to run over
@@ -218,6 +238,21 @@ def run_cooc_panel_completeness(
     distinctive = distinctive_within_panel(
         variant_signatures, _gcc(pango_loader))
     presence_acc = {}
+
+    # New check (Part A): specific markers per panel variant, carriers counted
+    # outside the variant's own family. Degrades to "no markers" on error so
+    # the completeness scan never breaks because of it.
+    try:
+        check_markers = specific_markers(
+            variant_signatures, get_all_lineage_signatures(), get_panel_parent_map())
+    except Exception as e:
+        logger.warning(f"[cooc][{location}] specific_markers failed: {e}")
+        check_markers = {v: [] for v in variants}
+    check_stats: Dict[str, dict] = {}
+    logger.info(
+        f"[cooc][{location}] check markers: "
+        + ", ".join(f"{v}={len(m)}" for v, m in check_markers.items())
+    )
     logger.info(
         f"[cooc][{location}] amp_dict from "
         f"{'reference list' if reference_variants else 'panel'}: "
@@ -238,10 +273,20 @@ def run_cooc_panel_completeness(
                 f"{before} → {len(amp_dict)} positions"
             )
 
-    positions = set(amp_dict.keys())
+    # Query positions = completeness positions (amp_dict) PLUS every panel
+    # variant's signature positions, so each check marker and its neighbours are
+    # read even when amp_dict is built from the tracked list. The extra
+    # positions are invisible to completeness: annotate only sees amp_dict ones.
+    completeness_positions = set(amp_dict.keys())
+    check_positions = set()
+    for v, mks in check_markers.items():
+        if mks:
+            check_positions |= _sig_positions(variant_signatures.get(v, set()))
+    positions = completeness_positions | check_positions
     logger.info(
-        f"[cooc][{location}] Panel: {len(positions)} positions across "
-        f"{len(variants)} variants"
+        f"[cooc][{location}] Panel: {len(completeness_positions)} completeness "
+        f"positions + {len(positions - completeness_positions)} check-only positions "
+        f"across {len(variants)} variants"
     )
 
     _progress(2, "BED-free: preparing all positions for query")
@@ -307,10 +352,17 @@ def run_cooc_panel_completeness(
                 )
             if not rows:
                 return
+            # New check (Part B): raw per-date marker counts. Pure and
+            # synchronous, so no interleaving between concurrent tasks.
+            accumulate_check_stats(rows, batch_positions, variant_signatures,
+                                   check_markers, check_stats)
+            comp_positions = [p for p in batch_positions if p in completeness_positions]
+            if not comp_positions:
+                return
             import pandas as _pd
             df = _pd.DataFrame(rows)
             annotated = annotate_cooc_dataframe(
-                df, batch_positions, amp_dict, variant_signatures
+                df, comp_positions, amp_dict, variant_signatures
             )
             per_date = panel_completeness_by_date(annotated)
             if not per_date.empty:
@@ -355,6 +407,12 @@ def run_cooc_panel_completeness(
     except RuntimeError:
         per_batch_results, pattern_results = asyncio.run(_query_all_batches())
 
+    panel_check = {
+        v: {"markers": list(check_markers.get(v, [])),
+            "per_date": check_stats.get(v, {})}
+        for v in variants
+    }
+
     _progress(4, "Aggregating across batches")
     if not per_batch_results:
         logger.warning(f"[cooc][{location}] No batches returned data")
@@ -371,6 +429,7 @@ def run_cooc_panel_completeness(
                     "con_present": 0, "con_testable": 0}
                 for v in variants
             },
+            "panel_check": panel_check,
         }
 
     combined = pd.concat(per_batch_results, ignore_index=True)
@@ -414,4 +473,5 @@ def run_cooc_panel_completeness(
                     (presence_acc.get(v) or {}).get("mut_pres"))[1])}
             for v in variants
         },
+        "panel_check": panel_check,
     }

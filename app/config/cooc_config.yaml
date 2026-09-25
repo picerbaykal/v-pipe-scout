@@ -28,4 +28,21 @@ presence:
 # NOTE: the per-mutation "testable" coverage (3000 reads) and "present" frequency
 # (1%) used to build con_present/con_testable are set in the WORKER
 # (process/cooc.py -> constellation_counts defaults). Changing those needs a
-# worker restart + re-scan; con_floor above only needs a streamlit restart. 
+# worker restart + re-scan; con_floor above only needs a streamlit restart.
+
+# New co-occurrence check (2026-09): a vote among each panel variant's specific
+# markers, per city, pooled over the selected window. Reads only — never the
+# deconvolution abundance. Code defaults = these values (process/cooc.py).
+check:
+  # Which markers — used by the WORKER; changing needs a re-scan.
+  out_other_max: 5      # carriers outside the variant's family and outside other
+                        #   recombinant roots (the real competitors)
+  out_rec_max: 60       # carriers under other recombinant roots (mostly inherited)
+  # The vote — applied in the UI; a streamlit restart is enough.
+  min_cov: 100          # reads covering a marker to measure it
+  present_freq: 0.05    # present: >= 5% of covering reads carry it ...
+  link_min: 0.8         # ... and >= 80% of those match the variant at neighbouring
+  min_link: 20          #     positions (needs >= 20 such reads)
+  absent_freq: 0.01     # absent: < 1% carry it
+  confirm_share: 0.75   # present / measurable >= this -> confirmed
+  notfound_share: 0.25  # present / measurable <= this -> not found; between -> inconsistent

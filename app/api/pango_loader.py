@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import logging
 import shutil
 import urllib.request
@@ -362,47 +363,147 @@ def _get_pango_source() -> str:
         return "cornelius"
 
 
+NEXTCLADE_TREE_URL = (
+    "https://raw.githubusercontent.com/nextstrain/nextclade_data"
+    "/refs/heads/master/data/nextstrain/sars-cov-2/wuhan-hu-1/orfs/tree.json"
+)
+
+_TREE_MUT = re.compile(r"^([ACGTN-])(\d+)([ACGTN-])$")
+_RECOMB = re.compile(r"^X[A-Z]+$")
+
+
+def _nuc_ranges(positions) -> list:
+    out: list[list[int]] = []
+    for pos in sorted(positions):
+        if out and pos == out[-1][1] + 1:
+            out[-1][1] = pos
+        else:
+            out.append([pos, pos])
+    return [f"{a}-{b}" for a, b in out]
+
+
+def build_summary_from_tree(tree: dict, existing_dates: dict | None = None) -> dict:
+    """Convert a Nextclade Auspice v2 tree.json into a pango_summary-compatible
+    dict. Each node carries only BRANCH mutations, so a lineage's full signature
+    is the accumulation root -> clade-root (shallowest node with that
+    Nextclade_pango) with reversions/deletions applied in order. designationDate
+    is absent from the tree and is carried over from `existing_dates`. Recombinant
+    roots (X[A-Z]+) get an empty parent, matching the corneliusroemer schema."""
+    from collections import defaultdict
+    ref = tree["root_sequence"]["nuc"]
+
+    def ref_base(pos: int) -> str:
+        return ref[pos - 1]
+
+    clade: dict[str, dict] = {}
+
+    def walk(node, subs, dels, parent_lin):
+        subs = dict(subs); dels = set(dels)
+        branch_subs = []; branch_dels = set()
+        for m in node.get("branch_attrs", {}).get("mutations", {}).get("nuc", []):
+            mm = _TREE_MUT.match(m)
+            if not mm:
+                continue
+            _, pos, alt = mm.group(1), int(mm.group(2)), mm.group(3)
+            if alt == "N":
+                continue
+            if alt == "-":
+                dels.add(pos); subs.pop(pos, None); branch_dels.add(pos)
+            elif alt == ref_base(pos):
+                subs.pop(pos, None); dels.discard(pos)
+            else:
+                subs[pos] = alt; dels.discard(pos); branch_subs.append((pos, alt))
+        pango = node.get("node_attrs", {}).get("Nextclade_pango", {}).get("value")
+        if pango and pango not in clade:
+            clade[pango] = {
+                "subs": dict(subs), "dels": set(dels),
+                "new_subs": list(branch_subs), "new_dels": set(branch_dels),
+                "parent": parent_lin,
+                "nsClade": node.get("node_attrs", {}).get("clade_nextstrain", {}).get("value", ""),
+                "alias": node.get("node_attrs", {}).get("partiallyAliased", {}).get("value", ""),
+            }
+        for child in node.get("children", []):
+            walk(child, subs, dels, pango if pango else parent_lin)
+
+    walk(tree["tree"], {}, set(), "")
+    lineages = set(clade)
+    existing_dates = existing_dates or {}
+
+    def parent_of(lin: str, tree_parent: str) -> str:
+        if _RECOMB.match(lin):
+            return ""
+        return tree_parent if (tree_parent in lineages and tree_parent) else ""
+
+    def _pos(mstr: str) -> int:
+        return int(re.match(r"^[ACGTN-](\d+)", mstr).group(1))
+
+    children: dict[str, list] = defaultdict(list)
+    out: dict[str, dict] = {}
+    for lin, c in clade.items():
+        parent = parent_of(lin, c["parent"])
+        if parent:
+            children[parent].append(lin)
+        out[lin] = {
+            "lineage": lin,
+            "unaliased": c.get("alias") or lin,
+            "parent": parent,
+            "children": [],
+            "nextstrainClade": c.get("nsClade", ""),
+            "nucSubstitutions": sorted(
+                (f"{ref_base(p)}{p}{a}" for p, a in c["subs"].items()), key=_pos),
+            "nucSubstitutionsNew": sorted(
+                (f"{ref_base(p)}{p}{a}" for p, a in c["new_subs"]), key=_pos),
+            "nucDeletions": _nuc_ranges(c["dels"]),
+            "nucDeletionsNew": _nuc_ranges(c["new_dels"]),
+            "designationDate": existing_dates.get(lin),
+        }
+    for parent, kids in children.items():
+        if parent in out:
+            out[parent]["children"] = sorted(kids)
+    return out
+
+
 def download_pango_summary(local_path: str | Path) -> dict:
     """
-    Download the pango_summary.json from corneliusroemer and overwrite
-    local_path with the raw upstream content. NO merging: the cache is an exact
-    copy of the upstream source. (Merging with a metadata base, and the Freyja
-    barcode merge, were removed because they introduced orphaned lineages — new
-    lineages written without a `parent` field — which broke clade traversal and
-    corrupted the scanner's clade resolution.)
+    Fetch the Nextclade reference tree and write it to local_path as a
+    pango_summary-compatible file. Replaces the corneliusroemer download
+    (upstream frozen since 2025-06, no PJ.2+) and the old UShER/Freyja merge
+    (which introduced orphaned lineages that quarantined the cache).
+    designationDate is carried over from the file already at local_path.
 
     Returns:
         {success, new_variants, old_variants, added, error}
     """
     local = Path(local_path)
 
-    # record previous variant set only for the "added" diff (not merged in)
     old_variants: set[str] = set()
+    existing_dates: dict[str, str] = {}
     if local.exists():
         try:
             with local.open("r", encoding="utf-8") as f:
-                old_variants = set(json.load(f).keys())
+                cur = json.load(f)
+            old_variants = set(cur)
+            existing_dates = {
+                lin: entry.get("designationDate")
+                for lin, entry in cur.items()
+                if isinstance(entry.get("designationDate"), str)
+            }
         except Exception:
             pass
 
-    logging.info("pango_loader: downloading from corneliusroemer/pango-sequences (no merge)")
+    logging.info("pango_loader: fetching Nextclade reference tree -> pango_summary")
     try:
-        with urllib.request.urlopen(PANGO_SUMMARY_URL, timeout=30) as resp:
-            raw = resp.read()
-            remote_etag = resp.headers.get("ETag")
+        with urllib.request.urlopen(NEXTCLADE_TREE_URL, timeout=60) as resp:
+            tree = json.loads(resp.read())
 
-        # validate JSON before overwriting
-        new_data = json.loads(raw)
-        new_variants = set(new_data.keys())
+        new_data = build_summary_from_tree(tree, existing_dates)
+        new_variants = set(new_data)
 
-        # atomic write of the RAW upstream bytes — no merge
         local.parent.mkdir(parents=True, exist_ok=True)
         tmp = local.with_suffix(".tmp")
-        tmp.write_bytes(raw)
+        with tmp.open("w", encoding="utf-8") as f:
+            json.dump(new_data, f)
         shutil.move(str(tmp), str(local))
-
-        if remote_etag:
-            local.with_suffix(".etag").write_text(remote_etag)
 
         return {
             "success": True,

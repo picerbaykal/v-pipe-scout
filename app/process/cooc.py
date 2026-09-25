@@ -264,6 +264,11 @@ def distinctive_within_panel(variant_signatures, carrier_counts=None,
     lineages). These are the positions co-occurrence uses to test a variant's
     presence.
 
+    LEGACY (superseded by specific_markers + check_verdicts below): the global
+    count includes the variant's OWN sublineages, so on the granular Nextclade
+    tree (XFG: 382 sublineages) every defining marker fails the <=30 bar. Kept
+    only so the old UI fields keep rendering until the UI switches over.
+
     Panel-relative uniqueness alone is unsafe in a small panel: a variant's
     "distinctive vs the other members" set can be dominated by mutations that
     modern circulating lineages carry, which then co-occur in the reads and
@@ -359,3 +364,261 @@ def constellation_counts(mut_cov, mut_pres, cov_min: int = 3000,
     present = [m for m in testable
                if (mut_pres.get(m, 0) / mut_cov[m]) >= freq_min]
     return len(present), len(testable)
+
+
+# ══ New co-occurrence check (2026-09): specific markers + neighbour linkage ══
+#
+# Part A — which markers: panel-private substitutions whose carriers OUTSIDE the
+#   variant's own family are few. Own sublineages never count against a variant
+#   (that is what broke the global <=30 rule on the granular Nextclade tree).
+#   Outside carriers are split into
+#     out_rec   under a DIFFERENT recombinant root (X..) — mostly recombinants
+#               that inherited the marker from this variant; tolerated if few
+#     out_other everything else — real competitors; must be ~0
+# Part B — reads: per date, each marker's coverage/frequency, plus "link": of
+#   reads carrying the marker that also cover other positions of the variant's
+#   signature, the share where every covered neighbour carries the variant base
+#   (marker sits on a variant-like haplotype, not an isolated error). Markers
+#   are NOT required to co-occur with each other (often ~kb apart).
+# Verdicts are computed from raw counts by check_verdicts() with thresholds from
+#   cooc_config.yaml `check:`, so retuning needs no worker re-scan.
+
+_REC_ROOT_RE = _re_presence.compile(r"^X[A-Z]+$")
+_SUB_RE = _re_presence.compile(r"^(\d+)([ACGT])$")
+_CHECK_UNCOVERED = {"N", "-"}
+
+CHECK_DEFAULTS = {
+    # Part A — marker selection (worker; changing needs a re-scan)
+    "out_other_max": 5,      # carriers outside family & other recombinant roots
+    "out_rec_max": 60,       # carriers under other recombinant roots
+    # Part B — the vote (UI; a streamlit restart is enough)
+    "min_cov": 100,          # reads covering a marker (whole window) to measure it
+    "present_freq": 0.05,    # present: >= this share of covering reads carry it ...
+    "link_min": 0.8,         # ... and >= this share of those reads match the
+    "min_link": 20,          #     variant at neighbouring positions (>= 20 reads)
+    "absent_freq": 0.01,     # absent: < this share carry it
+    "confirm_share": 0.75,   # present / measurable >= this -> confirmed
+    "notfound_share": 0.25,  # present / measurable <= this -> not found
+}
+
+
+def _check_cfg(cfg: Optional[dict] = None) -> dict:
+    out = {}
+    for k, v in CHECK_DEFAULTS.items():
+        if cfg and k in cfg:
+            out[k] = cfg[k]
+        else:
+            out[k] = get_cooc_setting(f"check.{k}", v)
+    return out
+
+
+def _children_map(parent_map: Dict[str, str]) -> Dict[str, List[str]]:
+    kids: Dict[str, List[str]] = {}
+    for c, p in parent_map.items():
+        if p:
+            kids.setdefault(p, []).append(c)
+    return kids
+
+
+def _lineage_family(v: str, parent_map: Dict[str, str],
+                    kids: Dict[str, List[str]]) -> Set[str]:
+    """v plus all descendants. A panel variant absent from the file (built by the
+    children-intersection fallback) is seeded with its name-prefix children."""
+    roots = {v}
+    if v not in parent_map:
+        roots |= {l for l in parent_map if l.startswith(v + ".")}
+    fam, stack = set(roots), list(roots)
+    while stack:
+        for c in kids.get(stack.pop(), []):
+            if c not in fam:
+                fam.add(c)
+                stack.append(c)
+    return fam
+
+
+def _recombinant_root(lin: str, parent_map: Dict[str, str]) -> Optional[str]:
+    """Topmost X.. ancestor-or-self (recombinant roots have an empty parent)."""
+    x, found, seen = lin, None, set()
+    while x and x not in seen:
+        seen.add(x)
+        if _REC_ROOT_RE.match(x):
+            found = x
+        x = parent_map.get(x, "")
+    return found
+
+
+_CARRIER_INDEX: Dict[int, Dict[str, Set[str]]] = {}
+
+
+def _carrier_index(lineage_signatures: Dict[str, Set[str]]) -> Dict[str, Set[str]]:
+    key = id(lineage_signatures)
+    if key not in _CARRIER_INDEX:
+        idx: Dict[str, Set[str]] = {}
+        for lin, sig in lineage_signatures.items():
+            for m in sig:
+                idx.setdefault(m, set()).add(lin)
+        _CARRIER_INDEX.clear()
+        _CARRIER_INDEX[key] = idx
+    return _CARRIER_INDEX[key]
+
+
+def specific_markers(variant_signatures: Dict[str, Set[str]],
+                     lineage_signatures: Dict[str, Set[str]],
+                     parent_map: Dict[str, str],
+                     cfg: Optional[dict] = None) -> Dict[str, List[str]]:
+    """Part A. variant -> specific markers ("{pos}{alt}"), most specific first.
+
+    variant_signatures: panel variant -> substitutions ("241T" form).
+    lineage_signatures: every pango lineage -> substitutions (the carrier pool).
+    parent_map:         lineage -> parent lineage ("" for roots/recombinants).
+
+    A variant with no specific marker (an ancestor of other panel variants, e.g.
+    KP.2/KP.3) gets [] and is reported "can't confirm independently"."""
+    c = _check_cfg(cfg)
+    idx = _carrier_index(lineage_signatures)
+    kids = _children_map(parent_map)
+    rroot_cache: Dict[str, Optional[str]] = {}
+
+    def rroot(lin):
+        if lin not in rroot_cache:
+            rroot_cache[lin] = _recombinant_root(lin, parent_map)
+        return rroot_cache[lin]
+
+    out: Dict[str, List[str]] = {}
+    for v, sig in variant_signatures.items():
+        others: Set[str] = set()
+        for w, s in variant_signatures.items():
+            if w != v:
+                others |= (s or set())
+        private = {m for m in (sig or set()) - others if _SUB_RE.match(m)}
+        fam = _lineage_family(v, parent_map, kids)
+        v_root = rroot(v) if v in parent_map else None
+        ranked = []
+        for m in private:
+            outside = idx.get(m, set()) - fam
+            n_rec = sum(1 for l in outside if rroot(l) and rroot(l) != v_root)
+            n_oth = len(outside) - n_rec
+            if n_oth <= c["out_other_max"] and n_rec <= c["out_rec_max"]:
+                ranked.append((n_oth, n_rec, int(_SUB_RE.match(m).group(1)), m))
+        out[v] = [m for *_, m in sorted(ranked)]
+    return out
+
+
+def _sig_map(sig: Set[str]) -> Dict[int, str]:
+    out = {}
+    for m in sig or ():
+        mm = _SUB_RE.match(m)
+        if mm:
+            out[int(mm.group(1))] = mm.group(2)
+    return out
+
+
+def accumulate_check_stats(rows: List[dict],
+                           positions: List[int],
+                           variant_signatures: Dict[str, Set[str]],
+                           markers: Dict[str, List[str]],
+                           stats: Dict[str, Dict[str, Dict[str, List[int]]]]) -> None:
+    """Part B tally from RAW LAPIS rows (one batch of one date).
+
+    stats[variant][date][marker] = [cov, hit, link_n, link_ok]
+      cov     reads covering the marker position (non-N, non-deletion)
+      hit     of those, reads carrying the marker base
+      link_n  of hit, reads that also cover >=1 other signature position
+      link_ok of link_n, reads where every covered neighbour has the variant base
+    Pure; no IO. Positions outside this batch are ignored."""
+    if not rows:
+        return
+    pos_set = set(positions)
+    prepared = []
+    for v, mks in markers.items():
+        if not mks:
+            continue
+        sm = {p: b for p, b in _sig_map(variant_signatures.get(v, set())).items()
+              if p in pos_set}
+        mk = [(int(_SUB_RE.match(m).group(1)), _SUB_RE.match(m).group(2), m)
+              for m in mks if _SUB_RE.match(m) and int(_SUB_RE.match(m).group(1)) in pos_set]
+        if mk:
+            prepared.append((v, sm, mk))
+    if not prepared:
+        return
+    for row in rows:
+        cnt = int(row.get("count", 0) or 0)
+        if cnt <= 0:
+            continue
+        date = str(row.get("date", ""))[:10]
+        for v, sm, mk in prepared:
+            cov_pos = None
+            for p, b, m in mk:
+                base = row.get(f"[{p}]", "N")
+                if base in _CHECK_UNCOVERED:
+                    continue
+                cell = stats.setdefault(v, {}).setdefault(date, {}).setdefault(m, [0, 0, 0, 0])
+                cell[0] += cnt
+                if base != b:
+                    continue
+                cell[1] += cnt
+                if cov_pos is None:
+                    cov_pos = {q: row.get(f"[{q}]", "N") for q in sm}
+                nb = [q for q, bq in cov_pos.items()
+                      if q != p and bq not in _CHECK_UNCOVERED]
+                if nb:
+                    cell[2] += cnt
+                    if all(cov_pos[q] == sm[q] for q in nb):
+                        cell[3] += cnt
+
+
+def check_verdicts(markers: List[str],
+                   per_date: Dict[str, Dict[str, List[int]]],
+                   cfg: Optional[dict] = None) -> dict:
+    """Verdict for one variant in one city: a vote among its specific markers.
+
+    Counts are pooled over all dates in the window (the heatmaps show dates).
+    Each marker is
+      present     >= present_freq of covering reads carry it, and those reads
+                  match the variant at neighbouring positions (link >= link_min)
+      absent      <  absent_freq of covering reads carry it
+      unmeasured  fewer than min_cov covering reads, or anything in between
+    Verdict from present / (present + absent):
+      confirmed >= confirm_share · not_found <= notfound_share · else inconsistent
+      cant_confirm when the variant has no markers or none is measurable.
+    Uses reads only — never the deconvolution abundance."""
+    c = _check_cfg(cfg)
+    empty = {"verdict": "cant_confirm", "n_markers": len(markers or []),
+             "n_present": 0, "n_measured": 0, "markers": {}}
+    if not markers:
+        return empty
+    pooled = {m: [0, 0, 0, 0] for m in markers}
+    for cells in (per_date or {}).values():
+        for m in markers:
+            cell = cells.get(m)
+            if cell:
+                for i in range(4):
+                    pooled[m][i] += cell[i]
+    out, n_p, n_a = {}, 0, 0
+    for m in markers:
+        cov, hit, lk_n, lk_ok = pooled[m]
+        f = hit / cov if cov else None
+        link = lk_ok / lk_n if lk_n else None
+        if cov < c["min_cov"]:
+            st = "unmeasured"
+        elif f < c["absent_freq"]:
+            st = "absent"
+        elif (f >= c["present_freq"] and lk_n >= c["min_link"]
+              and link >= c["link_min"]):
+            st = "present"
+        else:
+            st = "unmeasured"
+        n_p += st == "present"
+        n_a += st == "absent"
+        out[m] = {"cov": cov, "freq": f, "link": link, "status": st}
+    n_meas = n_p + n_a
+    if n_meas == 0:
+        verdict = "cant_confirm"
+    elif n_p / n_meas >= c["confirm_share"]:
+        verdict = "confirmed"
+    elif n_p / n_meas <= c["notfound_share"]:
+        verdict = "not_found"
+    else:
+        verdict = "inconsistent"
+    return {"verdict": verdict, "n_markers": len(markers), "n_present": n_p,
+            "n_measured": n_meas, "markers": out}
