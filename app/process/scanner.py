@@ -63,9 +63,18 @@ STAR_CARRIER_MAX = 30   # legacy global count; kept only for the UI heatmap ★
 STAR_OUTSIDE_MAX = 5
 STAR_OUT_REC_MAX = 60
 
-# A finding needs at least this many reads to be confirmed; below it a couple
-# of reads matching by chance (B.1.617.2 on 2 reads, BA.2.87.1) would be named.
+# ★ evidence (a finding's discriminating block) needs at least this many reads
+# of its own; below it a couple of reads matching by chance (B.1.617.2 on 2
+# reads, BA.2.87.1) would confirm a finding.
 MIN_FINDING_READS = 100
+
+# The fingerprint / finding read threshold scales with how much data the city
+# has: min(min_read_count, share x all unexplained reads), never below the
+# floor. A small city-window (Chur, 3.4k unexplained reads) can't reach a flat
+# 500, so a clearly present variant went unnoticed. The ★-evidence minimum
+# above still protects against findings resting on a handful of reads.
+READ_THRESHOLD_SHARE = 0.005
+READ_THRESHOLD_FLOOR = 20
 
 _REC_ROOT_PREFIX = "X"
 
@@ -421,6 +430,11 @@ def scan_unexplained_patterns(
         if count >= _NOISE_FLOOR:
             fp_total[fp] = fp_total.get(fp, 0) + count
 
+    _all_reads = sum(c for _r, _p, c, _f in _rows if c >= _NOISE_FLOOR)
+    eff_min_reads = min(min_read_count,
+                        max(READ_THRESHOLD_FLOOR,
+                            int(round(READ_THRESHOLD_SHARE * _all_reads))))
+
     for row, present, count, fingerprint in _rows:
         if count < _NOISE_FLOOR:
             continue
@@ -431,7 +445,7 @@ def scan_unexplained_patterns(
 
         if len(fingerprint) < MIN_FINGERPRINT:
             continue  # not co-occurrence beyond panel
-        if fp_total.get(fingerprint, 0) < min_read_count:
+        if fp_total.get(fingerprint, 0) < eff_min_reads:
             continue  # too little evidence for this fingerprint overall
         fingerprint = set(fingerprint)
 
@@ -579,7 +593,7 @@ def scan_unexplained_patterns(
         _annotate_outside(c)
     _dedupe_member_blocks(_all_clades, tree, _block_is_discriminating)
     # too few reads to name anything: dropped (their reads stay in the grey gap)
-    _all_clades = [c for c in _all_clades if c["total_reads"] >= MIN_FINDING_READS]
+    _all_clades = [c for c in _all_clades if c["total_reads"] >= eff_min_reads]
     confirmed = [c for c in _all_clades if _has_disc_block(c)]
     _backbone = [c for c in _all_clades if not _has_disc_block(c)]
     for c in _all_clades:
@@ -626,7 +640,8 @@ def scan_unexplained_patterns(
     summary = _summary(resolved_clade, unresolved, novel)
     logger.info(
         f"[scanner] reads={total_unexplained:,} fingerprints>=2={sum(1 for f in fp_total if len(f) >= 2)} "
-        f"passing={sum(1 for f, n in fp_total.items() if len(f) >= 2 and n >= min_read_count)} | "
+        f"threshold={eff_min_reads} "
+        f"passing={sum(1 for f, n in fp_total.items() if len(f) >= 2 and n >= eff_min_reads)} | "
         f"confirmed={[c['node'] for c in resolved_clade]} "
         f"named_not_specific={[c['node'] for c in matched_no_haplotype]} "
         f"unresolved={len(unresolved)} novel={novel['pattern_count']}")
