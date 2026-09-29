@@ -9,36 +9,20 @@ scope:
   # scanner able to detect OT variants missing from the panel.
   use_tracked_variants: true
 
-# Add this block to app/config/cooc_config.yaml to override the "not found in
-# WW" verdict thresholds without a rebuild. The code defaults to exactly these
-# values if the block is absent. After editing, restart streamlit (the verdict
-# is applied in the UI; no worker re-scan needed to retune these).
-presence:
-  # co-occurrence path (primary — used when the haplotype can be observed)
-  confirm_freq: 0.01        # co-occurrence freq (present/co_covered) >= this -> confirmed
-  confirm_min_present: 10   # ...and >= 10 co-occurring reads
-  absent_min_cov: 3000      # co_covered >= this means co-occurrence could look;
-                            #   below it, fall back to the constellation
-  absent_max_present: 2     # co-occurring reads < this = haplotype absent
-
-  # constellation fallback (used when co-occurrence is blind — distinctive
-  # mutations too spread out to co-occur). Fraction of the readable distinctive
-  # constellation present below which the variant is "not found in WW".
-  con_floor: 0.5
-# NOTE: the per-mutation "testable" coverage (3000 reads) and "present" frequency
-# (1%) used to build con_present/con_testable are set in the WORKER
-# (process/cooc.py -> constellation_counts defaults). Changing those needs a
-# worker restart + re-scan; con_floor above only needs a streamlit restart.
-
-# New co-occurrence check (2026-09): a vote among each panel variant's specific
-# markers, per city, pooled over the selected window. Reads only — never the
-# deconvolution abundance. Code defaults = these values (process/cooc.py).
-check:
-  # Which markers — used by the WORKER; changing needs a re-scan.
-  out_other_max: 5      # carriers outside the variant's family and outside other
+# ── ★ markers — shared by the co-occurrence check and the scanner ──────────
+# A mutation is a ★ (specific) marker for a variant/finding when few lineages
+# OUTSIDE its own family carry it (its own sublineages never count against it).
+# Worker setting: changing it needs a worker restart + re-scan.
+markers:
+  out_other_max: 5      # carriers outside the family and outside other
                         #   recombinant roots (the real competitors)
-  out_rec_max: 60       # carriers under other recombinant roots (mostly inherited)
-  # The vote — applied in the UI; a streamlit restart is enough.
+  out_rec_max: 60       # carriers under other recombinant roots (XFY, XHA … that
+                        #   inherited the mutation — relatives, tolerated)
+
+# ── Co-occurrence check: a vote among each panel variant's ★ markers ────────
+# Per city, pooled over the selected window. Reads only — never the
+# deconvolution abundance. Applied in the UI: a streamlit restart is enough.
+check:
   min_cov: 100          # reads covering a marker to measure it
   present_freq: 0.05    # present: >= 5% of covering reads carry it ...
   link_min: 0.8         # ... and >= 80% of those match the variant at neighbouring
@@ -46,3 +30,17 @@ check:
   absent_freq: 0.01     # absent: < 1% carry it
   confirm_share: 0.75   # present / measurable >= this -> confirmed
   notfound_share: 0.25  # present / measurable <= this -> not found; between -> inconsistent
+
+# ── Scanner: names co-occurrence signal the panel doesn't explain ──────────
+# Worker settings: changing them needs a worker restart + re-scan.
+scanner:
+  min_fingerprint: 2          # mutations beyond the panel needed on a read to START
+                              #   a finding (1 = allele frequency, not a haplotype)
+  read_threshold_max: 500     # reads behind one fingerprint (summed over fragments),
+  read_threshold_share: 0.005 #   scaled down for small cities: min(max, share x all
+  read_threshold_floor: 20    #   unexplained reads), never below the floor
+  min_star_reads: 100         # a finding is confirmed only by ★ evidence on >= this
+                              #   many reads of its own
+  small_candidate_set: 15     # <= this many matching lineages = specific enough to name
+  min_family_share: 0.9       # more candidates: named if >= 90% fall in one family
+  min_clade_depth: 6          # ... or if their common clade is at least this deep

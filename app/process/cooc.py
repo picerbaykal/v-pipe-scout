@@ -261,151 +261,7 @@ def panel_completeness_by_date(
         result["matched_count"] + result["unexplained_count"]
     ).replace(0, pd.NA)
     return result[["date", "matched_count", "unexplained_count", "completeness"]]
-# ── Per-panel-variant presence / co-coverage ("not found in WW") ───────────
-# Empirical presence/absence for each PANEL variant, from the same confirmed_
-# present / confirmed_absent computed above. Amplicon scoping is automatic:
-# cross-amplicon positions come back N together, so they never both appear in
-# confirmed_present / confirmed_absent on one read.
 import re as _re_presence
-
-
-# A distinctive mutation must be globally RARE to count — carried by at most this
-# many pango lineages. Matches the scanner's ★ discriminating bar. Positions more
-# common than this (E484K, the N-gene triplet, ...) are shared with currently-
-# circulating lineages, so they cannot confirm a specific (possibly extinct)
-# panel variant. Tune here if the scanner's STAR_CARRIER_MAX changes.
-_DISTINCT_STAR_MAX = 30
-
-_GLOBAL_CARRIER = {}
-
-
-def _global_carrier_counts(pango_loader):
-    """substitution -> number of pango lineages carrying it. Computed once per
-    process from the pango summary (the same ~5k-lineage reference every scan
-    sees), then cached. Degrades to {} on any error, which restores the old
-    panel-relative behaviour rather than breaking the scan."""
-    global _GLOBAL_CARRIER
-    if _GLOBAL_CARRIER:
-        return _GLOBAL_CARRIER
-    carrier = {}
-    try:
-        for _lin in pango_loader.get_raw_data():
-            for _m in (pango_loader.get_signature(_lin) or []):
-                if _re_presence.match(r"^\d+[ACGT]$", _m):
-                    carrier[_m] = carrier.get(_m, 0) + 1
-    except Exception:
-        return {}
-    _GLOBAL_CARRIER = carrier
-    return carrier
-
-
-def distinctive_within_panel(variant_signatures, carrier_counts=None,
-                             star_max=_DISTINCT_STAR_MAX):
-    """variant -> mutations that both (a) NO OTHER panel member carries and, when
-    `carrier_counts` is given, (b) are GLOBALLY RARE (carried by <= star_max
-    lineages). These are the positions co-occurrence uses to test a variant's
-    presence.
-
-    LEGACY (superseded by specific_markers + check_verdicts below): the global
-    count includes the variant's OWN sublineages, so on the granular Nextclade
-    tree (XFG: 382 sublineages) every defining marker fails the <=30 bar. Kept
-    only so the old UI fields keep rendering until the UI switches over.
-
-    Panel-relative uniqueness alone is unsafe in a small panel: a variant's
-    "distinctive vs the other members" set can be dominated by mutations that
-    modern circulating lineages carry, which then co-occur in the reads and
-    falsely confirm an extinct variant (B.1.1.7, B.1.351). Intersecting with the
-    global-rarity bar leaves only genuinely-defining positions, so an extinct
-    variant is judged on mutations that are actually absent from today's WW.
-
-    A variant with no globally-rare distinctive mutation gets an empty set — it
-    cannot be told apart from the circulating background, so it is left
-    unconfirmable (the verdict layer reads that as a blind spot / not found)
-    rather than confirmed off shared signal. Without carrier_counts the old
-    panel-relative behaviour is preserved."""
-    panel = list(variant_signatures)
-    out = {}
-    for v in panel:
-        others = set()
-        for w in panel:
-            if w != v:
-                others |= (variant_signatures.get(w) or set())
-        d = (variant_signatures.get(v) or set()) - others
-        if carrier_counts:
-            d = {m for m in d if carrier_counts.get(m, 0) <= star_max}
-        out[v] = d
-    return out
-
-
-def _presence_pos(m: str) -> int:
-    mm = _re_presence.match(r"^(\d+)", m)
-    return int(mm.group(1)) if mm else -1
-
-
-def accumulate_panel_presence(annotated_df: pd.DataFrame,
-                              distinctive: Dict[str, Set[str]],
-                              acc: Dict[str, Dict[str, int]]) -> None:
-    """Update `acc` (variant -> {"present":int, "co_covered":int}) from one
-    annotated batch (output of annotate_cooc_dataframe). Per read row, weighted
-    by its `count`:
-      present    += count if >=2 of the variant's distinctive mutations appear
-                    TOGETHER in confirmed_present (the defining co-occurrence,
-                    as the mutant base) — the actual evidence the variant is here.
-      co_covered += count if >=2 of the variant's distinctive POSITIONS were
-                    sequenced together (present in confirmed_present OR
-                    confirmed_absent — non-N, any base) — "did we get to look".
-    Pure; no IO. Accumulate across every batch/date, then decide the verdict
-    from the totals (freq = present / co_covered)."""
-    if annotated_df is None or getattr(annotated_df, "empty", True):
-        return
-    dpos = {v: {_presence_pos(m) for m in muts if _presence_pos(m) >= 0}
-            for v, muts in distinctive.items()}
-    pos2mut = {v: {_presence_pos(m): m for m in muts if _presence_pos(m) >= 0}
-               for v, muts in distinctive.items()}
-    for row in annotated_df.to_dict("records"):
-        cnt = int(row.get("count", 0) or 0)
-        if cnt <= 0:
-            continue
-        cp = set(row.get("confirmed_present", []) or [])
-        ca = set(row.get("confirmed_absent", []) or [])
-        covered_pos = ({_presence_pos(m) for m in cp}
-                       | {_presence_pos(m) for m in ca})
-        for v, muts in distinctive.items():
-            a = acc.get(v)
-            if a is None:
-                a = acc[v] = {"present": 0, "co_covered": 0,
-                              "mut_cov": {}, "mut_pres": {}}
-            dcov = dpos[v] & covered_pos
-            if len(dcov) >= 2:
-                a["co_covered"] += cnt
-            if len(muts & cp) >= 2:
-                a["present"] += cnt
-            # per-mutation constellation: cover / present for each distinctive
-            # position sequenced on this read (works even when they never
-            # co-occur, i.e. co_covered stays 0)
-            _mc = a["mut_cov"]; _mp = a["mut_pres"]
-            for _p in dcov:
-                _m = pos2mut[v][_p]
-                _mc[_m] = _mc.get(_m, 0) + cnt
-                if _m in cp:
-                    _mp[_m] = _mp.get(_m, 0) + cnt
-
-
-def constellation_counts(mut_cov, mut_pres, cov_min: int = 3000,
-                         freq_min: float = 0.01):
-    """(#present, #testable) over a variant's distinctive mutations.
-
-    testable = distinctive mutations with >= cov_min covering reads (readable);
-    present  = of those, mutations whose per-mutation frequency
-               (mut_pres / mut_cov) is >= freq_min. A variant that is genuinely
-               present shows most of its constellation; an extinct one shows
-               only stray homoplastic sites."""
-    mut_cov = mut_cov or {}
-    mut_pres = mut_pres or {}
-    testable = [m for m, c in mut_cov.items() if c >= cov_min]
-    present = [m for m in testable
-               if (mut_pres.get(m, 0) / mut_cov[m]) >= freq_min]
-    return len(present), len(testable)
 
 
 # ══ New co-occurrence check (2026-09): specific markers + neighbour linkage ══
@@ -444,11 +300,20 @@ CHECK_DEFAULTS = {
 }
 
 
+# "What makes a mutation a ★ marker" is shared with the scanner and lives under
+# `markers:` in cooc_config.yaml; `check.*` is still read as a fallback so older
+# config files keep working.
+_MARKER_KEYS = ("out_other_max", "out_rec_max")
+
+
 def _check_cfg(cfg: Optional[dict] = None) -> dict:
     out = {}
     for k, v in CHECK_DEFAULTS.items():
         if cfg and k in cfg:
             out[k] = cfg[k]
+        elif k in _MARKER_KEYS:
+            out[k] = get_cooc_setting(f"markers.{k}",
+                                      get_cooc_setting(f"check.{k}", v))
         else:
             out[k] = get_cooc_setting(f"check.{k}", v)
     return out

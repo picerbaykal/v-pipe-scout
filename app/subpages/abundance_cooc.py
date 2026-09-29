@@ -918,25 +918,6 @@ def app():
                                   _osc = oscillating_pairs(all_selected_variants, _csigs)
                                   _dec_vars = [v for v in _dec.keys()
                                                if v != "undetermined" and v in _csigs]
-                                  # verdict thresholds — calibrated on real
-                                  # data (Alpha -> not_found; current variants
-                                  # -> confirmed). Override in cooc_config.yaml.
-                                  try:
-                                      from utils.config import get_cooc_setting as _gcs
-                                  except Exception:
-                                      _gcs = None
-                                  def _ppcfg(_k, _d):
-                                      try:
-                                          _val = _gcs(_k, _d) if _gcs else _d
-                                          return _d if _val is None else _val
-                                      except Exception:
-                                          return _d
-                                  _PP_CONF_FREQ = float(_ppcfg("presence.confirm_freq", 0.01))
-                                  _PP_CONF_MINP = int(_ppcfg("presence.confirm_min_present", 10))
-                                  _PP_ABS_COV = int(_ppcfg("presence.absent_min_cov", 3000))
-                                  _PP_ABS_MAXP = int(_ppcfg("presence.absent_max_present", 2))
-                                  _PP_CON_FLOOR = float(_ppcfg("presence.con_floor", 0.5))
-                                  _PP_ABS_FREQ = float(_ppcfg("presence.absent_max_freq", 0.001))
                                   _pc = (_cooc_res or {}).get("panel_check", {}) or {}
                                   from process.cooc import (check_verdicts as _check_verdicts,
                                                             _check_cfg as _check_cfg_fn)

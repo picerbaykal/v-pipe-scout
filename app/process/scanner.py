@@ -32,11 +32,23 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+
+def _cfg(key: str, default):
+    """Setting from app/config/cooc_config.yaml, else the built-in default.
+    Scanner settings live under `scanner:`; "what makes a mutation a ★ marker"
+    is shared with the co-occurrence check under `markers:`."""
+    try:
+        from utils.config import get_cooc_setting
+        val = get_cooc_setting(key, default)
+        return default if val is None else val
+    except Exception:
+        return default
+
 # A clade label is only meaningful if the common ancestor of the candidate
 # set is reasonably recent. If the common ancestor is at or above this depth
 # threshold from the root it's too broad (e.g. BA.2) -> unresolved.
 # Depth is measured as number of parent hops from the node to the tree root.
-MIN_CLADE_DEPTH = 6
+MIN_CLADE_DEPTH = int(_cfg("scanner.min_clade_depth", 6))
 
 # 2026-09: many candidates can still name a clade when they collapse into ONE
 # family (>= this share of candidates inside the dominant clade's subtree),
@@ -44,10 +56,15 @@ MIN_CLADE_DEPTH = 6
 # Nextclade sublineages would otherwise always be "unresolved". Backbone
 # fingerprints spread over unrelated clades (e.g. 62% under XBB.1) stay
 # unresolved. Specificity is enforced later by the ★ rule and MIN_FINDING_READS.
-MIN_FAMILY_SHARE = 0.9
+MIN_FAMILY_SHARE = float(_cfg("scanner.min_family_share", 0.9))
 
 # Minimum fingerprint size for co-occurrence (2 = haplotype, 1 = allele freq).
-MIN_FINGERPRINT = 2
+MIN_FINGERPRINT = int(_cfg("scanner.min_fingerprint", 2))
+
+# A fingerprint / mutation group carried by at most this many lineages counts as
+# specific (a small, nameable set); above it the scanner needs the one-family
+# rules. Was a literal 15 in three places.
+SMALL_SET = int(_cfg("scanner.small_candidate_set", 15))
 
 # A mutation is discriminating (★) if few lineages carry it. A co-occurrence
 # block counts as evidence only if it holds at least one such mutation; a block
@@ -60,21 +77,21 @@ STAR_CARRIER_MAX = 30   # legacy global count; kept only for the UI heatmap ★
 # count above breaks on the granular Nextclade tree, e.g. PQ.16.1.1). Carriers
 # under a different recombinant root (X..) mostly inherited the mutation and are
 # tolerated in larger numbers. Same rule as the co-occurrence check.
-STAR_OUTSIDE_MAX = 5
-STAR_OUT_REC_MAX = 60
+STAR_OUTSIDE_MAX = int(_cfg("markers.out_other_max", 5))
+STAR_OUT_REC_MAX = int(_cfg("markers.out_rec_max", 60))
 
 # ★ evidence (a finding's discriminating block) needs at least this many reads
 # of its own; below it a couple of reads matching by chance (B.1.617.2 on 2
 # reads, BA.2.87.1) would confirm a finding.
-MIN_FINDING_READS = 100
+MIN_FINDING_READS = int(_cfg("scanner.min_star_reads", 100))
 
 # The fingerprint / finding read threshold scales with how much data the city
 # has: min(min_read_count, share x all unexplained reads), never below the
 # floor. A small city-window (Chur, 3.4k unexplained reads) can't reach a flat
 # 500, so a clearly present variant went unnoticed. The ★-evidence minimum
 # above still protects against findings resting on a handful of reads.
-READ_THRESHOLD_SHARE = 0.005
-READ_THRESHOLD_FLOOR = 20
+READ_THRESHOLD_SHARE = float(_cfg("scanner.read_threshold_share", 0.005))
+READ_THRESHOLD_FLOOR = int(_cfg("scanner.read_threshold_floor", 20))
 
 _REC_ROOT_PREFIX = "X"
 
@@ -268,7 +285,7 @@ def _assign(
     # good proxy for specificity: some real lineages like BA.3.2.2 sit on a
     # shallow reconstruction branch but are matched by only 1-2 candidates —
     # they must not be dumped into "unresolved".)
-    if len(candidates) <= 15:
+    if len(candidates) <= SMALL_SET:
         if len(candidates) == 1:
             return candidates[0], "clade", candidates
         clade = tree.dominant_clade(candidates)
@@ -430,6 +447,7 @@ def scan_unexplained_patterns(
         if count >= _NOISE_FLOOR:
             fp_total[fp] = fp_total.get(fp, 0) + count
 
+    min_read_count = int(_cfg("scanner.read_threshold_max", min_read_count))
     _all_reads = sum(c for _r, _p, c, _f in _rows if c >= _NOISE_FLOOR)
     eff_min_reads = min(min_read_count,
                         max(READ_THRESHOLD_FLOOR,
@@ -841,7 +859,7 @@ def _finalize_clade(s: dict, tree: "_Tree", all_sigs: Dict[str, Set[str]],
                                 if l not in family
                                 and not (tree.rec_root(l) and tree.rec_root(l) != _node_root))
                 _nout[g] = n_outside
-            if n_outside > 15:
+            if n_outside > SMALL_SET:
                 continue          # not specific (many non-family carriers)
             if not _is_observed(g):
                 continue          # not seen co-occurring
@@ -902,7 +920,7 @@ def _finalize_clade(s: dict, tree: "_Tree", all_sigs: Dict[str, Set[str]],
             root = node
         if ntot == 1:
             label = f"{root} @ {b['region_start']}"
-        elif ntot <= 15:
+        elif ntot <= SMALL_SET:
             label = f"{root} family @ {b['region_start']} [{ntot} lineages]"
         else:
             label = f"{root} clade @ {b['region_start']} [{ntot} lineages]"

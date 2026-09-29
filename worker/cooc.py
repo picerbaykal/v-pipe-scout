@@ -32,7 +32,7 @@ result): specific markers chosen with own-family-excluded carrier counts
 (process.cooc.specific_markers) and raw per-date marker counts
 (process.cooc.accumulate_check_stats). Verdicts are derived in the UI via
 process.cooc.check_verdicts so thresholds can be retuned without a re-scan.
-The legacy "panel_presence" block is still returned unchanged.
+(The legacy "panel_presence" block was removed on 2026-09-29.)
 """
 
 import asyncio
@@ -55,8 +55,6 @@ from process.amplicons import (
     load_amplicons,
 )
 from process.cooc import (annotate_cooc_dataframe, panel_completeness_by_date,
-                          distinctive_within_panel, accumulate_panel_presence,
-                          constellation_counts,
                           specific_markers, accumulate_check_stats)
 from utils.config import get_wiseloculus_url
 
@@ -186,7 +184,7 @@ def run_cooc_panel_completeness(
 
     Returns:
         Dict with keys: location, dates, matched_counts, unexplained_counts, completeness,
-        unexplained_patterns, panel_presence (legacy) and panel_check (new check:
+        unexplained_patterns and panel_check (co-occurrence check:
         per variant {"markers": [...], "per_date": {date: {marker: [cov, hit,
         link_n, link_ok]}}}). List values are aligned by index (one per date).
     """
@@ -234,10 +232,6 @@ def run_cooc_panel_completeness(
     variant_signatures = _build_variant_signatures(
         variants, pango_loader, cowwid_variants
     )
-    from process.cooc import _global_carrier_counts as _gcc
-    distinctive = distinctive_within_panel(
-        variant_signatures, _gcc(pango_loader))
-    presence_acc = {}
 
     # New check (Part A): specific markers per panel variant, carriers counted
     # outside the variant's own family. Degrades to "no markers" on error so
@@ -376,7 +370,6 @@ def run_cooc_panel_completeness(
                 ].copy()
                 if not unexp.empty:
                     per_date_unexplained.append(unexp)
-            accumulate_panel_presence(annotated, distinctive, presence_acc)
             del df, rows, annotated
 
         async with aiohttp.ClientSession(
@@ -426,12 +419,6 @@ def run_cooc_panel_completeness(
             "unexplained_counts": [],
             "completeness": [],
             "unexplained_patterns": [],
-            "panel_presence": {
-                v: {"present": 0, "co_covered": 0,
-                    "distinctive": int(len(distinctive.get(v, ()))),
-                    "con_present": 0, "con_testable": 0}
-                for v in variants
-            },
             "panel_check": panel_check,
         }
 
@@ -485,17 +472,5 @@ def run_cooc_panel_completeness(
         "unexplained_counts": per_date["unexplained_count"].astype(int).tolist(),
         "completeness": per_date["completeness"].astype(float).tolist(),
         "unexplained_patterns": unexplained_agg.to_dict("records"),
-        "panel_presence": {
-            v: {"present": int((presence_acc.get(v) or {}).get("present", 0)),
-                "co_covered": int((presence_acc.get(v) or {}).get("co_covered", 0)),
-                "distinctive": int(len(distinctive.get(v, ()))),
-                "con_present": int(constellation_counts(
-                    (presence_acc.get(v) or {}).get("mut_cov"),
-                    (presence_acc.get(v) or {}).get("mut_pres"))[0]),
-                "con_testable": int(constellation_counts(
-                    (presence_acc.get(v) or {}).get("mut_cov"),
-                    (presence_acc.get(v) or {}).get("mut_pres"))[1])}
-            for v in variants
-        },
         "panel_check": panel_check,
     }
