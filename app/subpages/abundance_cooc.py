@@ -658,6 +658,13 @@ def app():
                             "end_date": end_date.isoformat(),
                             "variants": all_selected_variants,
                             "unexplained_patterns": _cooc_res[_loc]["unexplained_patterns"],
+                            # informative reads per day: denominator of the
+                            # scanner's per-day evidence share
+                            "day_totals": {
+                                str(_d)[:10]: int(_m) + int(_u) for _d, _m, _u in zip(
+                                    _cooc_res[_loc].get("dates", []),
+                                    _cooc_res[_loc].get("matched_counts", []),
+                                    _cooc_res[_loc].get("unexplained_counts", []))},
                         }
                     )
                     _scanner_tasks[_loc] = _stask.id
@@ -1108,13 +1115,15 @@ def app():
                   _agg_sub = {}
                   _agg_unres = {}    # frozenset(fp) -> {reads, cand, anc}
                   _agg_mnh = {}      # node -> matched-but-no-haplotype
+                  _agg_one = {}      # node -> ★ evidence on 1 day only, in every city
                   _novel_total = 0
                   _novel_pats = 0
 
-                  def _ingest_clade(_c, _loc):
+                  def _ingest_clade(_c, _loc, _bucket=None):
                       # Route one finding (top-level OR a promoted sub-finding) into
                       # the new/sub bucket and aggregate its reads across cities.
-                      _bucket = _agg_new if _c.get("relationship") == "new_lineage" else _agg_sub
+                      if _bucket is None:
+                          _bucket = _agg_new if _c.get("relationship") == "new_lineage" else _agg_sub
                       _node = _c["node"]
                       _slot = _bucket.setdefault(_node, {
                           "node": _node, "reads": 0, "signal_reads": 0,
@@ -1177,6 +1186,8 @@ def app():
                       _slot["per_city"][_loc] = {
                           "star": _pc_star,
                           "car": {_m: _pc_out.get(_m, _pc_car.get(_m)) for _m in _pc_star},
+                          # days with ★ evidence in this city (shown on the chip)
+                          "days": len(_c.get("counted_days", []) or []),
                       }
 
                   for _loc, _res in _scan_res_all.items():
@@ -1210,6 +1221,14 @@ def app():
                       _nv = _res.get("novel", {})
                       _novel_total += int(_nv.get("total_reads", 0))
                       _novel_pats += int(_nv.get("pattern_count", 0))
+                  # ★ evidence on 1 day only: a node confirmed in another city
+                  # shows this city as a "1 day" chip on its card; otherwise it
+                  # goes to "Seen on 1 day only" (a possible jackpot — watch it)
+                  for _loc, _res in _scan_res_all.items():
+                      for _c in _res.get("one_day", []) or []:
+                          _b = (_agg_new if _c["node"] in _agg_new
+                                else _agg_sub if _c["node"] in _agg_sub else _agg_one)
+                          _ingest_clade(_c, _loc, _b)
 
                   def _clade_label(_slot):
                       return f"{_slot['node']} clade" if _slot["member_count"] > 1 else _slot["node"]
@@ -1253,11 +1272,16 @@ def app():
                           _groups.setdefault(_key, []).append(_cty)
                       for _star_key, _cts in sorted(_groups.items(),
                                                     key=lambda kv: -len(kv[0])):
+                          def _day_txt(_cty):
+                              _nd = _per_city.get(_cty, {}).get("days")
+                              if _nd is None:
+                                  return ""
+                              return f" · ✓ {_nd} days" if _nd >= 2 else f" · {_nd} day"
                           _tags = "".join(
                               f"<span style='display:inline-block;font-size:10px;"
                               f"padding:1px 7px;border-radius:10px;background:{_bg};"
                               f"border:0.5px solid {_border};color:{_accent};"
-                              f"margin:0 3px 2px 0;'>{_c2.split('(')[0].strip()}</span>"
+                              f"margin:0 3px 2px 0;'>{_c2.split('(')[0].strip()}{_day_txt(_c2)}</span>"
                               for _c2 in _cts)
                           if _star_key:
                               # Option 1: show only the COUNT of discriminating
@@ -1347,6 +1371,26 @@ def app():
                           for _slot in _sub_list:
                               _render_finding(_slot, "#dc2626", "#fef2f2", "#fecaca",
                                               _is_sub=True)
+
+                  # ---- Seen on 1 day only (watch) ----
+                  # ★ evidence on a single day in every city where it was seen:
+                  # PCR jackpots put one molecule's copies on one day, so this is
+                  # not confirmed — but it stays visible under its name.
+                  _one_list = sorted(_agg_one.values(), key=lambda x: -x["reads"])
+                  with st.expander(
+                      f":green[■] Seen on 1 day only — {len(_one_list)} finding(s)",
+                      expanded=False,
+                  ):
+                      if not _one_list:
+                          st.caption("None.")
+                      else:
+                          st.caption(
+                              "Specific (★) evidence on only one day in each city — could "
+                              "be a PCR jackpot or a variant just arriving. Not confirmed; "
+                              "watch whether it shows up on more days.")
+                          for _slot in _one_list:
+                              _render_finding(_slot, "#4d7c0f", "#f7fee7", "#d9f99d",
+                                              _is_sub=bool(_slot.get("panel_ancestor")))
 
                   # ---- Not found in wastewater (orange, panel-side) ----
                   # Panel variants whose specific markers were covered but absent

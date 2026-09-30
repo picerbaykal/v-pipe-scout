@@ -1,4 +1,3 @@
-
 from celery import Celery
 import os
 import json
@@ -9,9 +8,11 @@ import base64
 import pandas as pd
 from deconvolve import devconvolve
 import logging
+
 logger = logging.getLogger(__name__)
 
 from celery.signals import worker_process_init
+
 
 @worker_process_init.connect
 def preload_signatures(**kwargs):
@@ -20,6 +21,7 @@ def preload_signatures(**kwargs):
     get_all_lineage_signatures()
     get_panel_parent_map()
     logger.info("Worker process: signatures pre-warmed")
+
 
 # Initialize Celery
 app = Celery(
@@ -36,6 +38,7 @@ redis_client = redis.Redis(
     db=0
 )
 
+
 # EXAMPLE TASK: that progressively updates its status in Redis
 @app.task(bind=True)
 def long_running_task(self, n_iterations, sleep_time):
@@ -45,30 +48,30 @@ def long_running_task(self, n_iterations, sleep_time):
     """
     task_id = self.request.id
     progress_key = f"task_progress:{task_id}"
-    
+
     # Initialize result container
     result = {
         "iterations_completed": 0,
         "total_iterations": n_iterations,
         "results": []
     }
-    
+
     # Process each iteration
     for i in range(n_iterations):
         # Simulate work
         time.sleep(sleep_time)
-        
+
         # Calculate some dummy result
         iteration_result = {
             "iteration": i + 1,
             "timestamp": time.time(),
             "value": (i + 1) * sleep_time
         }
-        
+
         # Add to results
         result["results"].append(iteration_result)
         result["iterations_completed"] = i + 1
-        
+
         # Update progress in Redis
         progress_data = {
             "current": i + 1,
@@ -76,13 +79,13 @@ def long_running_task(self, n_iterations, sleep_time):
             "status": f"Processing iteration {i + 1}/{n_iterations}",
             "partial_results": result["results"]
         }
-        
+
         redis_client.set(
             progress_key,
             json.dumps(progress_data),
             ex=3600  # Expire after 1 hour
         )
-    
+
     # Task completed
     progress_data = {
         "current": n_iterations,
@@ -90,22 +93,23 @@ def long_running_task(self, n_iterations, sleep_time):
         "status": "Completed",
         "partial_results": result["results"]
     }
-    
+
     redis_client.set(
         progress_key,
         json.dumps(progress_data),
         ex=3600  # Expire after 1 hour
     )
-    
+
     return result
 
+
 @app.task(bind=True)
-def run_deconvolve(self, mutation_counts_df, mutation_variant_matrix_df, 
-                   bootstraps=None, bandwidth=None, regressor=None, 
+def run_deconvolve(self, mutation_counts_df, mutation_variant_matrix_df,
+                   bootstraps=None, bandwidth=None, regressor=None,
                    regressor_params=None, deconv_params=None, locationName=None):
     """
     A task that runs the deconvolve function with progress tracking.
-    
+
     Args:
         mutation_counts_df (pd.DataFrame): DataFrame containing mutation counts data (required)
         mutation_variant_matrix_df (pd.DataFrame): DataFrame containing mutation variant matrix data (required)
@@ -118,7 +122,7 @@ def run_deconvolve(self, mutation_counts_df, mutation_variant_matrix_df,
     """
     task_id = self.request.id
     progress_key = f"task_progress:{task_id}"
-    
+
     # Initialize progress tracking
     progress_data = {
         "current": 0,
@@ -126,30 +130,32 @@ def run_deconvolve(self, mutation_counts_df, mutation_variant_matrix_df,
         "status": "Preparing input data",
         "partial_results": None
     }
-    
+
     redis_client.set(
         progress_key,
         json.dumps(progress_data),
         ex=3600  # Expire after 1 hour
     )
-    
+
     try:
         # Update progress
         progress_data["current"] = 1
-        progress_data["status"] = f"Preparing deconvolution (bootstraps={bootstraps if bootstraps is not None else 'default'})"
+        progress_data[
+            "status"] = f"Preparing deconvolution (bootstraps={bootstraps if bootstraps is not None else 'default'})"
         redis_client.set(progress_key, json.dumps(progress_data), ex=3600)
-        
+
         # Function to update progress
         def update_progress(stage, message):
             progress_data["current"] = stage
             progress_data["status"] = message
             redis_client.set(progress_key, json.dumps(progress_data), ex=3600)
-        
+
         # Convert serialized DataFrames back to pandas DataFrames if needed
         try:
             # Add debug info about the input types
-            update_progress(1.5, f"Input types: mutation_counts_df: {type(mutation_counts_df)}, mutation_variant_matrix_df: {type(mutation_variant_matrix_df)}")
-            
+            update_progress(1.5,
+                            f"Input types: mutation_counts_df: {type(mutation_counts_df)}, mutation_variant_matrix_df: {type(mutation_variant_matrix_df)}")
+
             # Check if inputs are already DataFrames or need to be deserialized
             if isinstance(mutation_counts_df, pd.DataFrame) and isinstance(mutation_variant_matrix_df, pd.DataFrame):
                 update_progress(2, "Inputs are already DataFrames, no parsing needed")
@@ -160,30 +166,32 @@ def run_deconvolve(self, mutation_counts_df, mutation_variant_matrix_df,
                     if isinstance(mutation_counts_df, str):
                         try:
                             mutation_counts_df = pickle.loads(base64.b64decode(mutation_counts_df))
-                            update_progress(2, f"Successfully unpickled counts DataFrame, shape: {mutation_counts_df.shape}")
+                            update_progress(2,
+                                            f"Successfully unpickled counts DataFrame, shape: {mutation_counts_df.shape}")
                         except:
                             update_progress(2, "Failed to unpickle counts DataFrame as base64")
-                    
+
                     if isinstance(mutation_variant_matrix_df, str):
                         try:
                             mutation_variant_matrix_df = pickle.loads(base64.b64decode(mutation_variant_matrix_df))
-                            update_progress(2, f"Successfully unpickled matrix DataFrame, shape: {mutation_variant_matrix_df.shape}")
+                            update_progress(2,
+                                            f"Successfully unpickled matrix DataFrame, shape: {mutation_variant_matrix_df.shape}")
                         except:
                             update_progress(2, "Failed to unpickled matrix DataFrame as base64")
-                    
+
                 except Exception as e:
                     update_progress(2, f"Error parsing DataFrames: {str(e)}")
                     raise ValueError(f"Failed to deserialize DataFrames: {str(e)}")
         except Exception as e:
             update_progress(2, f"Error processing DataFrames: {str(e)}")
             raise ValueError(f"Failed to process DataFrames: {str(e)}")
-        
+
         # Create kwargs dict with required parameters and optional parameters if provided
         kwargs = {
             'mutation_counts_df': mutation_counts_df,
             'mutation_variant_matrix_df': mutation_variant_matrix_df
         }
-        
+
         # Add optional parameters only if they're not None (exclude locationName)
         if bootstraps is not None:
             kwargs['bootstraps'] = bootstraps
@@ -195,23 +203,23 @@ def run_deconvolve(self, mutation_counts_df, mutation_variant_matrix_df,
             kwargs['regressor_params'] = regressor_params
         if deconv_params is not None:
             kwargs['deconv_params'] = deconv_params
-            
+
         # Update progress before running deconvolution
         update_progress(3, "Running deconvolution algorithm")
-        
+
         # Run the deconvolution with only the provided parameters
         deconvolved_data = devconvolve(**kwargs)
-        
+
         # Update progress after deconvolution is complete
         update_progress(4, "Processing results")
-        
+
         # If locationName is provided, restructure the result to use the actual location name
         if locationName and isinstance(deconvolved_data, dict) and "location" in deconvolved_data:
             # Replace the generic "location" key with the actual location name
             location_data = deconvolved_data.pop("location")  # Remove and get the data
-            deconvolved_data[locationName] = location_data   # Add with proper name
+            deconvolved_data[locationName] = location_data  # Add with proper name
             update_progress(4.5, f"Restructured result for location: {locationName}")
-        
+
         # Stage 5: Finalize results
         progress_data["current"] = 5
         progress_data["total"] = 5
@@ -219,8 +227,6 @@ def run_deconvolve(self, mutation_counts_df, mutation_variant_matrix_df,
         progress_data["partial_results"] = {"summary": "Deconvolution completed successfully"}
         redis_client.set(progress_key, json.dumps(progress_data), ex=3600)
 
-
-        
         return deconvolved_data
     except Exception as e:
         # If there's an error, report it
@@ -228,6 +234,7 @@ def run_deconvolve(self, mutation_counts_df, mutation_variant_matrix_df,
         progress_data["status"] = f"Error: {error_message}"
         redis_client.set(progress_key, json.dumps(progress_data), ex=3600)
         raise
+
 
 @app.task(bind=True)
 def run_deconvolve_lapis(self, location: str, start_date: str, end_date: str,
@@ -274,7 +281,6 @@ def run_deconvolve_lapis(self, location: str, start_date: str, end_date: str,
             "current": 4, "total": 4,
             "status": "Deconvolution complete."
         }), ex=3600)
-
 
         return result
 
@@ -336,9 +342,11 @@ def run_cooc_completeness_lapis(self, location: str, start_date: str, end_date: 
         }), ex=3600)
         raise
 
+
 @app.task(bind=True)
 def run_cooc_scanner_lapis(self, location: str, start_date: str, end_date: str,
-                           variants: list, unexplained_patterns: list):
+                           variants: list, unexplained_patterns: list,
+                           day_totals: dict = None):
     """
     Celery task for the co-occurrence panel scanner.
 
@@ -354,6 +362,8 @@ def run_cooc_scanner_lapis(self, location: str, start_date: str, end_date: str,
         variants: Currently selected panel variants
         unexplained_patterns: List of {date, count, confirmed_present} dicts
             from run_cooc_completeness_lapis result["unexplained_patterns"]
+        day_totals: {date: matched + unexplained reads} from the same result —
+            the denominator of the scanner's per-day evidence share
     """
     import sys, re
     import pandas as pd
@@ -403,6 +413,7 @@ def run_cooc_scanner_lapis(self, location: str, start_date: str, end_date: str,
             all_lineage_signatures=all_sigs,
             panel_parent_map=panel_parent_map,
             min_read_count=500,
+            day_totals=day_totals,
         )
         # fill designation dates on clade findings for the UI
         try:

@@ -39,8 +39,19 @@ scanner:
   read_threshold_max: 500     # reads behind one fingerprint (summed over fragments),
   read_threshold_share: 0.005 #   scaled down for small cities: min(max, share x all
   read_threshold_floor: 20    #   unexplained reads), never below the floor
-  min_star_reads: 100         # a finding is confirmed only by ★ evidence on >= this
+
                               #   many reads of its own
   small_candidate_set: 15     # <= this many matching lineages = specific enough to name
   min_family_share: 0.9       # more candidates: named if >= 90% fall in one family
   min_clade_depth: 6          # ... or if their common clade is at least this deep
+
+
+# ── Evidence: when a finding is confirmed ─────────────────────────────────
+# A day counts when a finding's ★ evidence has >= min_reads reads that are
+# >= min_share of all informative reads that day (matched + unexplained).
+# Confirmed with >= min_days such days; fewer -> "Seen on 1 day only".
+# Worker setting: changing it needs a worker restart + re-scan.
+evidence:
+  min_reads: 20
+  min_share: 0.005
+  min_days: 2

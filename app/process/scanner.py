@@ -55,7 +55,7 @@ MIN_CLADE_DEPTH = int(_cfg("scanner.min_clade_depth", 6))
 # whatever its depth — recombinant families (XFG, depth 0) and their hundreds of
 # Nextclade sublineages would otherwise always be "unresolved". Backbone
 # fingerprints spread over unrelated clades (e.g. 62% under XBB.1) stay
-# unresolved. Specificity is enforced later by the ★ rule and MIN_FINDING_READS.
+# unresolved. Specificity is enforced later by the ★ rule and the evidence days.
 MIN_FAMILY_SHARE = float(_cfg("scanner.min_family_share", 0.9))
 
 # Minimum fingerprint size for co-occurrence (2 = haplotype, 1 = allele freq).
@@ -80,10 +80,17 @@ STAR_CARRIER_MAX = 30   # legacy global count; kept only for the UI heatmap ★
 STAR_OUTSIDE_MAX = int(_cfg("markers.out_other_max", 5))
 STAR_OUT_REC_MAX = int(_cfg("markers.out_rec_max", 60))
 
-# ★ evidence (a finding's discriminating block) needs at least this many reads
-# of its own; below it a couple of reads matching by chance (B.1.617.2 on 2
-# reads, BA.2.87.1) would confirm a finding.
-MIN_FINDING_READS = int(_cfg("scanner.min_star_reads", 100))
+# 2026-09: a finding is confirmed by ★ evidence on several DAYS, not by a read
+# total over the window. PCR jackpots put one molecule's copies on one day
+# (PJ.2.1: 83,719 reads on 08-12 only), and a window total made the result
+# depend on the window length (XFG in Lugano: found over 3 months, not over 1).
+# Evidence = reads on a ★ block or on a combination only the family carries.
+# A day counts when its evidence reads are >= EVIDENCE_MIN_READS and
+# >= EVIDENCE_MIN_SHARE of that day's informative reads (matched + unexplained);
+# confirmed with >= EVIDENCE_MIN_DAYS such days, "seen on 1 day" with fewer.
+EVIDENCE_MIN_READS = int(_cfg("evidence.min_reads", 20))
+EVIDENCE_MIN_SHARE = float(_cfg("evidence.min_share", 0.005))
+EVIDENCE_MIN_DAYS = int(_cfg("evidence.min_days", 2))
 
 # The fingerprint / finding read threshold scales with how much data the city
 # has: min(min_read_count, share x all unexplained reads), never below the
@@ -354,6 +361,7 @@ def scan_unexplained_patterns(
     # kept for backwards-compat with the task signature; unused in Option C.
     cowwid_signatures: Optional[Dict[str, Set[str]]] = None,
     truly_private_muts: Optional[Dict[str, Set[str]]] = None,
+    day_totals: Optional[Dict[str, int]] = None,
 ) -> dict:
     """Classify unexplained co-occurrence patterns (Option C).
 
@@ -364,6 +372,9 @@ def scan_unexplained_patterns(
         all_lineage_signatures: {lineage: set of "{pos}{alt}"} for all pango.
         panel_parent_map: {lineage: parent} for the full pango tree.
         min_read_count: minimum reads for a pattern to count.
+        day_totals: {date: informative reads that day (matched + unexplained)}
+            from the completeness result; without it the day's unexplained
+            reads are used (stricter share test, never looser).
 
     Returns dict with keys:
         resolved_lineage:  [{node, relationship, panel_ancestor, total_reads,
@@ -371,6 +382,10 @@ def scan_unexplained_patterns(
         resolved_clade:    [{node, relationship, panel_ancestor, member_count,
                              members, total_reads, pattern_count,
                              observed_mutations, designation}]
+        (every clade finding also carries evidence_days {date: ★ reads} and
+         counted_days [dates passing the day test])
+        one_day:           clade findings with ★ evidence on fewer than
+                           EVIDENCE_MIN_DAYS days (possible jackpot, watch)
         unresolved:        [{fingerprint, candidate_count, common_ancestor,
                              total_reads, pattern_count}]
         novel:             {total_reads, pattern_count, top_patterns}
@@ -594,26 +609,69 @@ def scan_unexplained_patterns(
             b["mut_star"] = {m: (v[0] <= STAR_OUTSIDE_MAX and v[1] <= STAR_OUT_REC_MAX)
                              for m, v in out.items()}
             b["_outside_pairs"] = out
+            # the block's mutations TOGETHER: lineages outside the family that
+            # carry the whole combination, split the same way as for ★. A
+            # combination can be specific when none of its mutations is alone
+            # (22792T+22865T+22893G+23021G: only XFG-family lineages).
+            g = b.get("discriminating", [])
+            outside_g = set(_candidates_for(g)) - fam if len(g) >= 2 else set()
+            n_rec_g = sum(1 for l in outside_g if _rroot(l) and _rroot(l) not in roots)
+            b["combo_specific"] = bool(
+                len(g) >= 2 and len(outside_g) - n_rec_g <= STAR_OUTSIDE_MAX
+                and n_rec_g <= STAR_OUT_REC_MAX)
 
-    def _block_is_discriminating(b):
-        # the ★ evidence itself must rest on enough reads (XFG.1 was "confirmed"
-        # on a 6-read ★ block while the finding had 57k shared-mutation reads)
-        if int(b.get("reads", 0) or 0) < MIN_FINDING_READS:
-            return False
+    def _block_is_star(b):
         return any(o <= STAR_OUTSIDE_MAX and r <= STAR_OUT_REC_MAX
                    for o, r in (b.get("_outside_pairs") or {}).values())
 
-    def _has_disc_block(c):
-        return any(_block_is_discriminating(b)
-                   for b in (c.get("member_blocks", []) or []))
+    # informative reads per day: from the completeness result, else this
+    # city's unexplained reads (a smaller total -> a stricter share test)
+    _day_tot: Dict[str, int] = {}
+    if day_totals:
+        _day_tot = {str(d)[:10]: int(n) for d, n in day_totals.items()}
+    else:
+        for _r, _p, _c, _f in _rows:
+            if _c >= _NOISE_FLOOR:
+                _d = str(_r.get("date", ""))[:10]
+                _day_tot[_d] = _day_tot.get(_d, 0) + _c
+
+    def _block_is_specific(b):
+        """Specific evidence: a ★ mutation, or a combination only the family
+        carries (same outsider limits as ★)."""
+        return _block_is_star(b) or bool(b.get("combo_specific"))
+
+    def _evidence_days(c):
+        """{date: reads} matching any of the finding's specific blocks (a read
+        shows >= 2 and >= 80% of the block's mutations — same match as the
+        trend), and the dates that pass the day test. Blocks sit in different
+        genome regions, which are sequenced on different days, so pooling
+        them per day is what lets a variant reach its 2 days."""
+        groups = [set(b.get("discriminating", []))
+                  for b in (c.get("member_blocks", []) or []) if _block_is_specific(b)]
+        by_day: Dict[str, int] = {}
+        if groups:
+            for muts, cnt, date in observed_dated:
+                for g in groups:
+                    inter = len(g & muts)
+                    if inter >= 2 and inter / len(g) >= 0.8:
+                        _d = str(date)[:10]
+                        by_day[_d] = by_day.get(_d, 0) + cnt
+                        break
+        counted = sorted(d for d, n in by_day.items()
+                         if n >= EVIDENCE_MIN_READS
+                         and n >= EVIDENCE_MIN_SHARE * _day_tot.get(d, n))
+        return dict(sorted(by_day.items())), counted
 
     for c in _all_clades:
         _annotate_outside(c)
-    _dedupe_member_blocks(_all_clades, tree, _block_is_discriminating)
+    _dedupe_member_blocks(_all_clades, tree, _block_is_star)
     # too few reads to name anything: dropped (their reads stay in the grey gap)
     _all_clades = [c for c in _all_clades if c["total_reads"] >= eff_min_reads]
-    confirmed = [c for c in _all_clades if _has_disc_block(c)]
-    _backbone = [c for c in _all_clades if not _has_disc_block(c)]
+    for c in _all_clades:
+        c["evidence_days"], c["counted_days"] = _evidence_days(c)
+    confirmed = [c for c in _all_clades if len(c["counted_days"]) >= EVIDENCE_MIN_DAYS]
+    one_day = [c for c in _all_clades if 0 < len(c["counted_days"]) < EVIDENCE_MIN_DAYS]
+    _backbone = [c for c in _all_clades if not c["counted_days"]]
     for c in _all_clades:
         for b in c.get("member_blocks", []) or []:
             b.pop("_outside_pairs", None)
@@ -641,6 +699,7 @@ def scan_unexplained_patterns(
     } for c in _kept_backbone]
 
     resolved_clade = sorted(confirmed, key=lambda x: -x["total_reads"])
+    one_day = sorted(one_day, key=lambda x: -x["total_reads"])
     matched_no_haplotype.sort(key=lambda x: -x["total_reads"])
     unresolved = sorted(
         unresolved_hits.values(), key=lambda x: -x["total_reads"]
@@ -660,12 +719,14 @@ def scan_unexplained_patterns(
         f"[scanner] reads={total_unexplained:,} fingerprints>=2={sum(1 for f in fp_total if len(f) >= 2)} "
         f"threshold={eff_min_reads} "
         f"passing={sum(1 for f, n in fp_total.items() if len(f) >= 2 and n >= eff_min_reads)} | "
-        f"confirmed={[c['node'] for c in resolved_clade]} "
+        f"confirmed={[(c['node'], len(c['counted_days'])) for c in resolved_clade]} "
+        f"one_day={[c['node'] for c in one_day]} "
         f"named_not_specific={[c['node'] for c in matched_no_haplotype]} "
         f"unresolved={len(unresolved)} novel={novel['pattern_count']}")
 
     result = {
         "resolved_clade": resolved_clade,
+        "one_day": one_day,
         "matched_no_haplotype": matched_no_haplotype,
         "unresolved": unresolved,
         "novel": novel,
@@ -1151,7 +1212,7 @@ def _summary(clade, unresolved, novel) -> str:
 
 def _empty_result() -> dict:
     return {
-        "resolved_clade": [], "matched_no_haplotype": [], "unresolved": [],
+        "resolved_clade": [], "one_day": [], "matched_no_haplotype": [], "unresolved": [],
         "novel": {"total_reads": 0, "pattern_count": 0, "top_patterns": []},
         "total_unexplained_reads": 0,
         "summary": "No unexplained patterns.",
