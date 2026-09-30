@@ -84,8 +84,9 @@ STAR_OUT_REC_MAX = int(_cfg("markers.out_rec_max", 60))
 # total over the window. PCR jackpots put one molecule's copies on one day
 # (PJ.2.1: 83,719 reads on 08-12 only), and a window total made the result
 # depend on the window length (XFG in Lugano: found over 3 months, not over 1).
-# Evidence = reads on a ★ block or on a combination only the family carries.
-# A day counts when its evidence reads are >= EVIDENCE_MIN_READS and
+# Evidence = reads that only lineages of the finding's family fit (present AND
+# reference side; see _evidence_days). A day counts when its evidence reads are
+# >= EVIDENCE_MIN_READS and
 # >= EVIDENCE_MIN_SHARE of that day's informative reads (matched + unexplained);
 # confirmed with >= EVIDENCE_MIN_DAYS such days, "seen on 1 day" with fewer.
 EVIDENCE_MIN_READS = int(_cfg("evidence.min_reads", 20))
@@ -101,6 +102,31 @@ READ_THRESHOLD_SHARE = float(_cfg("scanner.read_threshold_share", 0.005))
 READ_THRESHOLD_FLOOR = int(_cfg("scanner.read_threshold_floor", 20))
 
 _REC_ROOT_PREFIX = "X"
+
+
+def _popcount(x: int) -> int:
+    return x.bit_count() if hasattr(x, "bit_count") else bin(x).count("1")
+
+
+_MASK_CACHE: List = []      # [(signatures object, bit per lineage, mask per mutation)]
+
+
+def _lineage_masks(all_sigs: Dict[str, Set[str]]) -> tuple:
+    """(bit per lineage, mask per mutation) — "which lineages carry all of
+    these mutations" becomes a few integer ANDs. Built once per signature
+    object (the worker keeps one for its lifetime). The object itself is kept
+    and compared with `is`: an id() key can be reused after garbage collection."""
+    if _MASK_CACHE and _MASK_CACHE[0][0] is all_sigs:
+        return _MASK_CACHE[0][1], _MASK_CACHE[0][2]
+    bit = {l: 1 << i for i, l in enumerate(sorted(all_sigs))}
+    idx: Dict[str, List[int]] = {}
+    for l, s in all_sigs.items():
+        b = bit[l]
+        for m in s:
+            idx.setdefault(m, []).append(b)
+    mut = {m: sum(bs) for m, bs in idx.items()}   # distinct bits: sum == OR
+    _MASK_CACHE[:] = [(all_sigs, bit, mut)]
+    return bit, mut
 
 
 def beyond_panel(present, panel_sigs) -> set:
@@ -444,6 +470,9 @@ def scan_unexplained_patterns(
     # can report per-region co-occurrence strength for the UI threshold slider.
     observed_patterns: List = []   # list of (frozenset(muts), count)
     observed_dated: List = []      # list of (frozenset(muts), count, date)
+    # with the reference side: (present, absent, count, date) — absent =
+    # positions where the read shows the reference base (worker, 2026-09-30)
+    observed_full: List = []
 
     # min_read_count applies to the TOTAL reads carrying a fingerprint, not to
     # each raw pattern: the same signal is split into many small patterns by
@@ -486,6 +515,10 @@ def scan_unexplained_patterns(
         if len(present) >= 2:
             observed_patterns.append((frozenset(present), count))
             observed_dated.append((frozenset(present), count, row.get("date", "")))
+            _ab = row.get("confirmed_absent", None)
+            observed_full.append((frozenset(present),
+                                  frozenset(_ab) if isinstance(_ab, (list, tuple, set)) else frozenset(),
+                                  count, row.get("date", "")))
 
         if len(fingerprint) < MIN_FINGERPRINT:
             continue  # not co-occurrence beyond panel
@@ -646,28 +679,65 @@ def scan_unexplained_patterns(
                 _d = str(_r.get("date", ""))[:10]
                 _day_tot[_d] = _day_tot.get(_d, 0) + _c
 
-    def _block_is_specific(b):
-        """Specific evidence: a ★ mutation, or a combination only the family
-        carries (same outsider limits as ★)."""
-        return _block_is_star(b) or bool(b.get("combo_specific"))
+    # ── evidence per read (2026-09-30) ────────────────────────────────────
+    # A read is evidence for a finding when the lineages that FIT it — carry
+    # every mutation it shows and none of those where it shows the reference
+    # — are inside the finding's family, with the ★ outsider limits
+    # (<= STAR_OUTSIDE_MAX ordinary, <= STAR_OUT_REC_MAX under other
+    # recombinant roots, which mostly inherited the mutations). Reads that
+    # also fit an unrelated circulating lineage are not evidence: an XFG read
+    # that looks like PY.1.1.1 on its present mutations shows the reference
+    # where PY.1.1.1 has a mutation; the July "BA.3.2.2" reads show the
+    # reference at BA.3.2's own positions.
+    _bit, _mmask = _lineage_masks(all_lineage_signatures)
+    _all_mask = (1 << len(_bit)) - 1
+    _rec_mask: Dict[str, int] = {}
+    for _l, _b in _bit.items():
+        _r = _rroot(_l)
+        if _r:
+            _rec_mask[_r] = _rec_mask.get(_r, 0) | _b
+    _any_rec = 0
+    for _m in _rec_mask.values():
+        _any_rec |= _m
+    _fit_cache: Dict[tuple, int] = {}
+
+    def _fit_mask(present: frozenset, absent: frozenset) -> int:
+        key = (present, absent)
+        m = _fit_cache.get(key)
+        if m is None:
+            m = _all_mask
+            for x in present:
+                m &= _mmask.get(x, 0)
+                if not m:
+                    break
+            if m:
+                for x in absent:
+                    m &= ~_mmask.get(x, 0)
+            _fit_cache[key] = m
+        return m
 
     def _evidence_days(c):
-        """{date: reads} matching any of the finding's specific blocks (a read
-        shows >= 2 and >= 80% of the block's mutations — same match as the
-        trend), and the dates that pass the day test. Blocks sit in different
-        genome regions, which are sequenced on different days, so pooling
-        them per day is what lets a variant reach its 2 days."""
-        groups = [set(b.get("discriminating", []))
-                  for b in (c.get("member_blocks", []) or []) if _block_is_specific(b)]
+        """{date: evidence reads} for a finding (see above), and the dates
+        that pass the day test."""
+        node = c["node"]
+        fam_mask = 0
+        for l in _family(node):
+            fam_mask |= _bit.get(l, 0)
+        own = _rroot(node)
+        other_rec = _any_rec & ~_rec_mask.get(own, 0) if own else _any_rec
         by_day: Dict[str, int] = {}
-        if groups:
-            for muts, cnt, date in observed_dated:
-                for g in groups:
-                    inter = len(g & muts)
-                    if inter >= 2 and inter / len(g) >= 0.8:
-                        _d = str(date)[:10]
-                        by_day[_d] = by_day.get(_d, 0) + cnt
-                        break
+        if fam_mask:
+            for present, absent, cnt, date in observed_full:
+                fit = _fit_mask(present, absent)
+                if not fit & fam_mask:
+                    continue                  # no family lineage fits the read
+                out = fit & ~fam_mask
+                if out:
+                    n_rec = _popcount(out & other_rec)
+                    if n_rec > STAR_OUT_REC_MAX or _popcount(out) - n_rec > STAR_OUTSIDE_MAX:
+                        continue              # fits outsiders too: not specific
+                _d = str(date)[:10]
+                by_day[_d] = by_day.get(_d, 0) + cnt
         counted = sorted(d for d, n in by_day.items()
                          if n >= EVIDENCE_MIN_READS
                          and n >= EVIDENCE_MIN_SHARE * _day_tot.get(d, n))
