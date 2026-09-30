@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 from api.wiseloculus import WiseLoculusLapis
 from utils.config import get_wiseloculus_url
 
-from components.abundance_cooc_tree import render_panel_tree
+from components.abundance_cooc_tree import render_panel_tree, recombinant_parents, tree_rows
 from components.jaccard_heatmap import render_jaccard_heatmap
 from components.variant_explorer_ui import render_variant_explorer
 
@@ -175,7 +175,8 @@ def _panel_verdicts(cooc_res: dict, variants: list) -> dict:
     for v in variants:
         ci = pc.get(v)
         if ci is None:
-            out[v] = {"state": "no_data", "reason": "no check data — re-run the scan"}
+            out[v] = {"state": "no_data", "reason": "no check data — re-run the scan",
+                      "n_present": 0, "n_measured": 0, "n_markers": 0}
             continue
         res = check_verdicts(ci.get("markers") or [], ci.get("per_date") or {})
         nd, np_, nm = res["n_markers"], res["n_present"], res["n_measured"]
@@ -191,7 +192,8 @@ def _panel_verdicts(cooc_res: dict, variants: list) -> dict:
             state = {"confirmed": "confirmed", "not_found": "not_found",
                      "inconsistent": "inconsistent"}.get(res["verdict"], "no_data")
             reason = f"{np_} of {nm} measurable markers present — {mtxt}"
-        out[v] = {"state": state, "reason": reason}
+        out[v] = {"state": state, "reason": reason,
+                  "n_present": np_, "n_measured": nm, "n_markers": nd}
     return out
 
 
@@ -694,8 +696,34 @@ def app():
                     _outstanding = True
                     break
             if _outstanding:
-                from streamlit_autorefresh import st_autorefresh
-                st_autorefresh(interval=3000, key="acooc_autorefresh")
+                # Poll in a fragment (2026-09-30): only this line reruns every
+                # 3 s; the whole page reruns only when a task has finished, so
+                # the charts are redrawn once per result instead of fading
+                # grey on every tick.
+                @st.fragment(run_every=3)
+                def _poll_tasks():
+                    _ss = st.session_state
+                    _groups = [
+                        ("deconvolution", _ss.get("acooc_location_tasks", {}),
+                         _ss.get("location_results", {})),
+                        ("completeness", _ss.get("acooc_cooc_tasks", {}),
+                         _ss.get("acooc_cooc_results", {})),
+                        ("scanner", _ss.get("acooc_scanner_tasks", {}),
+                         _ss.get("acooc_scanner_results", {})),
+                    ]
+                    _parts, _ready = [], False
+                    for _name, _tasks, _done in _groups:
+                        if not _tasks:
+                            continue
+                        _parts.append(f"{_name} {sum(1 for l in _tasks if l in _done)}/{len(_tasks)}")
+                        for _l, _tid in _tasks.items():
+                            if _l not in _done and celery_app.AsyncResult(_tid).ready():
+                                _ready = True
+                    if _ready:
+                        st.rerun(scope="app")
+                    st.caption("⏳ Running — " + " · ".join(_parts)
+                               + " · the page updates when a result arrives")
+                _poll_tasks()
             elif _new_collected:
                 # final result(s) just arrived and nothing is left running —
                 # force one full-page rerun so the left column (Run button) and
@@ -1008,87 +1036,31 @@ def app():
                                   _one_city(_lc)
                   st.markdown("---")
 
-              # ── Your panel per city: the tree coloured by this city's reads,
-              #    scanner findings added as red nodes. Uses the panel that was
-              #    RUN, so the colours always match the results. ─────────────
+              # ── Variants: one city selector; the tree (left) and one table for
+              #    everything co-occurrence says (right); then the chosen city's
+              #    signal over time. Uses the panel that was RUN, so the colours
+              #    always match the results. (2026-09-30) ─────────────────────
               _run_panel = st.session_state.get("acooc_ran_panel") or all_selected_variants
               _verdicts_by_city = {
                   _l: _panel_verdicts(_cr_all[_l], _run_panel)
                   for _l in location_names if _cr_all.get(_l) is not None}
-              if _ready_locs:
-                  st.markdown("#### Your panel per city")
-                  st.caption("Each panel variant coloured by the evidence from reads in the "
-                             "chosen city; variants the scanner found that are not in your "
-                             "panel are added in red. Hover a node for its state and markers.")
-                  _tcity = st.radio(
-                      "City", _ready_locs, horizontal=True, key="acooc_tree_city",
-                      format_func=lambda _l: _l.split("(")[0].strip(),
-                      label_visibility="collapsed")
-                  _tfind = [_c["node"] for _c in
-                            (_sr_all.get(_tcity) or {}).get("resolved_clade", []) or []]
-                  render_panel_tree(
-                      selected_variants=_run_panel,
-                      yaml_variants=curated_variants,
-                      pango_loader=cached_get_pango_loader(),
-                      variant_status={_v: _d["state"] for _v, _d in
-                                      _verdicts_by_city.get(_tcity, {}).items()},
-                      findings=_tfind,
-                      per_city=True,
-                      status_detail={_v: _d["reason"] for _v, _d in
-                                     _verdicts_by_city.get(_tcity, {}).items()})
-                  st.markdown("---")
-
-              # ── Scanner (one section, aggregated across all cities) ────────────
-              _scan_res_all = st.session_state.get("acooc_scanner_results", {})
-              # Show progress only while a scanner task is actively running. Once
-              # no task is running, show whatever results were collected (avoids
-              # hiding findings forever on a location-matching mismatch).
-              # scanner is "running" if any location with a completeness result
-              # doesn't yet have a collected scanner result (same reliable signal
-              # the autorefresh uses — the task-map .ready() check was unreliable).
-              # Show scanner findings only when NOTHING is still running (_outstanding
-              # is the same signal that drives the autorefresh — it's True while any
-              # deconv/completeness/scanner task is uncollected). The previous
-              # _scan_running check relied on cooc results being present, but they
-              # aren't collected yet at this point (cr_keys empty), so it never
-              # triggered and partial findings leaked through.
+              # scanner findings only when NOTHING is still running
+              # (_outstanding drives the autorefresh), so partial results
+              # never leak into the table
               _scan_running = _outstanding
-              st.markdown("---")
-              st.markdown("### Scanner")
-              st.caption(
-                  "Variants circulating that your panel doesn't cover — across all "
-                  "cities. Adding applies to the whole panel; re-run to apply.")
-              if _scan_running:
-                  st.info("🔍 Scanning for variants not in your panel… "
-                          "findings and Add buttons appear when the scan completes.")
-                  _scan_res_all = {}  # suppress partial rendering below
+              _scan_res_all = ({} if _scan_running
+                               else st.session_state.get("acooc_scanner_results", {}) or {})
+              _agg_new, _agg_sub, _agg_unres, _agg_mnh, _agg_one = {}, {}, {}, {}, {}
+              _novel_total, _novel_pats = 0, 0
+
+              def _human_reads(_n):
+                  if _n >= 1_000_000:
+                      return f"{_n/1_000_000:.1f}M".replace(".0M", "M")
+                  if _n >= 1_000:
+                      return f"{_n/1_000:.0f}K"
+                  return str(_n)
 
               if _scan_res_all:
-                  from collections import defaultdict as _ddict
-                  # (reads-threshold slider removed — the heatmap now defaults to
-                  # regions with a discriminating mutation and offers a per-finding
-                  # "show all regions" toggle instead.)
-
-                  # coverage caption (instant, no scan needed): panel ∩ OT vs all OT
-                  _ot_set = set(cached_get_variant_names())
-                  _n_panel_ot = sum(1 for _v in all_selected_variants if _v in _ot_set)
-                  st.markdown(
-                      f"<div style='border:0.5px solid #BFD9F2;background:#EFF6FF;border-radius:8px;"
-                      f"padding:8px 12px;margin:2px 0 10px;font-size:12px;color:#1E3A5F;'>"
-                      f"<b>Panel coverage:</b> {_n_panel_ot} of {len(_ot_set)} officially tracked "
-                      f"variants selected. The scanner ranks the missing ones by how much "
-                      f"co-occurrence signal they actually have in your samples.</div>",
-                      unsafe_allow_html=True,
-                  )
-
-                  def _chip_html(cities):
-                      return "".join(
-                          f"<span style='display:inline-block;font-size:10px;padding:1px 6px;"
-                          f"border-radius:4px;background:#F1EFE8;color:#5F5E5A;margin:1px 2px 1px 0;'>"
-                          f"{c.split('(')[0].strip()}</span>"
-                          for c in cities
-                      )
-
                   # ══ Option C scanner rendering ══════════════════════════════
                   # signatures for heatmap classification (lazy, cached in session)
                   _all_sigs = st.session_state.get("acooc_all_sigs_cache")
@@ -1103,13 +1075,6 @@ def app():
                   # Aggregate the new clade-based scanner output across cities.
                   # Categories: not-in-panel clades, sublineage clades,
                   # unresolved, novel. Honest clade labels, member counts.
-                  def _human_reads(_n):
-                      if _n >= 1_000_000:
-                          return f"{_n/1_000_000:.1f}M".replace(".0M", "M")
-                      if _n >= 1_000:
-                          return f"{_n/1_000:.0f}K"
-                      return str(_n)
-
                   # collect clade findings across cities, keyed by node
                   _agg_new = {}      # node -> {reads, cities, member_count, members, designation, muts}
                   _agg_sub = {}
@@ -1188,7 +1153,14 @@ def app():
                           "car": {_m: _pc_out.get(_m, _pc_car.get(_m)) for _m in _pc_star},
                           # days with ★ evidence in this city (shown on the chip)
                           "days": len(_c.get("counted_days", []) or []),
+                          # facts for the table (scanner _add_notes)
+                          "evidence_days": dict(_c.get("evidence_days", {}) or {}),
+                          "regions": list(_c.get("evidence_regions", []) or []),
+                          # this city's own blocks, for this city's heatmap
+                          "blocks": _c.get("member_blocks", []) or [],
                       }
+                      _slot.setdefault("descendants", set()).update(
+                          _c.get("confirmed_descendants", []) or [])
 
                   for _loc, _res in _scan_res_all.items():
                       for _c in _res.get("resolved_clade", []):
@@ -1210,14 +1182,19 @@ def app():
                               "anc": _u.get("common_ancestor", ""),
                           })
                           _s["reads"] += int(_u.get("total_reads", 0))
+                          _s.setdefault("days", {})[_loc] = len(_u.get("days", []) or [])
                       for _mnh in _res.get("matched_no_haplotype", []):
                           _k = _mnh["node"]
                           _s = _agg_mnh.setdefault(_k, {
                               "node": _mnh["node"], "reads": 0,
                               "member_count": _mnh.get("member_count", 1),
                               "muts": _mnh.get("observed_mutations", []),
+                              "relationship": _mnh.get("relationship", ""),
+                              "cities": [],
                           })
                           _s["reads"] += int(_mnh.get("total_reads", 0))
+                          if _loc not in _s["cities"]:
+                              _s["cities"].append(_loc)
                       _nv = _res.get("novel", {})
                       _novel_total += int(_nv.get("total_reads", 0))
                       _novel_pats += int(_nv.get("pattern_count", 0))
@@ -1230,340 +1207,139 @@ def app():
                                 else _agg_sub if _c["node"] in _agg_sub else _agg_one)
                           _ingest_clade(_c, _loc, _b)
 
-                  def _clade_label(_slot):
-                      return f"{_slot['node']} clade" if _slot["member_count"] > 1 else _slot["node"]
+              if _ready_locs:
+                  from components import variants_table as _vt
+                  st.markdown("---")
+                  st.markdown("### Variants")
+                  st.caption("Evidence from reads only, one column per city. The tree is "
+                             "coloured by the city you click in the header (shaded). Hover "
+                             "anything for details; + Add puts a finding in your panel — "
+                             "re-run to apply.")
+                  # the chosen city (click a city code in the table header)
+                  if st.session_state.get("acooc_tree_city") not in _ready_locs:
+                      st.session_state["acooc_tree_city"] = _ready_locs[0]
+                  _tcity = st.session_state["acooc_tree_city"]
+                  _cities_all = [l for l in location_names
+                                 if l in _verdicts_by_city or l in _scan_res_all]
 
-                  def _render_finding(_slot, _accent, _bg, _border, _is_sub=False):
-                      _label = _clade_label(_slot)
-                      _sig_reads = _slot.get("signal_reads", 0)
-                      _tot_reads = _slot["reads"]
-                      # headline = discriminating co-occurrence reads (the real
-                      # signal); the broad fingerprint total is shown as context.
-                      _reads = _sig_reads if _sig_reads > 0 else _tot_reads
-                      _mc = _slot["member_count"]
-                      _desig = _slot["designation"]
-                      _members = _slot["members"]
-                      _member_txt = ""
-                      if _mc > 1:
-                          _samp = ", ".join(_members[:4])
-                          _more = f" +{_mc-4}" if _mc > 4 else ""
-                          _member_txt = f" · {_mc} members: {_samp}{_more}"
-                      _desig_txt = f" \u00b7 designated {_desig}" if _desig else ""
-                      # ── per-city discriminating-mutation rows (no verdict /
-                      # trend / sparkline / read-count headline). Show, per city,
-                      # the discriminating (star) mutations found there; cities
-                      # that share the same set are grouped on one row; a city
-                      # with none is flagged backbone-only.
-                      _per_city = _slot.get("per_city", {})
-                      st.markdown(
-                          f"<div style='background:{_bg};border:1px solid {_border};"
-                          f"border-radius:6px;padding:8px 12px;margin:4px 0;'>"
-                          f"<span style='font-weight:600;color:{_accent};'>{_label}</span>"
-                          f"<span style='color:#6b7280;font-size:0.8rem;margin-left:8px;'>"
-                          f"{_member_txt.lstrip(' \u00b7') if _member_txt else ''}"
-                          f"{_desig_txt}</span></div>",
-                          unsafe_allow_html=True,
-                      )
-                      _CAP_MUTS = 6
-                      _groups = {}
-                      for _cty in _slot.get("cities", []):
-                          _pc = _per_city.get(_cty, {})
-                          _key = tuple(_pc.get("star", []))
-                          _groups.setdefault(_key, []).append(_cty)
-                      for _star_key, _cts in sorted(_groups.items(),
-                                                    key=lambda kv: -len(kv[0])):
-                          def _day_txt(_cty):
-                              _nd = _per_city.get(_cty, {}).get("days")
-                              if _nd is None:
-                                  return ""
-                              return f" · ✓ {_nd} days" if _nd >= 2 else f" · {_nd} day"
-                          _tags = "".join(
-                              f"<span style='display:inline-block;font-size:10px;"
-                              f"padding:1px 7px;border-radius:10px;background:{_bg};"
-                              f"border:0.5px solid {_border};color:{_accent};"
-                              f"margin:0 3px 2px 0;'>{_c2.split('(')[0].strip()}{_day_txt(_c2)}</span>"
-                              for _c2 in _cts)
-                          if _star_key:
-                              # Option 1: show only the COUNT of discriminating
-                              # mutations — the names aren't actionable on the card;
-                              # the heatmap shows which ones over time.
-                              _n = len(_star_key)
-                              st.markdown(
-                                  f"<div style='margin:2px 0 2px 4px;font-size:12px;"
-                                  f"color:#374151;'>{_tags}"
-                                  f"<span style='margin-left:4px;'>{_n} ★ marker"
-                                  f"{'s' if _n != 1 else ''} seen on reads</span></div>",
-                                  unsafe_allow_html=True,
-                              )
-                          else:
-                              st.markdown(
-                                  f"<div style='margin:2px 0 2px 4px;font-size:12px;"
-                                  f"color:#9ca3af;'>{_tags}"
-                                  f"<span style='margin-left:4px;'>\u00b7 no \u2605 marker "
-                                  f"seen on reads here (only shared mutations)</span></div>",
-                                  unsafe_allow_html=True,
-                              )
-                      _assoc = _slot.get("associated", [])
-                      if _assoc:
-                          st.caption(
-                              "⚠ includes recombinants sharing these mutations: "
-                              + ", ".join(_assoc[:6])
-                              + " — check the heatmap to see which is driving the signal."
-                          )
-                      if _is_sub:
-                          _anc = _slot.get("panel_ancestor", "")
-                          st.caption(f"↳ sublineage of {_anc} — signal partly counted within its proportion; adding refines it.")
-                      _addkey = f"acooc_addc_{_slot['node']}"
-                      if _scan_running:
-                          st.caption(f"⏳ finishing scan… Add enables shortly")
+                  # ---- findings not in the panel ----
+                  _conf = sorted(list(_agg_new.values()) + list(_agg_sub.values()),
+                                 key=lambda x: -x["reads"])
+                  _broader = [x for x in _conf if x.get("descendants")]
+                  _conf = [x for x in _conf if not x.get("descendants")]
+                  _conf_ok = [x for x in _conf if any(
+                      (p.get("days") or 0) >= 2 for p in x["per_city"].values())]
+                  _one = ([x for x in _conf if x not in _conf_ok]
+                          + sorted(_agg_one.values(), key=lambda x: -x["reads"]))
+                  _shown = {x["node"] for x in _conf + _broader + _one}
+                  # a node confirmed in one city but only named in another is
+                  # one row (its city cells say which)
+                  _named = [x for x in sorted(_agg_mnh.values(), key=lambda x: -x["reads"])
+                            if x["node"] not in _shown][:25]
+
+                  # findings as the view wants them: node -> {status, per_city, addable}
+                  def _f(_slot, _status):
+                      if _status == "named":
+                          _pc = {c: {"days": 0} for c in _slot.get("cities", [])}
                       else:
-                          if st.button(f"+ Add {_slot['node']}", key=_addkey):
-                              st.session_state[f"acooc_add_variant_pending_{_slot['node']}"] = _slot["node"]
-                              st.rerun()  # process immediately (no autorefresh running once scan done)
-                      # drill-down heatmap — let the user pick which city when the
-                      # finding spans several (the finding's reads are summed across
-                      # cities, but a heatmap shows one city's signal at a time).
-                      if _slot["muts"] and wiseLoculus and _slot["cities"]:
-                          _cities = _slot["cities"]
-                          with st.expander(f"Signal over time — {_label}", expanded=False):
-                              if len(_cities) > 1:
-                                  _hloc = st.selectbox(
-                                      "City",
-                                      _cities,
-                                      key=f"acooc_hmcity_{_slot['node']}",
-                                      help="This finding was seen in several cities; "
-                                           "pick which city's signal to display.",
-                                  )
-                              else:
-                                  _hloc = _cities[0]
-                              st.caption(f"Showing {_hloc}")
-                              from components.scanner_heatmap import render_clade_heatmap
+                          _pc = {c: {"days": p.get("days", 0), "stars": p.get("star", []),
+                                     "regions": p.get("regions", [])}
+                                 for c, p in (_slot.get("per_city") or {}).items()}
+                      _ok = any((d.get("days") or 0) >= 2 for d in _pc.values())
+                      return {"status": _status if _status != "confirmed" or _ok else "1 day",
+                              "per_city": _pc, "addable": _status == "confirmed" and _ok}
+
+                  _findings = {}
+                  if not _scan_running:
+                      for x in _named:
+                          _findings[x["node"]] = _f(x, "named")
+                      for x in _one:
+                          _findings[x["node"]] = _f(x, "1 day")
+                      for x in _conf_ok + _broader:
+                          _findings[x["node"]] = _f(x, "confirmed")
+
+                  # ---- unnamed signal: novel patterns grouped by mutations ----
+                  _nov = {}   # mutations -> {city: days}
+                  for _loc, _res in _scan_res_all.items():
+                      for _g in (_res.get("novel", {}) or {}).get("groups", []) or []:
+                          _k = tuple(_g["mutations"])
+                          _nov.setdefault(_k, {})[_loc] = len(_g.get("days", []))
+                  _nov_list = sorted([(list(k), v) for k, v in _nov.items()],
+                                     key=lambda kv: (-max(kv[1].values(), default=0),
+                                                     -sum(kv[1].values()), kv[0]))
+                  _nov_listed = sum(
+                      _g.get("reads", 0) for _res in _scan_res_all.values()
+                      for _g in (_res.get("novel", {}) or {}).get("groups", []) or [])
+                  _nov_rest = max(0, _novel_total - _nov_listed)
+                  _broad = [(u["fp"], u.get("days", {}), u["cand"], u["anc"])
+                            for u in sorted(_agg_unres.values(), key=lambda x: -x["reads"])[:25]]
+
+                  if _scan_running:
+                      st.info("🔍 Scanning for variants not in your panel… findings "
+                              "appear in the tree when the scan completes.")
+                  if "acooc_recomb_parents" not in st.session_state:
+                      st.session_state["acooc_recomb_parents"] = recombinant_parents()
+                  _rows = tree_rows(_run_panel, curated_variants, cached_get_pango_loader(),
+                                    findings=list(_findings),
+                                    recomb_parents=st.session_state["acooc_recomb_parents"])
+                  _view = _vt.build(_cities_all, _tcity, _rows, _verdicts_by_city, _findings,
+                                    current_panel=set(all_selected_variants),
+                                    ot=curated_variants, novel=_nov_list, broad=_broad,
+                                    novel_rest=_human_reads(_nov_rest) if _nov_rest else None)
+                  _click = _vt.render(_view, key="acooc_variants_view")
+                  if _click and _click.get("t") != st.session_state.get("acooc_vv_last_click"):
+                      st.session_state["acooc_vv_last_click"] = _click.get("t")
+                      if _click.get("add"):
+                          st.session_state[f"acooc_add_variant_pending_{_click['add']}"] = _click["add"]
+                      elif _click.get("city") in _ready_locs:
+                          st.session_state["acooc_tree_city"] = _click["city"]
+                      st.rerun()
+
+                  # ---- signal over time in the chosen city ----
+                  _hm_slots = {x["node"]: x for x in _conf_ok + _one + _broader
+                               if _tcity in (x.get("per_city") or {})}
+                  _hm_nov = {"novel: " + " ".join(k[:4]): list(k) for k, v in _nov.items()
+                             if v.get(_tcity, 0) >= 2}
+                  _hm_opts = list(_hm_slots) + list(_hm_nov)
+                  if _hm_opts:
+                      _tname = _tcity.split("(")[0].strip()
+                      st.markdown(f"#### Signal over time in {_tname}")
+                      _hm_sel = st.multiselect(
+                          "Findings", _hm_opts, default=_hm_opts[:1],
+                          key=f"acooc_hm_{_tcity}", label_visibility="collapsed")
+                      from components.scanner_heatmap import render_clade_heatmap
+                      _nov_sigs = st.session_state.get("acooc_all_sigs_cache") or {}
+                      for _hn in _hm_sel:
+                          st.markdown(f"**{_hn} · {_tname}**")
+                          if _hn in _hm_slots:
+                              _hs = _hm_slots[_hn]
                               render_clade_heatmap(
-                                  clade_node=_slot["node"],
-                                  shared_mutations=_slot.get("shared_mutations", []),
-                                  member_blocks=_slot.get("member_blocks", []),
+                                  clade_node=_hn,
+                                  shared_mutations=_hs.get("shared_mutations", []),
+                                  member_blocks=(_hs["per_city"].get(_tcity, {}).get("blocks")
+                                                 or _hs.get("member_blocks", [])),
                                   client=wiseLoculus,
-                                  location=_hloc,
+                                  location=_tcity,
                                   date_range=(start_date, end_date),
                               )
-
-                  # ---- Not in panel (addable) — merges new-lineage clades AND
-                  #      sublineages of the panel. Both are "consider adding"; the
-                  #      relationship (unrelated vs sublineage) is shown per-row.
-                  _new_list = sorted(_agg_new.values(), key=lambda x: -x["reads"])
-                  _sub_list = sorted(_agg_sub.values(), key=lambda x: -x["reads"])
-                  _addable_n = len(_new_list) + len(_sub_list)
-                  with st.expander(
-                      f":red[■] Not in your panel — {_addable_n} finding(s)",
-                      expanded=st.session_state.get("acooc_exp_missing", False),
-                  ):
-                      if not _addable_n:
-                          st.caption("Nothing circulating that your panel doesn't cover.")
-                      else:
-                          st.caption(
-                              "Co-occurrence signal your panel doesn't explain, mapped "
-                              "to the tightest pango clade the mutations support. "
-                              "Consider adding these to the panel."
-                          )
-                          # unrelated new lineages first (bigger gaps), then sublineages
-                          for _slot in _new_list:
-                              _render_finding(_slot, "#dc2626", "#fef2f2", "#fecaca")
-                          for _slot in _sub_list:
-                              _render_finding(_slot, "#dc2626", "#fef2f2", "#fecaca",
-                                              _is_sub=True)
-
-                  # ---- Seen on 1 day only (watch) ----
-                  # ★ evidence on a single day in every city where it was seen:
-                  # PCR jackpots put one molecule's copies on one day, so this is
-                  # not confirmed — but it stays visible under its name.
-                  _one_list = sorted(_agg_one.values(), key=lambda x: -x["reads"])
-                  with st.expander(
-                      f":green[■] Seen on 1 day only — {len(_one_list)} finding(s)",
-                      expanded=False,
-                  ):
-                      if not _one_list:
-                          st.caption("None.")
-                      else:
-                          st.caption(
-                              "Specific (★) evidence on only one day in each city — could "
-                              "be a PCR jackpot or a variant just arriving. Not confirmed; "
-                              "watch whether it shows up on more days.")
-                          for _slot in _one_list:
-                              _render_finding(_slot, "#4d7c0f", "#f7fee7", "#d9f99d",
-                                              _is_sub=bool(_slot.get("panel_ancestor")))
-
-                  # ---- Not found in wastewater (orange, panel-side) ----
-                  # Panel variants whose specific markers were covered but absent
-                  # — evidence of absence, per city (from _panel_verdicts above).
-                  _lr_nf = st.session_state.get("location_results", {})
-                  _nf_by_var = {}
-                  for _l, _vd in _verdicts_by_city.items():
-                      for _v, _d in _vd.items():
-                          if _d["state"] == "not_found":
-                              _nf_by_var.setdefault(_v, []).append((_l, _d["reason"]))
-                  with st.expander(
-                      f":orange[▲] Not found in wastewater — {len(_nf_by_var)} variant(s)",
-                      expanded=False,
-                  ):
-                      if not _nf_by_var:
-                          st.caption("None — no panel variant had its specific markers "
-                                     "covered and absent.")
-                      else:
-                          st.caption(
-                              "You selected these, but in the cities shown their specific "
-                              "mutations were looked for and not seen — evidence of "
-                              "absence, not just missing coverage.")
-                          for _v, _hits in sorted(_nf_by_var.items()):
-                              _rows_nf = ""
-                              for _l, _reason in _hits:
-                                  _ab = _deconv_mean(_lr_nf.get(_l), _l, _v)
-                                  _abt = f"{_ab * 100:.0f}% deconv · " if _ab is not None else ""
-                                  _rows_nf += (
-                                      f"<div style='color:#6b7280;margin-left:8px;'>"
-                                      f"<b style='color:#374151;font-weight:500;'>"
-                                      f"{_l.split('(')[0].strip()}</b> · {_abt}{_reason}</div>")
-                              st.markdown(
-                                  f"<div style='background:#fff7ed;border:1px solid #fed7aa;"
-                                  f"border-radius:6px;padding:6px 10px;margin:3px 0;font-size:0.82rem;'>"
-                                  f"<span style='font-weight:600;color:#b45309;'>{_v}</span>"
-                                  f"{_rows_nf}</div>",
-                                  unsafe_allow_html=True,
+                          else:
+                              _pm = _hm_nov[_hn]
+                              render_clade_heatmap(
+                                  clade_node=f"novel_{_tcity}_{'_'.join(_pm[:3])}",
+                                  shared_mutations=[],
+                                  member_blocks=[{
+                                      "member": "novel pattern",
+                                      "discriminating": _pm,
+                                      "member_count": 1,
+                                      "reads": 0,
+                                      "mut_carriers": ({_m: sum(1 for _s in _nov_sigs.values()
+                                                                if _m in _s) for _m in _pm}
+                                                       if _nov_sigs else {}),
+                                  }],
+                                  client=wiseLoculus,
+                                  location=_tcity,
+                                  date_range=(start_date, end_date),
                               )
-
-                  # ---- Unresolved / noise (grey umbrella) ----
-                  # Mirror the completeness graph's grey band: the "matched but
-                  # not co-occurrence-confirmed" lineages (🟣) and the "too broad
-                  # to name" patterns (◦) are both part of the grey noise band, so
-                  # show them as subsections under one umbrella. Streamlit can't
-                  # nest expanders, so the subgroups are sections, not sub-expanders.
-                  _mnh_list = sorted(_agg_mnh.values(), key=lambda x: -x["reads"])
-                  _mnh_reads = sum(m["reads"] for m in _mnh_list)
-                  _unres_list = sorted(_agg_unres.values(), key=lambda x: -x["reads"])
-                  _ur_reads = sum(u["reads"] for u in _unres_list)
-                  _grey_n = len(_mnh_list) + len(_unres_list)
-                  _grey_reads = _mnh_reads + _ur_reads
-                  with st.expander(
-                      f":gray[■] Unresolved / noise — {_grey_n} finding(s) · {_grey_reads:,} reads",
-                      expanded=False,
-                  ):
-                      st.caption(
-                          "The grey band of the completeness graph, itemised: lineages "
-                          "we can name but not confirm with a ★ marker, plus patterns "
-                          "too broad to name."
-                      )
-                      # ── 🟣 matched but not co-occurrence-confirmed ──────────
-                      st.markdown(
-                          f"<div style='font-weight:600;color:#7c3aed;margin:8px 0 2px;'>"
-                          f"■ Named, not specific"
-                          f"<span style='color:#6b7280;font-weight:400;font-size:0.8rem;'> · "
-                          f"{len(_mnh_list)} lineage(s) · {_mnh_reads:,} reads</span></div>",
-                          unsafe_allow_html=True,
-                      )
-                      if not _mnh_list:
-                          st.caption("None — every named lineage had a ★ marker seen on reads "
-                                     "(or nothing was named).")
-                      else:
-                          st.caption(
-                              "Their mutations point to this lineage, but they are shared "
-                              "with a bigger family (e.g. its parent) and no ★ marker is "
-                              "seen on reads — so we can't tell which family member it is "
-                              "(it may still be present; deconvolution quantifies it)."
-                          )
-                          for _m in _mnh_list[:15]:
-                              _lbl = f"{_m['node']} clade" if _m["member_count"] > 1 else _m["node"]
-                              _muts = ", ".join(_m["muts"][:5])
-                              st.markdown(
-                                  f"<div style='background:#faf5ff;border:1px solid #e9d5ff;"
-                                  f"border-radius:6px;padding:6px 10px;margin:3px 0;font-size:0.82rem;'>"
-                                  f"<span style='font-weight:600;color:#7c3aed;'>{_lbl}</span>"
-                                  f"<span style='color:#6b7280;margin-left:8px;'>"
-                                  f"{_m['reads']:,} reads · matched: {_muts}</span></div>",
-                                  unsafe_allow_html=True,
-                              )
-                      # ── ◦ too broad to name (unresolved) ───────────────────
-                      st.markdown(
-                          f"<div style='font-weight:600;color:#6b7280;margin:12px 0 2px;'>"
-                          f"■ Too broad to name"
-                          f"<span style='font-weight:400;font-size:0.8rem;'> · "
-                          f"{len(_unres_list)} pattern(s) · {_ur_reads:,} reads</span></div>",
-                          unsafe_allow_html=True,
-                      )
-                      if not _unres_list:
-                          st.caption("None — no co-occurrence patterns were too broad to name.")
-                      else:
-                          st.caption(
-                              "Co-occurring mutations match many lineages across "
-                              "unrelated clades — too broad to name."
-                          )
-                          for _u in _unres_list[:15]:
-                              _fp = ", ".join(_u["fp"][:5])
-                              _anc = f" · nearest ancestor {_u['anc']}" if _u["anc"] else ""
-                              st.markdown(
-                                  f"<div style='background:#f8f9fa;border:1px solid #e5e7eb;"
-                                  f"border-radius:6px;padding:6px 10px;margin:3px 0;font-size:0.82rem;'>"
-                                  f"<span style='font-family:monospace;color:#374151;'>{_fp}</span>"
-                                  f"<span style='color:#6b7280;margin-left:8px;'>"
-                                  f"{_u['cand']} lineages · {_u['reads']:,} reads{_anc}</span></div>",
-                                  unsafe_allow_html=True,
-                              )
-
-                  # ---- Novel ----
-                  with st.expander(
-                      f":blue[■] Novel — no pango match ({_novel_total:,} reads)",
-                      expanded=False,
-                  ):
-                      if _novel_total == 0:
-                          st.caption("No unexplained patterns without a pango match.")
-                      else:
-                          st.caption(
-                              f"{_novel_total:,} reads in {_novel_pats} pattern(s) match "
-                              "no known lineage. Could be novel, recombinant, or artifact. "
-                              "A rising pattern is the most worth investigating."
-                          )
-                          for _loc, _res in _scan_res_all.items():
-                              _pn = _res.get("novel", {}) or _res.get("possibly_new", {})
-                              for _pi, _pat in enumerate(_pn.get("top_patterns", [])[:5]):
-                                  _pmuts = _pat.get("mutations", [])
-                                  _muts = ", ".join(_pmuts)
-                                  st.markdown(
-                                      f"<div style='background:#eff6ff;border:1px solid #bfdbfe;"
-                                      f"border-radius:6px;padding:6px 10px;margin:3px 0;font-size:0.8rem;'>"
-                                      f"<span style='color:#1d4ed8;font-family:monospace;'>{_muts}</span>"
-                                      f"<span style='color:#6b7280;margin-left:8px;'>"
-                                      f"{_pat.get('count',0):,} · {_loc.split('(')[0].strip()}</span></div>",
-                                      unsafe_allow_html=True,
-                                  )
-                                  # trend heatmap for this novel pattern — is it rising?
-                                  if _pmuts and wiseLoculus and len(_pmuts) >= 2:
-                                      with st.expander(
-                                          f"Trend over time — {_loc.split('(')[0].strip()} — "
-                                          f"{_muts[:40]}",
-                                          expanded=False,
-                                      ):
-                                          from components.scanner_heatmap import render_clade_heatmap
-                                          # carrier count per mutation (how many
-                                          # lineages carry it) so the novel heatmap
-                                          # can mark discriminating (★) rows instead
-                                          # of labelling everything backbone. Uses
-                                          # the signatures already cached on the page.
-                                          _nov_sigs = st.session_state.get("acooc_all_sigs_cache") or {}
-                                          _nov_car = ({_m: sum(1 for _s in _nov_sigs.values() if _m in _s)
-                                                       for _m in _pmuts} if _nov_sigs else {})
-                                          render_clade_heatmap(
-                                              clade_node=f"novel_{_loc}_{_pi}",
-                                              shared_mutations=[],
-                                              member_blocks=[{
-                                                  "member": "novel pattern",
-                                                  "discriminating": _pmuts,
-                                                  "member_count": 1,
-                                                  "reads": _pat.get("count", 0),
-                                                  "mut_carriers": _nov_car,
-                                              }],
-                                              client=wiseLoculus,
-                                              location=_loc,
-                                              date_range=(start_date, end_date),
-                                          )
-
 
 
             if _active_section == "Investigate a variant":

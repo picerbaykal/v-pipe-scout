@@ -1,0 +1,73 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin:0; padding:0; background:transparent; }
+  body { font-family:"Source Sans Pro","Source Sans 3",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+         color:#31333f; padding:2px 3px 6px; }
+  #tip { position:fixed; z-index:10; display:none; max-width:420px; padding:6px 9px; border-radius:6px;
+         background:#31333f; color:#fff; font-size:12px; line-height:1.35; pointer-events:none;
+         white-space:normal; box-shadow:0 2px 8px rgba(0,0,0,.18); }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<div id="tip"></div>
+<script>
+// Streamlit component protocol (what streamlit-component-lib does), no build step.
+function send(type, extra) {
+  window.parent.postMessage(Object.assign({isStreamlitMessage: true, type: type}, extra || {}), "*");
+}
+var lastH = 0;
+function sendHeight() {
+  var h = Math.ceil(document.documentElement.scrollHeight);
+  if (h !== lastH) { lastH = h; send("streamlit:setFrameHeight", {height: h}); }
+}
+var lastHtml = null;
+window.addEventListener("message", function (e) {
+  var d = e.data;
+  if (!d || d.type !== "streamlit:render") return;
+  var html = (d.args || {}).html || "";
+  if (html !== lastHtml) { document.getElementById("root").innerHTML = html; lastHtml = html; }
+  sendHeight();
+});
+document.addEventListener("click", function (e) {
+  var b = e.target.closest("[data-add]");
+  if (b) {
+    b.disabled = true; b.textContent = "adding…";
+    send("streamlit:setComponentValue", {value: {add: b.getAttribute("data-add"), t: Date.now()}, dataType: "json"});
+    return;
+  }
+  var c = e.target.closest("[data-city]");
+  if (c) {
+    send("streamlit:setComponentValue", {value: {city: c.getAttribute("data-city"), t: Date.now()}, dataType: "json"});
+    return;
+  }
+  var g = e.target.closest("tr.grp");
+  if (g) {   // show / hide the rows of a group
+    var id = g.getAttribute("data-grp"), open = false;
+    document.querySelectorAll("tr.g-" + id).forEach(function (r) { open = r.classList.toggle("hid") === false; });
+    g.querySelector(".arr").textContent = open ? "▾" : "▸";
+    sendHeight();
+  }
+});
+// hover: one tooltip that stays inside the frame
+var tip = document.getElementById("tip");
+document.addEventListener("mousemove", function (e) {
+  var t = e.target.closest ? e.target.closest("[data-tip]") : null;
+  if (!t) { tip.style.display = "none"; return; }
+  tip.textContent = t.getAttribute("data-tip");
+  tip.style.display = "block";
+  var w = tip.offsetWidth, h = tip.offsetHeight;
+  var x = e.clientX + 12, y = e.clientY + 14;
+  if (x + w > window.innerWidth - 4) x = Math.max(4, e.clientX - w - 12);
+  if (y + h > window.innerHeight - 4) y = Math.max(4, e.clientY - h - 12);
+  tip.style.left = x + "px"; tip.style.top = y + "px";
+});
+document.addEventListener("mouseleave", function () { tip.style.display = "none"; });
+if (window.ResizeObserver) new ResizeObserver(sendHeight).observe(document.body);
+send("streamlit:componentReady", {apiVersion: 1});
+</script>
+</body>
+</html>
