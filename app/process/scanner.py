@@ -726,6 +726,7 @@ def scan_unexplained_patterns(
         own = _rroot(node)
         other_rec = _any_rec & ~_rec_mask.get(own, 0) if own else _any_rec
         by_day: Dict[str, int] = {}
+        by_pat: Dict[tuple, int] = {}
         if fam_mask:
             for present, absent, cnt, date in observed_full:
                 fit = _fit_mask(present, absent)
@@ -738,6 +739,8 @@ def scan_unexplained_patterns(
                         continue              # fits outsiders too: not specific
                 _d = str(date)[:10]
                 by_day[_d] = by_day.get(_d, 0) + cnt
+                by_pat[(present, absent)] = by_pat.get((present, absent), 0) + cnt
+        c["_evidence_patterns"] = by_pat
         counted = sorted(d for d, n in by_day.items()
                          if n >= EVIDENCE_MIN_READS
                          and n >= EVIDENCE_MIN_SHARE * _day_tot.get(d, n))
@@ -752,6 +755,9 @@ def scan_unexplained_patterns(
         c["evidence_days"], c["counted_days"] = _evidence_days(c)
     confirmed = [c for c in _all_clades if len(c["counted_days"]) >= EVIDENCE_MIN_DAYS]
     one_day = [c for c in _all_clades if 0 < len(c["counted_days"]) < EVIDENCE_MIN_DAYS]
+    _add_notes(confirmed, one_day, panel_set, all_lineage_signatures, tree)
+    for c in _all_clades:
+        c.pop("_evidence_patterns", None)       # sets: not JSON, never shipped
     _backbone = [c for c in _all_clades if not c["counted_days"]]
     for c in _all_clades:
         for b in c.get("member_blocks", []) or []:
@@ -794,6 +800,7 @@ def scan_unexplained_patterns(
     }
     # same rule as the main loop (fingerprint totals), so counts always agree
     novel["pattern_count"] = len(novel_patterns)
+    novel["groups"] = _novel_groups(novel_patterns, _day_tot)
 
     summary = _summary(resolved_clade, unresolved, novel)
     logger.info(
@@ -835,6 +842,67 @@ def scan_unexplained_patterns(
     ]
     result["possibly_new"] = novel
     return result
+
+
+def _novel_groups(patterns: List[dict], day_tot: Dict[str, int],
+                  top: int = 20) -> List[dict]:
+    """Novel patterns grouped by mutation set: {mutations, reads, days}.
+    days = dates passing the same per-day evidence rule as findings
+    (>= EVIDENCE_MIN_READS reads and >= EVIDENCE_MIN_SHARE of the day)."""
+    by: Dict[tuple, Dict[str, int]] = {}
+    for p in patterns:
+        k = tuple(p["mutations"])
+        d = str(p.get("date", ""))[:10]
+        by.setdefault(k, {})
+        by[k][d] = by[k].get(d, 0) + int(p["count"])
+    out = []
+    for k, per_day in by.items():
+        days = sorted(d for d, n in per_day.items()
+                      if n >= EVIDENCE_MIN_READS
+                      and n >= EVIDENCE_MIN_SHARE * day_tot.get(d, 0))
+        out.append({"mutations": list(k), "reads": sum(per_day.values()), "days": days})
+    out.sort(key=lambda g: (-len(g["days"]), -g["reads"]))
+    return out[:top]
+
+
+def _evidence_regions(pats: Dict[tuple, int], min_reads: int) -> List[List[int]]:
+    """Genome regions the evidence comes from: position ranges of evidence
+    read patterns (with >= min_reads reads), overlapping ranges merged.
+    Regions are sequenced separately, so evidence in several regions is
+    independent; one region can be one molecule type or a convergent
+    combination."""
+    spans = []
+    for (present, absent), n in pats.items():
+        if n < min_reads:
+            continue
+        pos = [_mut_pos(m) for m in list(present) + list(absent)]
+        pos = [p for p in pos if p >= 0]
+        if pos:
+            spans.append([min(pos), max(pos)])
+    spans.sort()
+    out: List[List[int]] = []
+    for lo, hi in spans:
+        if out and lo <= out[-1][1]:
+            out[-1][1] = max(out[-1][1], hi)
+        else:
+            out.append([lo, hi])
+    return out
+
+
+def _add_notes(confirmed: List[dict], one_day: List[dict], panel_set: Set[str],
+               all_sigs: Dict[str, Set[str]], tree: "_Tree") -> None:
+    """Facts shown next to a finding so the user can judge it (no rule uses
+    them): evidence_regions, has_star (any ★ marker, or combinations only),
+    confirmed_descendants (other confirmed findings below it in the tree — an
+    ancestor like JN.1 is shown folded)."""
+    nodes = [c["node"] for c in confirmed]
+    for c in confirmed + one_day:
+        pats = c.get("_evidence_patterns", {}) or {}
+        c["evidence_regions"] = _evidence_regions(pats, EVIDENCE_MIN_READS)
+        c["has_star"] = any(any((b.get("mut_star") or {}).values())
+                            for b in (c.get("member_blocks") or []))
+        c["confirmed_descendants"] = [n for n in nodes
+                                      if n != c["node"] and tree.is_descendant(n, c["node"])]
 
 
 def _clade_root_of(members: List[str], tree: "_Tree") -> str:
