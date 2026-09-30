@@ -55,3 +55,5 @@ evidence:
   min_reads: 20
   min_share: 0.005
   min_days: 2
+  relative_share: 0.95 # combinations: recombinant trees carrying >= this share of a
+                       # RECOMBINANT finding's mutation count as its family
