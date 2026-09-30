@@ -216,6 +216,52 @@ def annotate_cooc_dataframe(
     return pd.DataFrame(annotated_rows)
 
 
+# ── Unexplained reads handed to the scanner ─────────────────────────────
+
+def aggregate_unexplained(frames: List[pd.DataFrame]) -> pd.DataFrame:
+    """Merge the unexplained rows of all batches into one row per
+    (date, present mutations, absent mutations), with the read count.
+
+    `confirmed_absent` (positions where the read shows the reference base) is
+    kept: reads with the same present mutations but different absent ones are
+    different evidence — a read showing the reference where a lineage has its
+    mutation cannot come from that lineage. (Until 2026-09-30 rows were keyed
+    by present mutations only and the absent side was dropped.)
+
+    Also kept: the "panel variant + 1 change" summary per row — near_count
+    (reads with a label) and near_label (the most common label).
+
+    Returns columns: date, count, confirmed_present, confirmed_absent,
+    near_count, near_label (lists for the mutation columns)."""
+    cols = ["date", "count", "confirmed_present", "confirmed_absent",
+            "near_count", "near_label"]
+    frames = [f for f in (frames or []) if f is not None and not f.empty]
+    if not frames:
+        return pd.DataFrame(columns=cols)
+    df = pd.concat(frames, ignore_index=True)
+    if "confirmed_absent" not in df.columns:
+        df["confirmed_absent"] = [[] for _ in range(len(df))]
+    if "near" not in df.columns:
+        df["near"] = ""
+    df["near"] = df["near"].fillna("")
+    df["_p"] = df["confirmed_present"].apply(lambda x: tuple(sorted(x)))
+    df["_a"] = df["confirmed_absent"].apply(lambda x: tuple(sorted(x or ())))
+    df["near_count"] = df["count"].where(df["near"] != "", 0)
+    keys = ["date", "_p", "_a"]
+    agg = (df.groupby(keys).agg(count=("count", "sum"), near_count=("near_count", "sum"))
+             .reset_index())
+    lab = (df[df["near"] != ""].groupby(keys + ["near"])["count"].sum().reset_index()
+             .sort_values("count", ascending=False).drop_duplicates(keys)
+             .rename(columns={"near": "near_label"})[keys + ["near_label"]])
+    agg = agg.merge(lab, on=keys, how="left")
+    agg["near_label"] = agg["near_label"].fillna("")
+    agg["near_count"] = agg["near_count"].astype(int)
+    agg["count"] = agg["count"].astype(int)
+    agg["confirmed_present"] = agg["_p"].apply(list)
+    agg["confirmed_absent"] = agg["_a"].apply(list)
+    return agg[cols]
+
+
 # ── Per-date panel completeness ─────────────────────────────────────────
 
 def panel_completeness_by_date(
@@ -379,8 +425,10 @@ def specific_markers(variant_signatures: Dict[str, Set[str]],
     lineage_signatures: every pango lineage -> substitutions (the carrier pool).
     parent_map:         lineage -> parent lineage ("" for roots/recombinants).
 
-    A variant with no specific marker (an ancestor of other panel variants, e.g.
-    KP.2/KP.3) gets [] and is reported "can't confirm independently"."""
+    A variant with no specific marker gets [] and is reported "no ★ marker"
+    (KP.2/KP.3: their only own mutations are shared with unrelated variants).
+    The variant's own sublineages in the panel don't count as "other" panel
+    variants."""
     c = _check_cfg(cfg)
     idx = _carrier_index(lineage_signatures)
     kids = _children_map(parent_map)
@@ -393,12 +441,16 @@ def specific_markers(variant_signatures: Dict[str, Set[str]],
 
     out: Dict[str, List[str]] = {}
     for v, sig in variant_signatures.items():
+        fam = _lineage_family(v, parent_map, kids)
+        # panel-private: not carried by another panel variant — except v's own
+        # sublineages in the panel, which carry all of v's mutations by descent
+        # (PQ.16.1.1 in the panel left NB.1.8.1 with no marker at all). With
+        # both in the panel, v's markers read "v or its sublineages".
         others: Set[str] = set()
         for w, s in variant_signatures.items():
-            if w != v:
+            if w != v and w not in fam:
                 others |= (s or set())
         private = {m for m in (sig or set()) - others if _SUB_RE.match(m)}
-        fam = _lineage_family(v, parent_map, kids)
         v_root = rroot(v) if v in parent_map else None
         ranked = []
         for m in private:

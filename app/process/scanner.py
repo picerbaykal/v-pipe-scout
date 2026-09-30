@@ -454,22 +454,33 @@ def scan_unexplained_patterns(
     _NOISE_FLOOR = 2
     _rows = []
     fp_total: Dict[frozenset, int] = {}
+    # the floor applies to all reads with the same present mutations on a
+    # day: rows are also split by confirmed_absent (2026-09-30), which must
+    # not turn a 5-read pattern into ignored 1-read rows
+    _pat_total: Dict[tuple, int] = {}
     for _, row in patterns.iterrows():
         present = set(row["confirmed_present"])
         count = int(row["count"])
         fp = frozenset(beyond_panel(present, panel_sigs))
         _rows.append((row, present, count, fp))
-        if count >= _NOISE_FLOOR:
+        _k = (row.get("date", ""), frozenset(present))
+        _pat_total[_k] = _pat_total.get(_k, 0) + count
+
+    def _above_floor(row, present) -> bool:
+        return _pat_total.get((row.get("date", ""), frozenset(present)), 0) >= _NOISE_FLOOR
+
+    for row, present, count, fp in _rows:
+        if _above_floor(row, present):
             fp_total[fp] = fp_total.get(fp, 0) + count
 
     min_read_count = int(_cfg("scanner.read_threshold_max", min_read_count))
-    _all_reads = sum(c for _r, _p, c, _f in _rows if c >= _NOISE_FLOOR)
+    _all_reads = sum(c for _r, _p, c, _f in _rows if _above_floor(_r, _p))
     eff_min_reads = min(min_read_count,
                         max(READ_THRESHOLD_FLOOR,
                             int(round(READ_THRESHOLD_SHARE * _all_reads))))
 
     for row, present, count, fingerprint in _rows:
-        if count < _NOISE_FLOOR:
+        if not _above_floor(row, present):
             continue
         total_unexplained += count
         if len(present) >= 2:
@@ -631,7 +642,7 @@ def scan_unexplained_patterns(
         _day_tot = {str(d)[:10]: int(n) for d, n in day_totals.items()}
     else:
         for _r, _p, _c, _f in _rows:
-            if _c >= _NOISE_FLOOR:
+            if _above_floor(_r, _p):
                 _d = str(_r.get("date", ""))[:10]
                 _day_tot[_d] = _day_tot.get(_d, 0) + _c
 

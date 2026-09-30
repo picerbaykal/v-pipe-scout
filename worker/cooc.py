@@ -55,7 +55,8 @@ from process.amplicons import (
     load_amplicons,
 )
 from process.cooc import (annotate_cooc_dataframe, panel_completeness_by_date,
-                          specific_markers, accumulate_check_stats)
+                          specific_markers, accumulate_check_stats,
+                          aggregate_unexplained)
 from utils.config import get_wiseloculus_url
 
 logger = logging.getLogger(__name__)
@@ -362,7 +363,7 @@ def run_cooc_panel_completeness(
             if not per_date.empty:
                 per_date_results.append(per_date)
             if "classification" in annotated.columns:
-                _cols = ["date", "count", "confirmed_present"]
+                _cols = ["date", "count", "confirmed_present", "confirmed_absent"]
                 if "near" in annotated.columns:
                     _cols.append("near")
                 unexp = annotated[annotated["classification"] == "unexplained"][
@@ -424,38 +425,9 @@ def run_cooc_panel_completeness(
 
     combined = pd.concat(per_batch_results, ignore_index=True)
 
-    if pattern_results:
-        all_patterns = pd.concat(pattern_results, ignore_index=True)
-        all_patterns["pattern_key"] = all_patterns["confirmed_present"].apply(tuple)
-        if "near" not in all_patterns.columns:
-            all_patterns["near"] = ""
-        all_patterns["near"] = all_patterns["near"].fillna("")
-        # "variant + 1 change" reads (process.cooc.near_panel_label): the same
-        # present-pattern can mix near / not-near reads (confirmed_absent differs),
-        # so keep the near read count and the dominant label per pattern.
-        all_patterns["near_count"] = all_patterns["count"].where(
-            all_patterns["near"] != "", 0)
-        unexplained_agg = (
-            all_patterns.groupby(["date", "pattern_key"])
-            .agg(count=("count", "sum"), near_count=("near_count", "sum"))
-            .reset_index()
-            .rename(columns={"pattern_key": "confirmed_present"})
-        )
-        _lab = (all_patterns[all_patterns["near"] != ""]
-                .groupby(["date", "pattern_key", "near"])["count"].sum()
-                .reset_index().sort_values("count", ascending=False)
-                .drop_duplicates(["date", "pattern_key"])
-                .rename(columns={"pattern_key": "confirmed_present",
-                                 "near": "near_label"})
-                [["date", "confirmed_present", "near_label"]])
-        unexplained_agg = unexplained_agg.merge(
-            _lab, on=["date", "confirmed_present"], how="left")
-        unexplained_agg["near_label"] = unexplained_agg["near_label"].fillna("")
-        unexplained_agg["near_count"] = unexplained_agg["near_count"].astype(int)
-        unexplained_agg["confirmed_present"] = unexplained_agg["confirmed_present"].apply(list)
-    else:
-        unexplained_agg = pd.DataFrame(columns=["date", "count", "confirmed_present",
-                                                "near_count", "near_label"])
+    # one row per (date, present, absent) — the scanner needs the absent side
+    # to tell which lineages a read can come from (process.cooc)
+    unexplained_agg = aggregate_unexplained(pattern_results)
 
     per_date = combined.groupby("date", as_index=False)[
         ["matched_count", "unexplained_count"]
