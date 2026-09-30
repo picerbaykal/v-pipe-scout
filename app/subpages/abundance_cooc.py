@@ -161,6 +161,50 @@ def _step_label(n: int, label: str, done: bool = False, active: bool = False) ->
     )
 
 
+def _panel_verdicts(cooc_res: dict, variants: list) -> dict:
+    """Per panel variant in ONE city: {variant: {"state", "reason"}} from the
+    worker's panel_check (reads only, never the abundance).
+
+    state: confirmed / not_found / inconsistent (the marker vote of
+    process.cooc.check_verdicts), no_marker (nothing specific to test),
+    no_data (no check data, or no marker measurable)."""
+    from process.cooc import check_verdicts
+    pc = (cooc_res or {}).get("panel_check", {}) or {}
+    sym = {"present": "✓", "absent": "✗", "unmeasured": "?"}
+    out = {}
+    for v in variants:
+        ci = pc.get(v)
+        if ci is None:
+            out[v] = {"state": "no_data", "reason": "no check data — re-run the scan"}
+            continue
+        res = check_verdicts(ci.get("markers") or [], ci.get("per_date") or {})
+        nd, np_, nm = res["n_markers"], res["n_present"], res["n_measured"]
+        mk = [f"{k} {(m['freq'] or 0) * 100:.0f}% {sym[m['status']]}"
+              if m["cov"] else f"{k} no reads ?" for k, m in res["markers"].items()]
+        mtxt = " · ".join(mk[:6]) + (f" · +{len(mk) - 6} more" if len(mk) > 6 else "")
+        if nd == 0:
+            state, reason = "no_marker", ("every mutation is shared with another panel "
+                                          "variant or common outside its family")
+        elif nm == 0:
+            state, reason = "no_data", f"too few reads on its markers — {mtxt}"
+        else:
+            state = {"confirmed": "confirmed", "not_found": "not_found",
+                     "inconsistent": "inconsistent"}.get(res["verdict"], "no_data")
+            reason = f"{np_} of {nm} measurable markers present — {mtxt}"
+        out[v] = {"state": state, "reason": reason}
+    return out
+
+
+def _deconv_mean(location_result: dict, location: str, variant: str):
+    """Mean deconvolution proportion of a variant in one city, or None."""
+    d = location_result
+    if isinstance(d, dict) and location in d and isinstance(d[location], dict):
+        d = d[location]
+    ts = ((d or {}).get(variant) or {}).get("timeseriesSummary", []) or []
+    vals = [e.get("proportion", 0) or 0 for e in ts]
+    return (sum(vals) / len(vals)) if vals else None
+
+
 def app():
     # Scanner-added variants live in their OWN plain session key (NOT a widget
     # key), so adding one never mutates the multiselect widgets' state — which
@@ -282,8 +326,8 @@ def app():
 
         # ── Step 2: Variant tree ──────────────────────────────────────────────
         _step_label(2, "Variant tree", done=has_variants)
-        st.caption("Your panel (structural). Per-city co-occurrence verdicts are "
-                   "coloured on the tree under each city's deconvolution plot.")
+        st.caption("Your panel (structural). Per-city results are coloured on the "
+                   "tree in Co-occurrence results.")
         # structural tree only — always black, updates live with the selection
         # (no verdicts here, so it never flickers and needs no run).
         render_panel_tree(
@@ -814,13 +858,8 @@ def app():
 
               def _city_tab_content(location, task_id, show_deconv=True,
                                     show_similarity=True):
-                  """Shared content for both active and idle city tab fragments."""
-                  _cooc_tasks_map = st.session_state.get("acooc_cooc_tasks", {})
-                  _cooc_results = st.session_state.get("acooc_cooc_results", {})
-                  _scanner_results = st.session_state.get("acooc_scanner_results", {})
-                  _scanner_panels = st.session_state.get("acooc_scanner_panels", {})
-                  _added_for = st.session_state.get("acooc_scanner_added_for", {})
-                  _scanner_tasks_map = st.session_state.get("acooc_scanner_tasks", {})
+                  """One city's deconvolution plot (the co-occurrence check and
+                  per-city tree moved to Co-occurrence results)."""
 
                   # ── deconvolution (primary output) ────────────────────────────
                   # In the multi-city grid the deconv plots are drawn once by
@@ -836,198 +875,6 @@ def app():
                           render_location_progress(
                               location, task_id, celery_app, redis_client
                           )
-
-                  # ── co-occurrence check per deconvolution variant ─────────────
-                  # Annotate each deconvolution result with whether co-occurrence
-                  # corroborates it (confirmed / oscillating / can't-confirm).
-                  if location in st.session_state.location_results:
-                      _dec = st.session_state.location_results[location]
-                      # deconv result is wrapped by location name:
-                      # {loc: {variant: {timeseriesSummary...}}}. Unwrap to the
-                      # inner variant dict. Handle both wrapped and flat shapes.
-                      if isinstance(_dec, dict) and location in _dec and isinstance(_dec[location], dict):
-                          _dec = _dec[location]
-                      # Corroboration is about PANEL variants and depends only on
-                      # deconvolution + the co-occurrence completeness pipeline
-                      # (panel_confirmations) — NOT the scanner (which finds
-                      # non-panel variants for the separate discovery section).
-                      _found_nodes = set()
-                      _cooc_res = _cooc_results.get(location)
-                      if _cooc_res is None and location in _cooc_tasks_map:
-                          _t = celery_app.AsyncResult(_cooc_tasks_map[location])
-                          if _t.ready():
-                              try:
-                                  _cooc_res = _t.get()
-                                  _cooc_results[location] = _cooc_res
-                                  st.session_state["acooc_cooc_results"] = _cooc_results
-                              except Exception:
-                                  _cooc_res = None
-                      # panel variant confirmed if its discriminating haplotype was
-                      # observed co-occurring (panel_confirmations from cooc pipeline)
-                      _panel_conf = (_cooc_res or {}).get("panel_confirmations", {}) or {}
-                      _MIN_CONFIRM_READS = 100
-                      for _pv, _reads in _panel_conf.items():
-                          if _reads and _reads >= _MIN_CONFIRM_READS:
-                              _found_nodes.add(_pv)
-                      # only render once the cooc completeness result is available,
-                      # so verdicts don't flip as the scanner streams in
-                      _cooc_ready = _cooc_res is not None
-                      # header always shows so the section doesn't pop in late
-                      st.markdown(
-                          "<div style='font-weight:600;font-size:13px;"
-                          "margin:6px 0 2px;'>Co-occurrence check</div>",
-                          unsafe_allow_html=True)
-                      st.caption(
-                          "Are the reads backing each panel variant? Based only on reads, not on "
-                          "the abundance: each variant's specific markers (mutations only it "
-                          "carries) are checked for presence on reads that also match it at "
-                          "neighbouring positions. Hover the table for details; per-date "
-                          "evidence is in the heatmaps.")
-                      if not _cooc_ready:
-                          st.info("⏳ Waiting for the co-occurrence scan to finish…")
-                      if _cooc_ready and all_selected_variants:
-                          try:
-                              from process.variant_annotation import (
-                                  VariantIndex, oscillating_pairs, annotate_variant)
-                              _sigs = st.session_state.get("acooc_all_sigs_cache")
-                              if not _sigs:
-                                  _pl0 = cached_get_pango_loader()
-                                  _sigs = {lin: _pl0.get_signature(lin)
-                                           for lin in _pl0.raw_data}
-                                  st.session_state["acooc_all_sigs_cache"] = _sigs
-                              if _sigs:
-                                  _pl = cached_get_pango_loader()
-                                  _pmap = {l: _pl.get_raw_data().get(l, {}).get("parent", "")
-                                           for l in _sigs}
-                                  _idx = VariantIndex(_sigs, _pmap)
-                                  # Undesignated panel nodes (e.g. BA.3.2 — only
-                                  # BA.3.2.1/.2 are in raw_data, so BA.3.2 isn't a
-                                  # key in _sigs) were silently dropped here. Reuse
-                                  # the SAME get_signature fallback the worker's
-                                  # _build_variant_signatures uses, in a local copy,
-                                  # so every deconv/panel variant is checked and none
-                                  # vanish. (Local copy → the cached _sigs used
-                                  # elsewhere, e.g. scanner classification, is intact.)
-                                  _csigs = dict(_sigs)
-                                  for _cv in _dec.keys():
-                                      if _cv != "undetermined" and _cv not in _csigs:
-                                          _cfb = _pl.get_signature(_cv) or set()
-                                          _sub = {m for m in _cfb if m and m[-1] in "ACGT"}
-                                          if _sub:
-                                              _csigs[_cv] = _sub
-                                  _osc = oscillating_pairs(all_selected_variants, _csigs)
-                                  _dec_vars = [v for v in _dec.keys()
-                                               if v != "undetermined" and v in _csigs]
-                                  _pc = (_cooc_res or {}).get("panel_check", {}) or {}
-                                  from process.cooc import (check_verdicts as _check_verdicts,
-                                                            _check_cfg as _check_cfg_fn)
-                                  _ccfg = _check_cfg_fn()
-                                  _rows = []
-                                  for _v in _dec_vars:
-                                      _ci = _pc.get(_v)
-                                      _sib = _osc.get(_v, [])
-                                      if _ci is None:
-                                          _res = {"verdict": "cant_confirm", "n_markers": 0, "n_present": 0,
-                                                  "n_measured": 0, "markers": {}}
-                                      else:
-                                          _res = _check_verdicts(_ci.get("markers") or [], _ci.get("per_date") or {})
-                                      _status = _res["verdict"]
-                                      _nd, _np, _nm = _res["n_markers"], _res["n_present"], _res["n_measured"]
-                                      _sym = {"present": "✓", "absent": "✗", "unmeasured": "?"}
-                                      _mlist = [f"{_k} {(_m['freq'] or 0) * 100:.0f}% {_sym[_m['status']]}"
-                                                if _m["cov"] else f"{_k} no reads ?"
-                                                for _k, _m in _res["markers"].items()]
-                                      _mtxt = " · ".join(_mlist[:6]) + (f" · +{len(_mlist) - 6} more" if len(_mlist) > 6 else "")
-                                      _mcell = "<br>".join(_mlist)
-                                      if _ci is None:
-                                          _evid = "no data"
-                                          _reason = "no check data for this variant — re-run the scan"
-                                      elif _nd == 0:
-                                          _evid = "no ★ markers"
-                                          _reason = ("every mutation of this variant is shared with another panel "
-                                                     "variant or common outside its family, so reads cannot single it out"
-                                                     + (f"; near-identical to {', '.join(_sib)} — trust the sum" if _sib else ""))
-                                      elif _nm == 0:
-                                          _evid = f"0 of {_nd} ★ markers measurable"
-                                          _reason = f"too few reads on its markers to measure — {_mtxt}"
-                                      else:
-                                          _evid = f"{_np} of {_nm} ★ markers present"
-                                          _reason = (f"{_np} of {_nm} measurable markers present"
-                                                     + (f" ({_nd - _nm} not measurable)" if _nd > _nm else "")
-                                                     + f" — {_mtxt}")
-                                      _ts = _dec.get(_v, {}).get("timeseriesSummary", [])
-                                      _ab = ([e.get("proportion", 0) for e in _ts]
-                                             if _ts else [])
-                                      _abmean = (sum(_ab) / len(_ab)) if _ab else 0.0
-                                      _rows.append((_v, _status, _reason, _abmean, _evid, _mcell))
-                                  # stash "not found in WW" panel variants for the
-                                  # orange band on the scanner list below.
-                                  st.session_state["acooc_not_found"] = [
-                                      {"variant": _r0[0], "reason": _r0[2], "abmean": _r0[3]}
-                                      for _r0 in _rows if _r0[1] == "not_found"]
-                                  # stash verdicts (still used by the orange
-                                  # "not found in WW" band on the scanner list).
-                                  st.session_state["acooc_verdicts"] = {
-                                      _r0[0]: _r0[1] for _r0 in _rows}
-                                  # ── per-city verdict tree: fed DIRECTLY with this
-                                  #    city's verdicts (not via session state), so it
-                                  #    is stable and shows THIS city's colours. ──
-                                  _city_status = {_r0[0]: _r0[1] for _r0 in _rows}
-                                  render_panel_tree(
-                                      selected_variants=all_selected_variants,
-                                      yaml_variants=curated_variants,
-                                      pango_loader=cached_get_pango_loader(),
-                                      variant_status=_city_status)
-                                  if _rows:
-                                      _order = {"confirmed": 0, "inconsistent": 1, "cant_confirm": 2, "not_found": 3}
-                                      _rows.sort(key=lambda r: (_order.get(r[1], 2), -r[3]))
-                                      _meta = {
-                                          "confirmed":    ("#0f6e56", "#e6f4ef", "✓ confirmed"),
-                                          "inconsistent": ("#6d28d9", "#f3effd", "≠ inconsistent"),
-                                          "cant_confirm": ("#6b7280", "#f3f4f6", "· can&#39;t confirm"),
-                                          "not_found":    ("#b45309", "#fff7ed", "✗ not found in WW"),
-                                      }
-                                      _ev_tip = (
-                                          "A ★ marker is a mutation that only this panel variant carries (its own "
-                                          "sublineages do not count against it). Counted over all dates in this city: "
-                                          f"present = at least {_ccfg['present_freq'] * 100:.0f}% of the reads covering "
-                                          "the marker carry it, AND those reads also match the variant at neighbouring "
-                                          f"positions (co-occurrence); absent = under {_ccfg['absent_freq'] * 100:.0f}%; "
-                                          f"markers with fewer than {_ccfg['min_cov']} reads, or in between, are not "
-                                          "measurable. 4 of 5 present = of the 5 measurable markers, 4 are present. "
-                                          f"Confirmed = at least {_ccfg['confirm_share'] * 100:.0f}% present; not found = "
-                                          f"at most {_ccfg['notfound_share'] * 100:.0f}%; in between = inconsistent "
-                                          "(some markers are also carried by something else). Hover a row for its markers.")
-                                      _th = "padding:4px 8px;font-weight:600;color:#6b7280;text-align:left;"
-                                      _html = (
-                                          "<table style='width:100%;border-collapse:collapse;font-size:12px;'>"
-                                          "<thead><tr style='border-bottom:1px solid #e5e7eb;'>"
-                                          f"<th style='{_th}'>Variant</th>"
-                                          f"<th style='{_th}'>Verdict</th>"
-                                          f"<th style='{_th}'>Evidence</th>"
-                                          "</tr></thead><tbody>")
-                                      _td = "padding:5px 8px;border-bottom:0.5px solid #f0f0f0;"
-                                      for _v, _s, _r, _ab, _evid, _mcell in _rows:
-                                          _fg, _bg, _lbl = _meta.get(_s, ("#6b7280", "#f3f4f6", _s))
-                                          _rt = _r.replace("'", "&#39;")
-                                          _html += (
-                                              "<tr>"
-                                              f"<td style='{_td}font-weight:600;'>{_v}</td>"
-                                              f"<td style='{_td}'><span style='background:{_bg};color:{_fg};"
-                                              "font-size:11px;font-weight:600;padding:1px 8px;border-radius:10px;"
-                                              f"white-space:nowrap;'>{_lbl}</span></td>"
-                                              + (f"<td style='{_td}color:#4b5563;'><details><summary style='cursor:pointer;'>"
-                                               f"{_evid}</summary><div style='margin-top:4px;font-size:11px;"
-                                               f"line-height:1.6;color:#6b7280;'>{_mcell or _r}</div></details></td></tr>"
-                                               if _mcell else f"<td style='{_td}color:#4b5563;' title='{_rt}'>{_evid}</td></tr>"))
-                                      _html += "</tbody></table>"
-                                      with st.expander("Details — co-occurrence check table", expanded=False):
-                                          st.markdown(_html, unsafe_allow_html=True)
-                                          st.caption(_ev_tip.replace("Hover a row for its markers.", "")
-                                                     + " Click the evidence of a row to see its markers "
-                                                     "(✓ present, ✗ absent, ? not measurable).")
-                          except Exception as _e:
-                              st.caption(f"(co-occurrence check unavailable: {_e})")
 
                   # ── Jaccard (signature similarity) — city-independent, so it's
                   #    shown once above the tabs (show_similarity=False here). ──
@@ -1063,8 +910,7 @@ def app():
                           pango_loader=cached_get_pango_loader(),
                       )
               # ── per-city TABS: each tab is one city's full-size deconvolution
-              #    plot (with confidence bands) plus that city's co-occurrence
-              #    check. Replaces the radio and the small-multiples grid. ──
+              #    plot (with confidence bands). ──
               _dtabs = st.tabs([loc for loc in location_names])
               for _dtab, _loc in zip(_dtabs, location_names):
                   with _dtab:
@@ -1153,6 +999,36 @@ def app():
                           for _j, _lc in enumerate(_grid_locs[_i:_i+2]):
                               with _cols[_j]:
                                   _one_city(_lc)
+                  st.markdown("---")
+
+              # ── Your panel per city: the tree coloured by this city's reads,
+              #    scanner findings added as red nodes. Uses the panel that was
+              #    RUN, so the colours always match the results. ─────────────
+              _run_panel = st.session_state.get("acooc_ran_panel") or all_selected_variants
+              _verdicts_by_city = {
+                  _l: _panel_verdicts(_cr_all[_l], _run_panel)
+                  for _l in location_names if _cr_all.get(_l) is not None}
+              if _ready_locs:
+                  st.markdown("#### Your panel per city")
+                  st.caption("Each panel variant coloured by the evidence from reads in the "
+                             "chosen city; variants the scanner found that are not in your "
+                             "panel are added in red. Hover a node for its state and markers.")
+                  _tcity = st.radio(
+                      "City", _ready_locs, horizontal=True, key="acooc_tree_city",
+                      format_func=lambda _l: _l.split("(")[0].strip(),
+                      label_visibility="collapsed")
+                  _tfind = [_c["node"] for _c in
+                            (_sr_all.get(_tcity) or {}).get("resolved_clade", []) or []]
+                  render_panel_tree(
+                      selected_variants=_run_panel,
+                      yaml_variants=curated_variants,
+                      pango_loader=cached_get_pango_loader(),
+                      variant_status={_v: _d["state"] for _v, _d in
+                                      _verdicts_by_city.get(_tcity, {}).items()},
+                      findings=_tfind,
+                      per_city=True,
+                      status_detail={_v: _d["reason"] for _v, _d in
+                                     _verdicts_by_city.get(_tcity, {}).items()})
                   st.markdown("---")
 
               # ── Scanner (one section, aggregated across all cities) ────────────
@@ -1473,29 +1349,40 @@ def app():
                                               _is_sub=True)
 
                   # ---- Not found in wastewater (orange, panel-side) ----
-                  # Panel variants you selected whose distinctive haplotype was
-                  # co-covered but never co-occurred (or constellation absent) —
-                  # evidence of absence. Sourced from the Co-occurrence check above.
-                  _nf_list = st.session_state.get("acooc_not_found", []) or []
+                  # Panel variants whose specific markers were covered but absent
+                  # — evidence of absence, per city (from _panel_verdicts above).
+                  _lr_nf = st.session_state.get("location_results", {})
+                  _nf_by_var = {}
+                  for _l, _vd in _verdicts_by_city.items():
+                      for _v, _d in _vd.items():
+                          if _d["state"] == "not_found":
+                              _nf_by_var.setdefault(_v, []).append((_l, _d["reason"]))
                   with st.expander(
-                      f":orange[▲] Not found in wastewater — {len(_nf_list)} variant(s)",
+                      f":orange[▲] Not found in wastewater — {len(_nf_by_var)} variant(s)",
                       expanded=False,
                   ):
-                      if not _nf_list:
-                          st.caption("None — every panel variant with a distinctive "
-                                     "haplotype was found co-occurring (or is a blind spot).")
+                      if not _nf_by_var:
+                          st.caption("None — no panel variant had its specific markers "
+                                     "covered and absent.")
                       else:
                           st.caption(
-                              "You selected these, but their distinctive mutations were "
-                              "looked for and not seen co-occurring in your data — evidence "
-                              "of absence, not just missing coverage.")
-                          for _nf in _nf_list:
+                              "You selected these, but in the cities shown their specific "
+                              "mutations were looked for and not seen — evidence of "
+                              "absence, not just missing coverage.")
+                          for _v, _hits in sorted(_nf_by_var.items()):
+                              _rows_nf = ""
+                              for _l, _reason in _hits:
+                                  _ab = _deconv_mean(_lr_nf.get(_l), _l, _v)
+                                  _abt = f"{_ab * 100:.0f}% deconv · " if _ab is not None else ""
+                                  _rows_nf += (
+                                      f"<div style='color:#6b7280;margin-left:8px;'>"
+                                      f"<b style='color:#374151;font-weight:500;'>"
+                                      f"{_l.split('(')[0].strip()}</b> · {_abt}{_reason}</div>")
                               st.markdown(
                                   f"<div style='background:#fff7ed;border:1px solid #fed7aa;"
                                   f"border-radius:6px;padding:6px 10px;margin:3px 0;font-size:0.82rem;'>"
-                                  f"<span style='font-weight:600;color:#b45309;'>{_nf['variant']}</span>"
-                                  f"<span style='color:#6b7280;margin-left:8px;'>"
-                                  f"{_nf['abmean']*100:.0f}% deconv · {_nf['reason']}</span></div>",
+                                  f"<span style='font-weight:600;color:#b45309;'>{_v}</span>"
+                                  f"{_rows_nf}</div>",
                                   unsafe_allow_html=True,
                               )
 

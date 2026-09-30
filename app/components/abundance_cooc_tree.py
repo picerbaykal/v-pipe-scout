@@ -3,18 +3,23 @@ components/abundance_cooc_tree.py
 
 Phylogenetic variant tree for the Abundance & Co-occurrence tab.
 
-Shows the global variant panel rooted at B. Selected (panel) variants are
-coloured by their co-occurrence verdict:
+Shows the global variant panel rooted at B. Two uses:
 
-    green  (#16a34a)  confirmed      — co-occurring in the wastewater
-    orange (#b45309)  not found in WW — distinctive haplotype looked for, not seen
-    black  (#1f2430)  selected       — chosen, verdict still pending / inconclusive
+  structural (left column): every selected variant is black.
+  per city (Co-occurrence results): each selected variant is coloured by its
+  read evidence in that city, and scanner findings are added as red nodes:
+
+    green        confirmed        specific evidence on >= 2 days
+    light green  seen on 1 day    possible artefact, watch
+    orange       not found        markers covered, absent
+    purple       inconsistent     markers disagree (goes with the old check)
+    grey         no ★ marker      nothing specific to test (e.g. KP.2, KP.3)
+    dashed grey  no data          too few reads on its markers
+    red          not in panel     scanner finding
 
 Officially-tracked (cowwid) variants get an "OT" badge; tracked-but-not-selected
-variants are hollow blue; spine/structural nodes are small grey circles.
-
-Verdicts come from the Co-occurrence check (session_state["acooc_verdicts"],
-{variant: status}); until a scan has run every selected node shows black.
+variants are hollow blue; spine/structural nodes are small grey circles. The
+legend lists only the states present in the tree; hovering a node names its state.
 """
 from __future__ import annotations
 from collections import defaultdict
@@ -29,23 +34,28 @@ C = {
     "spine":    "#C8C6BE",
 }
 
-# verdict → colour for selected panel nodes. Green is deliberately brighter than
-# the check-table teal so it is clearly distinct from the black "pending" nodes.
-# Orange matches the scanner list's "Not found in wastewater" band (#b45309).
+# state → (colour, legend / hover label). Orange matches the scanner list's
+# "Not found in wastewater" band, red its "Not in your panel" band.
 STATUS_C = {
-    "confirmed": "#16a34a",   # green  — present in WW (confirmed)
-    "not_found": "#b45309",   # orange — not found in WW (looked for, absent)
-    "pending":   "#1f2430",   # black  — chosen, verdict pending
+    "confirmed":    ("#16a34a", "confirmed"),
+    "one_day":      ("#86c98a", "seen on 1 day"),
+    "not_found":    ("#b45309", "not found in WW"),
+    "inconsistent": ("#7c3aed", "inconsistent"),
+    "no_marker":    ("#9ca3af", "no ★ marker"),
+    "no_data":      ("#9ca3af", "no data"),
+    "finding":      ("#dc2626", "found, not in panel"),
+    "pending":      ("#1f2430", "selected"),
 }
+_DASHED = {"no_data"}          # drawn as an empty dashed circle
 
 
-def _status_color(v: str, variant_status: dict | None) -> str:
-    s = (variant_status or {}).get(v)
-    if s == "confirmed":
-        return STATUS_C["confirmed"]
-    if s == "not_found":
-        return STATUS_C["not_found"]
-    return STATUS_C["pending"]
+def _status_of(v: str, variant_status: dict | None, default: str) -> str:
+    s = (variant_status or {}).get(v, default)
+    return s if s in STATUS_C else default
+
+
+def _status_color(v: str, variant_status: dict | None, default: str = "pending") -> str:
+    return STATUS_C[_status_of(v, variant_status, default)][0]
 
 
 def _ancestors(v: str, parent_map: dict) -> list[str]:
@@ -56,8 +66,11 @@ def _ancestors(v: str, parent_map: dict) -> list[str]:
     return path
 
 
-def _build_spine(selected_set: set, yaml_set: set, parent_map: dict, recomb_set: set = None):
+def _build_spine(selected_set: set, yaml_set: set, parent_map: dict, recomb_set: set = None,
+                 finding_set: set = None):
     recomb_set = recomb_set or set()
+    finding_set = finding_set or set()
+    selected_set = set(selected_set) | set(finding_set)
     # recombinants are shown in a separate section, not the main bifurcating tree
     selected_set = {v for v in selected_set if v not in recomb_set}
     if not selected_set:
@@ -106,6 +119,8 @@ def _build_spine(selected_set: set, yaml_set: set, parent_map: dict, recomb_set:
             children[root].append(v)  # recombinant root hangs under B
 
     def kind_of(v):
+        if v in finding_set:
+            return "finding"
         if v in selected_set:
             return "panel_ot" if v in yaml_set else "panel"
         if v in yaml_set:
@@ -130,7 +145,8 @@ def _build_spine(selected_set: set, yaml_set: set, parent_map: dict, recomb_set:
 
 
 def _build_svg(children, root, kind_of, collapse, width=340,
-               recombinant_set=None, variant_status=None):
+               recombinant_set=None, variant_status=None, default_status="pending",
+               per_city=False, legend_states=None, status_detail=None):
     recombinant_set = recombinant_set or set()
     ROW_H, INDENT, X0 = 26, 20, 16
     rows = []
@@ -147,25 +163,44 @@ def _build_svg(children, root, kind_of, collapse, width=340,
             label, real_v = v.replace("_", " "), v
         rows.append((v, label, real_v, depth, kind))
         ch = sorted(children.get(real_v, []), key=lambda x: (
-            0 if kind_of(x) in ("panel", "panel_ot") else
+            0 if kind_of(x) in ("panel", "panel_ot", "finding") else
             1 if kind_of(x) == "yaml" else 2, x))
         for c in ch:
             assign_rows(c, depth + 1)
 
     assign_rows(root, 0)
     row_y = {rows[i][0]: i * ROW_H + ROW_H // 2 for i in range(len(rows))}
-    total_h = len(rows) * ROW_H + 74   # extra room for the two-row legend
+    # legend: the states used in this tree (plus any from the recombinant
+    # section, passed in), wrapped onto as many rows as the width needs
+    _order = list(STATUS_C)
+    _leg_items, _leg_rows, _lx = [], 0, 0
+    for st_ in sorted(set(legend_states or ()), key=_order.index):
+        w = len(STATUS_C[st_][1]) * 6 + 26
+        if _lx and _lx + w > width:
+            _leg_rows, _lx = _leg_rows + 1, 0
+        _leg_items.append((st_, _lx, _leg_rows))
+        _lx += w
+    n_leg = (_leg_rows + 1) if _leg_items else 0
+    leg_top = len(rows) * ROW_H + 14
+    total_h = leg_top + 18 * n_leg + 18 + 22
+
+    def node_state(v, kind):
+        if kind == "finding":
+            return "finding"
+        if kind in ("panel", "panel_ot"):
+            return _status_of(v, variant_status, default_status)
+        return None
 
     def node_color(v, kind):
-        if kind in ("panel", "panel_ot"):
-            return _status_color(v, variant_status)
-        return C[kind]
+        st_ = node_state(v, kind)
+        return STATUS_C[st_][0] if st_ else C[kind]
+
 
     lines_svg, nodes_svg = [], []
 
     for v, _, real_v, depth, kind in rows:
         ch = sorted(children.get(real_v, []), key=lambda x: (
-            0 if kind_of(x) in ("panel", "panel_ot") else
+            0 if kind_of(x) in ("panel", "panel_ot", "finding") else
             1 if kind_of(x) == "yaml" else 2, x))
         if not ch:
             continue
@@ -182,8 +217,9 @@ def _build_svg(children, root, kind_of, collapse, width=340,
         x = X0 + depth * INDENT
         y = row_y[v]
         color = node_color(v, kind)
+        state = node_state(v, kind)
         is_spine = kind == "spine"
-        filled = kind in ("panel", "panel_ot")
+        filled = kind in ("panel", "panel_ot", "finding")
         fw = "600" if filled else "400"
         fsize = "11" if is_spine else "13"
         fcolor = color if not is_spine else "#B4B2A9"
@@ -197,7 +233,16 @@ def _build_svg(children, root, kind_of, collapse, width=340,
                 f'stroke="{branch_color}" stroke-width="1.8"/>'
             )
 
-        if filled:
+        # hover names the state (per-city tree) — colour is never the only cue
+        _det = (status_detail or {}).get(real_v, "")
+        _det = f" — {_det}" if _det else ""
+        nodes_svg.append(f'<g><title>{real_v}: {STATUS_C[state][1]}{_det}</title>'
+                         if state else '<g>')
+        if filled and state in _DASHED:
+            nodes_svg.append(
+                f'<circle cx="{x}" cy="{y}" r="{r}" fill="white" stroke="{color}" '
+                f'stroke-width="1.5" stroke-dasharray="2,2"/>')
+        elif filled:
             nodes_svg.append(f'<circle cx="{x}" cy="{y}" r="{r}" fill="{color}"/>')
         elif is_spine:
             nodes_svg.append(f'<circle cx="{x}" cy="{y}" r="{r}" fill="#D3D1C7"/>')
@@ -245,10 +290,11 @@ def _build_svg(children, root, kind_of, collapse, width=340,
                 f'font-family="-apple-system,BlinkMacSystemFont,\'Segoe UI\',sans-serif">'
                 f'recomb</text>'
             )
+        nodes_svg.append('</g>')
 
     # ── legend (two rows: status swatches, then tracked/OT) ──────────────────
     leg_svg = [
-        f'<line x1="0" y1="{total_h - 60}" x2="{width}" y2="{total_h - 60}" '
+        f'<line x1="0" y1="{leg_top - 8}" x2="{width}" y2="{leg_top - 8}" '
         f'stroke="#E8E6E0" stroke-width="1"/>'
     ]
 
@@ -263,21 +309,19 @@ def _build_svg(children, root, kind_of, collapse, width=340,
                 f'font-family="-apple-system,BlinkMacSystemFont,\'Segoe UI\',sans-serif">'
                 f'{s}</text>')
 
-    # row 1: verdict colours — wording matches the scanner list / check labels
-    row1_y = total_h - 44
-    row1 = [
-        (STATUS_C["confirmed"], False, "confirmed"),
-        (STATUS_C["not_found"], False, "not found in WW"),
-        (STATUS_C["pending"], False, "selected"),
-    ]
-    lx = 0
-    for lc, hollow, ltxt in row1:
-        leg_svg.append(_dot(lx + 5, row1_y, lc, hollow))
-        leg_svg.append(_txt(lx + 13, row1_y, ltxt))
-        lx += len(ltxt) * 6 + 26
+    # states: only the ones that appear, wrapped
+    for st_, lx, ri in _leg_items:
+        lc, ltxt = STATUS_C[st_]
+        ly = leg_top + 18 * ri + 4
+        if st_ in _DASHED:
+            leg_svg.append(f'<circle cx="{lx + 5}" cy="{ly}" r="4" fill="white" '
+                           f'stroke="{lc}" stroke-width="1.5" stroke-dasharray="2,2"/>')
+        else:
+            leg_svg.append(_dot(lx + 5, ly, lc))
+        leg_svg.append(_txt(lx + 13, ly, ltxt))
 
     # row 2: tracked (hollow) + OT chip
-    row2_y = total_h - 26
+    row2_y = leg_top + 18 * n_leg + 4
     lx = 0
     leg_svg.append(_dot(lx + 5, row2_y, "#185FA5", hollow=True))
     leg_svg.append(_txt(lx + 13, row2_y, "tracked, not selected"))
@@ -290,10 +334,12 @@ def _build_svg(children, root, kind_of, collapse, width=340,
     )
     leg_svg.append(_txt(lx + 32, row2_y, "officially tracked"))
 
+    _foot = ("colour = evidence from reads in this city · hover a node"
+             if per_city else "your panel (structure only)")
     leg_svg.append(
         f'<text x="0" y="{total_h - 8}" font-size="9" fill="#B4B2A9" '
         f'font-family="-apple-system,BlinkMacSystemFont,\'Segoe UI\',sans-serif">'
-        f'colour = co-occurrence verdict · black until a scan has run</text>'
+        f'{_foot}</text>'
     )
 
     svg = (
@@ -317,33 +363,28 @@ def render_panel_tree(
     cooc_only: set | None = None,
     scanner_added_for: dict | None = None,
     variant_status: dict | None = None,
+    findings: list[str] | None = None,
+    per_city: bool = False,
+    status_detail: dict | None = None,
 ):
     """
-    Render the global variant tree, colouring selected nodes by their
-    co-occurrence verdict.
+    Render the global variant tree.
 
-    variant_status: {variant: status} from the Co-occurrence check
-        ("confirmed" -> green, "not_found" -> orange, anything else / missing
-        -> black "pending"). Falls back to session_state["acooc_verdicts"].
+    Structural (per_city=False, left column): selected variants are black.
+    Per city (per_city=True): variant_status {variant: state} colours each
+        selected variant (states: see STATUS_C; a variant missing from it is
+        "no data"), and `findings` (scanner nodes not in the panel) are added
+        as red nodes under their place in the tree. Pass the panel that was RUN
+        as selected_variants, so the colours always match the results.
+        status_detail {variant: text} is added to the hover (the evidence).
     (scanner_results, cooc_only, scanner_added_for kept for signature
     compatibility but unused.)
     """
-    if variant_status is None:
-        variant_status = st.session_state.get("acooc_verdicts", {}) or {}
-
-    # Reset the colouring whenever the panel differs from the last completed run
-    # (or nothing has run): every selected node shows black (pending) until a new
-    # run recomputes verdicts. Stops stale colours lingering after the panel,
-    # dates, or locations change.
-    _ran_panel = st.session_state.get("acooc_ran_panel")
-    _has_cooc = bool(st.session_state.get("acooc_cooc_results"))
-    _stale = (
-        _ran_panel is None                                       # nothing run yet
-        or not _has_cooc                                         # run just cleared results
-        or sorted(set(selected_variants)) != sorted(set(_ran_panel))  # panel changed
-    )
-    if _stale:
+    default_status = "no_data" if per_city else "pending"
+    if not per_city:
         variant_status = {}
+    variant_status = variant_status or {}
+    finding_set = {f for f in (findings or []) if f not in set(selected_variants)}
 
     selected_set = set(selected_variants)
     yaml_set = set(yaml_variants)
@@ -352,7 +393,7 @@ def render_panel_tree(
     parent_map = {v: e.get("parent", "") for v, e in raw.items() if e.get("parent")}
 
     all_known = set(raw.keys())
-    for v in list(selected_set) + list(yaml_set):
+    for v in list(selected_set) + list(yaml_set) + list(finding_set):
         if v in parent_map or "." not in v:
             continue
         name_par = v.rsplit(".", 1)[0]
@@ -379,23 +420,30 @@ def render_panel_tree(
             return head
         return None
 
-    _all_panel = set(selected_variants) | set(yaml_variants)
+    _all_panel = set(selected_variants) | set(yaml_variants) | finding_set
     recomb_members = {v for v in _all_panel if _recomb_root(v) is not None}
 
-    result = _build_spine(selected_set, yaml_set, parent_map, recomb_set=recomb_members)
+    result = _build_spine(selected_set, yaml_set, parent_map, recomb_set=recomb_members,
+                          finding_set=finding_set)
 
     # ── main bifurcating tree (non-recombinants) ──
     if result:
         children, root, needed, kind_of, collapse = result
+        _states = {("finding" if v in finding_set
+                     else _status_of(v, variant_status, default_status))
+                    for v in selected_set | finding_set}
         _html, _h = _build_svg(children, root, kind_of, collapse,
-                               variant_status=variant_status)
+                               variant_status=variant_status,
+                               default_status=default_status, per_city=per_city,
+                               legend_states=_states, status_detail=status_detail)
         components.html(_html, height=_h + 20, scrolling=True)
     elif not recomb_members:
         st.caption("Select at least one variant to build the tree.")
         return
 
     # ── separate Recombinants section (grouped by family), coloured by verdict ──
-    selected_recomb = {v for v in selected_variants if v in recomb_members}
+    selected_recomb = {v for v in list(selected_variants) + sorted(finding_set)
+                       if v in recomb_members}
     if selected_recomb:
         from collections import defaultdict as _dd
         fam = _dd(list)
@@ -409,10 +457,18 @@ def render_panel_tree(
                 is_ot = m in set(yaml_variants)
                 badge = " · OT" if is_ot else ""
                 indent = "&nbsp;&nbsp;&nbsp;" if m != froot else ""
-                _mc = _status_color(m, variant_status)
+                _st = ("finding" if m in finding_set
+                       else _status_of(m, variant_status, default_status))
+                _mc, _ml = STATUS_C[_st]
+                _dot_ch = "◌" if _st in _DASHED else "●"
+                _lbl = f" · {_ml}" if per_city else ""
                 lines.append(
-                    f"{indent}<span style='color:{_mc};'>●</span> "
-                    f"<b style='color:{_mc};'>{m}</b>{badge}")
+                    f"{indent}<span title='{m}: {_ml}"
+                    + (f" — {(status_detail or {}).get(m, '')}".replace("'", "&#39;")
+                       if (status_detail or {}).get(m) else "")
+                    + f"'><span style='color:{_mc};'>{_dot_ch}</span> "
+                    f"<b style='color:{_mc};'>{m}</b>{badge}"
+                    f"<span style='color:#9ca3af;font-size:11px;'>{_lbl}</span></span>")
             st.markdown(
                 f"<div style='border:0.5px solid #e5e7eb;border-radius:8px;"
                 f"padding:6px 10px;margin:4px 0;font-size:13px;'>"
