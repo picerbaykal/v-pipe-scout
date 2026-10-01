@@ -94,6 +94,8 @@ CSS = """
 .vt tr.note td { height:auto; padding:6px 8px; color:#6b7280; font-size:13.5px; white-space:normal; }
 .vt .mono { font-family:ui-monospace,Menlo,monospace; font-size:13px; }
 .lg { font-size:13.5px; color:#4b5563; margin:12px 0 2px; line-height:1.9; }
+.lg .lgt { cursor:pointer; font-weight:600; color:#31333f; }
+.lg .hid { display:none; }
 .lg .row { display:flex; flex-wrap:wrap; gap:2px 18px; align-items:center; }
 .lg .t { color:#6b7280; font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.03em;
          min-width:52px; }
@@ -198,8 +200,7 @@ def _scale(d):
     hue = _mix(_SC_LO, _SC_MID, share * 2) if share <= 0.5 else _mix(_SC_MID, _SC_HI, share * 2 - 1)
     depth = 0.3 + 0.7 * (m / n_mk)                 # 30 % strength at the least
     bg = _mix((255, 255, 255), hue, depth)
-    lum = 0.299 * bg[0] + 0.587 * bg[1] + 0.114 * bg[2]
-    fg = "#ffffff" if lum < 150 else "#1f2937"
+    fg = "#111827"                                 # always dark: one ink for all cells
     ink = "#15803d" if share >= 0.7 else AMBER_T if share <= 0.3 else "#4b5563"
     return _fill(_hex(bg), fg), f"{p}/{m}", _hex(bg), ink, share
 
@@ -212,9 +213,9 @@ def _panel_cells(v, per_city, cities, sel):
             out.append(_empty(f"{city_name(c)}: no result", c == sel))
             continue
         style, label, _dot, _ink, share = _scale(d)
-        pct = f" = {share * 100:.0f} % of the measured markers present" if share is not None else ""
-        out.append(_cell(label, style, f"{v} · {city_name(c)}: {_vote_text(d)}{pct}"
-                         + _marker_list(d), c == sel))
+        out.append(_cell(label, style, f"{v} · {city_name(c)}: "
+                         + (_breakdown(d, v, html=False) if d.get("n_markers") else _vote_text(d))
+                         + _marker_details(d, v), c == sel))
     return "".join(out)
 
 
@@ -241,25 +242,81 @@ def _marker_list(d):
     return f" — {r.split(' — ', 1)[1]}" if " — " in r else ""
 
 
-_RULE = ("cell = present / measured markers; colour from orange (none present) to "
-         "green (all present), faint when few of its markers could be measured. "
-         "A marker is present at ≥ 5 % of ≥ 100 covering reads, absent below 1 %, "
-         "otherwise too few reads.")
+def _thr():
+    """The check's marker thresholds, from the config (so the words follow it)."""
+    try:
+        from process.cooc import _check_cfg
+        c = _check_cfg()
+    except Exception:
+        c = {"min_cov": 100, "present_freq": 0.05, "absent_freq": 0.01}
+    return (int(c["min_cov"]), float(c["present_freq"]) * 100, float(c["absent_freq"]) * 100)
 
 
-def _panel_evidence(per_city, sel):
+def _pct(x):
+    return f"{x:g}"
+
+
+def _breakdown(d, v, html=True):
+    """'2 present (≥ 5 % of ≥ 100 reads) · 1 at 1–5 % · 1 on reads unlike X ·
+    1 under 100 reads' — every marker in one of five parts, each part named
+    by its rule. Uses the per-marker groups when the result has them."""
+    mc, pf, af = _thr()
+    mk = d.get("markers")
+    if mk is None:                                   # results from before the groups
+        n_mk, p, a, u = _vote_counts(d)
+        cnt = {"present": p, "absent": a, "low": u}
+    else:
+        cnt = {}
+        for x in mk:
+            cnt[x["group"]] = cnt.get(x["group"], 0) + 1
+    b = (lambda t: f"<b>{t}</b>") if html else (lambda t: t)
+    parts = [(b(f"{cnt.get('present', 0)} present") if cnt.get("present") else "0 present")
+             + f" (≥ {_pct(pf)} % of ≥ {mc} reads)"]
+    if cnt.get("absent"):
+        parts.append(b(f"{cnt['absent']} absent") + f" (< {_pct(af)} % of ≥ {mc} reads)")
+    if cnt.get("between"):
+        parts.append(f"{cnt['between']} at {_pct(af)}–{_pct(pf)} %")
+    if cnt.get("nofit"):
+        parts.append(f"{cnt['nofit']} on reads unlike {v}")
+    if cnt.get("low"):
+        parts.append(f"{cnt['low']} under {mc} reads")
+    return " · ".join(parts)
+
+
+def _marker_details(d, v):
+    """Hover text: every marker with its numbers and what they mean."""
+    mc, pf, af = _thr()
+    mk = d.get("markers")
+    if not mk:
+        return _marker_list(d)
+    why = {"present": "present", "absent": "absent",
+           "between": f"at {_pct(af)}–{_pct(pf)} %: too much for noise, too little to count",
+           "nofit": f"≥ {_pct(pf)} %, but on reads that don't look like {v} at its other "
+                    "positions (another lineage carries it)",
+           "low": f"under {mc} reads"}
+    order = ["present", "absent", "between", "nofit", "low"]
+    out = []
+    for x in sorted(mk, key=lambda x: order.index(x["group"])):
+        f = x.get("freq")
+        num = (f"{f * 100:.1f} % of {x['cov']:,} reads" if f is not None and x["cov"]
+               else "no reads")
+        out.append(f"{x['marker']} {num} — {why[x['group']]}")
+    more = f" · +{len(out) - 10} more" if len(out) > 10 else ""
+    return " — " + " · ".join(out[:10]) + more
+
+
+def _panel_evidence(per_city, sel, v=""):
     d = per_city.get(sel)
     if not d:
         return "<span class='dim'>no result in this city</span>"
     n_mk, p, a, u = _vote_counts(d)
     if n_mk == 0:
         return f"<span class='dim'>{_vote_text(d)}</span>"
-    if p + a == 0:
-        return (f"<span class='dim'>too few reads on all {n_mk} ★ "
-                f"{_pl(n_mk, 'marker')}</span>")
-    share = p / (p + a)
-    return (f"<span data-tip='{_e(_RULE)}'>{_vote_text(d)} — "
-            f"<b>{share * 100:.0f} % present</b></span>")
+    tip = (f"{v} · the cell shows present / (present + absent) = {p}/{p + a}. "
+           f"Markers that are neither present nor absent don't count either way"
+           + _marker_details(d, v))
+    line = _breakdown(d, v)
+    return f"<span data-tip='{_e(tip)}'>{line}</span>"
 
 
 def _panel_tint(per_city, sel):
@@ -474,13 +531,14 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
             pc = {c: verdicts[c][v] for c in cities if v in verdicts.get(c, {})}
             dsel = pc.get(sel) or {}
             _st, _lb, dcol, ncol, share = _scale(dsel) if dsel else (None, "", GREY, "#6b7280", None)
-            tip = (f"{v} · {sname}: " + (_vote_text(dsel) if dsel else "no result")
-                   + (f" = {share * 100:.0f} % present" if share is not None else ""))
+            tip = (f"{v} · {sname}: " + ((_breakdown(dsel, v, html=False)
+                                          if dsel.get("n_markers") else _vote_text(dsel))
+                                         if dsel else "no result"))
             name = f"<span class='nm' style='color:{ncol}'>{_e(v)}</span>{chips}"
             no_meas = share is None and dsel.get("n_markers", 0) > 0
             tc = _tree_cell(r, dcol, "dashed" if (no_meas or not dsel) else "filled", name, tip)
             tint = _panel_tint(pc, sel)
-            cells, ev = _panel_cells(v, pc, cities, sel), _panel_evidence(pc, sel)
+            cells, ev = _panel_cells(v, pc, cities, sel), _panel_evidence(pc, sel, v)
         elif kind == "finding" and v in findings:
             f = findings[v]
             n_sel = int(((f.get("per_city") or {}).get(sel) or {}).get("days", 0) or 0)
@@ -561,8 +619,8 @@ def _ld(style, text):
     return f"<span class='i'><i class='d' style='{style}'></i>{text}</span>"
 
 
-LEGEND = (
-    "<div class='lg'>"
+_LEGEND_ROWS = (
+    ""
     "<div class='row'><span class='t'>Panel</span>"
     "<span class='i'>markers present / measured:"
     + "".join(f"<i class='c' style='width:auto;padding:0 6px;{_scale(d)[0]}'>{_scale(d)[1]}</i>"
@@ -587,7 +645,12 @@ LEGEND = (
     + _ld(f"border:2px solid {TRACKED}", "tracked, not selected")
     + "<span class='i'>panel dots = the cell colours</span>"
     + "<span class='i'>weak = no ★ marker or one genome region only · hover anything for details · "
-      "click a city code to colour the tree</span></div></div>")
+      "click a city code to colour the tree</span></div>")
+
+LEGEND = ("<div class='lg'><div class='row'><span class='lgt' data-grp='legend'>"
+          "<span class='arr'>▸</span> How to read the colours</span>"
+          "<span class='dim'>· or hover anything to see what it means</span></div>"
+          "<div class='g-legend hid'>" + _LEGEND_ROWS + "</div></div>")
 
 
 # ── the structural tree (left column): same rows and look, no evidence ──
@@ -685,7 +748,7 @@ window.vtClick = function (e, send, sendHeight) {
   var g = e.target.closest("[data-grp]");
   if (g) {
     var id = g.getAttribute("data-grp"), open = false;
-    document.querySelectorAll("tr.g-" + id).forEach(function (r) {
+    document.querySelectorAll(".g-" + id).forEach(function (r) {
       open = r.classList.toggle("hid") === false;
     });
     var arr = g.querySelector(".arr");
