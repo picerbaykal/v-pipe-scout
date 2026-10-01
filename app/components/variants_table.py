@@ -70,6 +70,7 @@ CSS = """
 .vt .near-tag { font-size:12px; font-weight:600; margin-left:9px; padding:0 8px; line-height:19px;
                 border-radius:10px; background:#fef3c7; color:#92400e; cursor:pointer; vertical-align:1px; }
 .vt .near-tag:hover { background:#fde68a; }
+.vt .near-tag.off { background:#f3f4f6; color:#9ca3af; font-weight:500; }
 .vt tr.near td { height:28px; }
 .vt .nl { color:#92400e; font-size:13.5px; }
 .vt .nl .mono { font-size:13px; }
@@ -564,14 +565,24 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
         nch = near.get(v) if kind in ("panel", "panel_ot") else None
         if nch:
             gid = f"near{len(body)}"
-            n_tag = sum(1 for c in nch if c["sign"] == "+"
-                        and max(c["per_city"].values(), default=0) >= near_min_days)
-            tip = (f"{v} ± 1 change — reads that are {v} with one mutation more (+) or one "
-                   "less (−), on days with ≥ 20 such reads and ≥ 0.5 % of the day: "
-                   + "; ".join(f"{c['label']} ({max(c['per_city'].values())} d)" for c in nch[:8]))
+            # the tag follows the chosen city, like the Evidence column
+            nch = sorted(nch, key=lambda c: -c["per_city"].get(sel, 0))
+            here = [c for c in nch if c["per_city"].get(sel)]
+            n_tag = sum(1 for c in here if c["sign"] == "+"
+                        and c["per_city"][sel] >= near_min_days)
+            if here:
+                tip = (f"{v} ± 1 change in {sname} — reads that are {v} with one mutation "
+                       "more (+) or one less (−), on days with ≥ 20 such reads and ≥ 0.5 % "
+                       "of the day: " + "; ".join(f"{c['label']} ({c['per_city'][sel]} d)"
+                                                  for c in here[:8]))
+            else:
+                tip = (f"No ± 1 change on any day in {sname}; in other cities: "
+                       + "; ".join(f"{c['label']}" for c in nch[:8]))
             label = (f"◆ {n_tag} {_pl(n_tag, 'change')}" if n_tag
-                     else f"◆ {len(nch)} weak {_pl(len(nch), 'change')}")
-            tag = (f"<span class='near-tag' data-grp='{gid}' data-tip='{_e(tip)}'>"
+                     else f"◆ {len(here)} weak {_pl(len(here), 'change')}" if here
+                     else "◆ elsewhere")
+            cls = "near-tag" + ("" if here else " off")
+            tag = (f"<span class='{cls}' data-grp='{gid}' data-tip='{_e(tip)}'>"
                    f"{label} <span class='arr'>▸</span></span>")
             tc = tc.replace("</span></td>", f"</span>{tag}</td>", 1) if tc.endswith("</span></td>") else tc
         body.append(f"<tr{bg}>{tc}{cells}<td class='ev'>{ev}</td></tr>")
