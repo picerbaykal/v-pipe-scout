@@ -1282,10 +1282,35 @@ def app():
                   _rows = tree_rows(_run_panel, curated_variants, cached_get_pango_loader(),
                                     findings=list(_findings),
                                     recomb_parents=st.session_state["acooc_recomb_parents"])
+                  # ── panel variant ± 1 change (the amber band, per change) ──
+                  from process.near_changes import near_changes, where_in_tree
+                  from process.scanner import (EVIDENCE_MIN_DAYS, EVIDENCE_MIN_READS,
+                                               EVIDENCE_MIN_SHARE)
+                  _near = near_changes({c: _cr_all[c] for c in _cities_all if _cr_all.get(c)},
+                                       _run_panel, EVIDENCE_MIN_READS, EVIDENCE_MIN_SHARE)
+                  if _near:
+                      _pl_raw = cached_get_pango_loader().get_raw_data()
+                      if "acooc_pango_children" not in st.session_state:
+                          _kids = {}
+                          for _l, _e in _pl_raw.items():
+                              if _e.get("parent"):
+                                  _kids.setdefault(_e["parent"], []).append(_l)
+                          st.session_state["acooc_pango_children"] = _kids
+                      _sigs_n = st.session_state.get("acooc_all_sigs_cache")
+                      if _sigs_n is None:
+                          _ld = cached_get_pango_loader()
+                          _sigs_n = {l: _ld.get_signature(l) for l in _pl_raw}
+                          st.session_state["acooc_all_sigs_cache"] = _sigs_n
+                      for _v, _chs in _near.items():
+                          for _ch in _chs:
+                              _ch["where"] = where_in_tree(
+                                  _v, _ch["sign"], _ch["mut"], _sigs_n,
+                                  st.session_state["acooc_pango_children"])
                   _view = _vt.build(_cities_all, _tcity, _rows, _verdicts_by_city, _findings,
                                     current_panel=set(all_selected_variants),
                                     ot=curated_variants, novel=_nov_list, broad=_broad,
-                                    novel_rest=_human_reads(_nov_rest) if _nov_rest else None)
+                                    novel_rest=_human_reads(_nov_rest) if _nov_rest else None,
+                                    near=_near, near_min_days=EVIDENCE_MIN_DAYS)
                   _click = _vt.render(_view, key="acooc_variants_view")
                   if _click and _click.get("t") != st.session_state.get("acooc_vv_last_click"):
                       st.session_state["acooc_vv_last_click"] = _click.get("t")

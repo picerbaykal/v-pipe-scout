@@ -8,7 +8,8 @@ the per-city evidence in ONE table (2026-09-30).
             recombinant families (XEC, XFG, XDV → NB.1.8.1 …) under their
             own root, not under B; "+ Add" next to a confirmed finding
   cities    one cell per city — click a city code to colour the tree by it
-  Evidence  markers / regions / ⚠ — the facts to judge
+  Evidence  for the chosen city: what was counted (markers voted, days,
+            ★ markers, genome regions) and, in words, when a fact is weak
 
 Below the tree: unnamed signal — novel patterns (recurring, then 1-day, in
 expandable groups) and patterns too broad to name, each with per-city days.
@@ -27,7 +28,7 @@ from pathlib import Path
 GREEN = "#16a34a"          # panel variant present
 AMBER = "#f59e0b"          # panel variant not found (fill / dot)
 AMBER_T = "#b45309"        # … as text
-VIOLET = "#7c3aed"         # markers disagree (panel) · named only (finding)
+VIOLET = "#7c3aed"         # mixed markers (panel) · named only (finding)
 GREY = "#9ca3af"           # no ★ marker / no data
 RED = "#dc2626"            # found, not in panel
 BLUE = "#2563eb"           # novel
@@ -37,7 +38,7 @@ TRACKED = "#185FA5"
 _PANEL = {  # check state -> (fill, text-on-fill, symbol, label, name colour)
     "confirmed": (GREEN, "#fff", "✓", "present", GREEN),
     "not_found": (AMBER, "#422006", "✗", "not found", AMBER_T),
-    "inconsistent": (VIOLET, "#fff", "≠", "markers disagree", VIOLET),
+    "inconsistent": (VIOLET, "#fff", "±", "mixed", VIOLET),
     "no_marker": ("#e5e7eb", "#4b5563", "·", "no ★ marker", "#6b7280"),
     "no_data": (None, GREY, "?", "too few reads", "#6b7280"),
 }
@@ -66,6 +67,12 @@ CSS = """
 .vt .spl { color:#9a988f; font-size:12.5px; display:inline-block; max-width:280px; overflow:hidden;
            text-overflow:ellipsis; vertical-align:middle; }
 .vt .par { color:#8a4e82; font-size:12.5px; margin-left:8px; }
+.vt .near-tag { font-size:12px; font-weight:600; margin-left:9px; padding:0 8px; line-height:19px;
+                border-radius:10px; background:#fef3c7; color:#92400e; cursor:pointer; vertical-align:1px; }
+.vt .near-tag:hover { background:#fde68a; }
+.vt tr.near td { height:28px; }
+.vt .nl { color:#92400e; font-size:13.5px; }
+.vt .nl .mono { font-size:13px; }
 .vt .grp-root { color:#6b7280; font-size:12.5px; font-weight:700; letter-spacing:.02em; }
 .vt .chip { font-size:11px; padding:0 7px; border-radius:8px; margin-left:6px; vertical-align:1px;
             background:#f1efe8; color:#5f5e5a; }
@@ -91,7 +98,7 @@ CSS = """
 .lg .t { color:#6b7280; font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.03em;
          min-width:52px; }
 .lg span.i { display:inline-flex; align-items:center; gap:6px; }
-.lg .c { display:inline-flex; align-items:center; justify-content:center; width:24px; height:19px;
+.lg .c { font-style:normal; display:inline-flex; align-items:center; justify-content:center; width:24px; height:19px;
          border-radius:4px; font-size:12px; font-weight:700; box-sizing:border-box; }
 .lg .d { display:inline-block; width:11px; height:11px; border-radius:50%; box-sizing:border-box; }
 </style>
@@ -131,6 +138,8 @@ S_NAMED = _fill("#ede9fe", VIOLET)
 S_NOVEL = _fill(BLUE, "#fff")
 S_NOVEL1 = _dashed(BLUE)
 S_BROAD = _fill("#e2e8f0", "#334155")
+S_NEAR = _fill("#fde68a", "#78350f")
+S_NEAR1 = _dashed("#d97706")
 
 
 def _cell(label, style, tip, sel) -> str:
@@ -151,10 +160,49 @@ def _range(vals):
 
 
 def _pl(n, word):
-    return word if n == 1 else word + "s"
+    if n == 1:
+        return word
+    if word.endswith("y") and word[-2:-1] not in "aeiou":
+        return word[:-1] + "ies"           # city → cities, but day → days
+    return word + "s"
 
 
 # ── per-row pieces ─────────────────────────────────────────────────────────
+
+# ── panel cells: a colour scale instead of cut-offs (2026-10-01) ──────────
+# hue   = share of the MEASURED markers that are present: orange (0 %) →
+#         pale grey (50 %) → green (100 %)
+# depth = share of ALL its markers that could be measured: faint when few
+#         were (2 of 5), full when all were
+_SC_LO, _SC_MID, _SC_HI = (245, 158, 11), (209, 213, 219), (22, 163, 74)
+
+
+def _hex(rgb):
+    return "#%02x%02x%02x" % tuple(int(round(x)) for x in rgb)
+
+
+def _mix(a, b, t):
+    return tuple(a[i] + (b[i] - a[i]) * t for i in range(3))
+
+
+def _scale(d):
+    """(cell style, label, dot colour, name colour, share present or None)
+    for one city's check result."""
+    n_mk, p, a, u = _vote_counts(d)
+    if n_mk == 0:
+        return S_NOMARK, "·", GREY, "#6b7280", None
+    m = p + a
+    if m == 0:
+        return S_NODATA, "?", GREY, "#6b7280", None
+    share = p / m
+    hue = _mix(_SC_LO, _SC_MID, share * 2) if share <= 0.5 else _mix(_SC_MID, _SC_HI, share * 2 - 1)
+    depth = 0.3 + 0.7 * (m / n_mk)                 # 30 % strength at the least
+    bg = _mix((255, 255, 255), hue, depth)
+    lum = 0.299 * bg[0] + 0.587 * bg[1] + 0.114 * bg[2]
+    fg = "#ffffff" if lum < 150 else "#1f2937"
+    ink = "#15803d" if share >= 0.7 else AMBER_T if share <= 0.3 else "#4b5563"
+    return _fill(_hex(bg), fg), f"{p}/{m}", _hex(bg), ink, share
+
 
 def _panel_cells(v, per_city, cities, sel):
     out = []
@@ -163,32 +211,64 @@ def _panel_cells(v, per_city, cities, sel):
         if not d:
             out.append(_empty(f"{city_name(c)}: no result", c == sel))
             continue
-        fill, fg, sym, lab, _ = _PANEL.get(d["state"], _PANEL["no_data"])
-        style = _fill(fill, fg) if fill else S_NODATA
-        out.append(_cell(sym, style, f"{v} · {city_name(c)}: {lab} — {d.get('reason', '')}",
-                         c == sel))
+        style, label, _dot, _ink, share = _scale(d)
+        pct = f" = {share * 100:.0f} % of the measured markers present" if share is not None else ""
+        out.append(_cell(label, style, f"{v} · {city_name(c)}: {_vote_text(d)}{pct}"
+                         + _marker_list(d), c == sel))
     return "".join(out)
 
 
-def _panel_evidence(per_city):
-    n_mk = max((d.get("n_markers", 0) for d in per_city.values()), default=0)
+def _vote_counts(d):
+    n_mk, n_meas, n_p = d.get("n_markers", 0), d.get("n_measured", 0), d.get("n_present", 0)
+    n_meas = min(n_meas, n_mk)
+    n_p = min(n_p, n_meas)
+    return n_mk, n_p, n_meas - n_p, n_mk - n_meas
+
+
+def _vote_text(d):
+    """'1 present · 3 absent · 1 too few reads (of 5 ★ markers)' — exactly what
+    the verdict voted on: present ÷ (present + absent); ≥ 75 % present,
+    ≤ 25 % not found, in between mixed."""
+    n_mk, p, a, u = _vote_counts(d)
     if n_mk == 0:
-        return "<span class='dim'>no ★ marker — can't be checked on its own</span>"
-    meas = [d.get("n_present") for d in per_city.values() if d.get("n_measured")]
-    if not meas:
-        return f"<span class='dim'>too few reads on its {n_mk} {_pl(n_mk, 'marker')}</span>"
-    return f"{_range(meas)} of {n_mk} {_pl(n_mk, 'marker')} present"
+        return "no ★ marker — it can't be told apart from related lineages on its own"
+    parts = [f"{p} present", f"{a} absent"] + ([f"{u} too few reads"] if u else [])
+    return " · ".join(parts) + f" (of {n_mk} ★ {_pl(n_mk, 'marker')})"
 
 
-def _panel_tint(per_city):
-    states = [d["state"] for d in per_city.values()]
-    if "confirmed" in states:
-        return GREEN
-    if "not_found" in states:
-        return AMBER
-    if "inconsistent" in states:
-        return VIOLET
-    return None
+def _marker_list(d):
+    r = d.get("reason", "")
+    return f" — {r.split(' — ', 1)[1]}" if " — " in r else ""
+
+
+_RULE = ("cell = present / measured markers; colour from orange (none present) to "
+         "green (all present), faint when few of its markers could be measured. "
+         "A marker is present at ≥ 5 % of ≥ 100 covering reads, absent below 1 %, "
+         "otherwise too few reads.")
+
+
+def _panel_evidence(per_city, sel):
+    d = per_city.get(sel)
+    if not d:
+        return "<span class='dim'>no result in this city</span>"
+    n_mk, p, a, u = _vote_counts(d)
+    if n_mk == 0:
+        return f"<span class='dim'>{_vote_text(d)}</span>"
+    if p + a == 0:
+        return (f"<span class='dim'>too few reads on all {n_mk} ★ "
+                f"{_pl(n_mk, 'marker')}</span>")
+    share = p / (p + a)
+    return (f"<span data-tip='{_e(_RULE)}'>{_vote_text(d)} — "
+            f"<b>{share * 100:.0f} % present</b></span>")
+
+
+def _panel_tint(per_city, sel):
+    """Row tint: the chosen city's cell colour (none when not measured)."""
+    d = per_city.get(sel)
+    if not d:
+        return None
+    _style, _label, dot, _ink, share = _scale(d)
+    return None if share is None else dot
 
 
 def _finding_cells(v, f, cities, sel):
@@ -202,31 +282,49 @@ def _finding_cells(v, f, cities, sel):
         n = int(d.get("days", 0) or 0)
         stars, regs = d.get("stars") or [], d.get("regions") or []
         if n == 0:
-            out.append(_cell("0", S_NAMED, f"{v} · {city_name(c)}: named only — its mutations "
-                             "are shared with related lineages, no ★ marker on reads", c == sel))
+            out.append(_cell("0", S_NAMED, f"{v} · {city_name(c)}: named only — reads point to "
+                             f"{v}, but they also fit related lineages, so no day has evidence "
+                             f"specific to {v}", c == sel))
             continue
         tip = (f"{v} · {city_name(c)}: evidence on {n} {_pl(n, 'day')} · "
                + (f"{len(stars)} ★ {_pl(len(stars), 'marker')} ({', '.join(stars[:5])})"
                   if stars else "no ★ marker (combinations only)")
-               + (f" · {len(regs)} {_pl(len(regs), 'region')}: "
+               + (f" · {len(regs)} genome {_pl(len(regs), 'region')}: "
                   + ", ".join(f"{lo:,}–{hi:,}" for lo, hi in regs[:5]) if regs else ""))
         out.append(_cell(n, S_FOUND if n >= 2 else S_ONEDAY, tip, c == sel))
     return "".join(out)
 
 
-def _finding_evidence(f):
+_REGION_TIP = ("genome regions = separate stretches of the genome where evidence reads "
+               "were seen (each read covers ~250 bases; overlapping reads merge into one "
+               "region). More regions = independent pieces of the genome agree, so a "
+               "PCR artefact or one convergent mutation is unlikely.")
+
+
+def _finding_evidence(f, sel):
     pc = f.get("per_city", {}) or {}
-    ev = [d for d in pc.values() if int(d.get("days", 0) or 0) >= 1]
-    if f.get("status") == "named" or not ev:
-        return "<span class='dim'>named only — shared mutations, no ★ marker</span>"
-    conf = f.get("status") == "confirmed"
-    n_star = [len(d.get("stars") or []) for d in ev]
-    n_reg = [len(d.get("regions") or []) for d in ev]
-    weak = conf and (max(n_star) == 0 or max(n_reg) <= 1)
-    star = (f"{_range(n_star)} ★ {_pl(max(n_star), 'marker')}" if max(n_star)
-            else "combinations only")
-    txt = f"{star} · {_range(n_reg)} {_pl(max(n_reg), 'region')}"
-    return f"<b>{txt} ⚠</b>" if weak else txt
+    d = pc.get(sel)
+    n_cities = sum(1 for x in pc.values() if int(x.get("days", 0) or 0) >= 1)
+    if d is None:
+        where = (f" · evidence in {n_cities} other {_pl(n_cities, 'city')}" if n_cities else "")
+        return f"<span class='dim'>not seen in this city{where}</span>"
+    n = int(d.get("days", 0) or 0)
+    if n == 0:
+        return ("<span class='dim'>named only — reads point to it but also fit related "
+                "lineages; no day with specific evidence</span>")
+    stars, regs = d.get("stars") or [], d.get("regions") or []
+    txt = (f"{n} {_pl(n, 'day')} · "
+           + (f"{len(stars)} ★ {_pl(len(stars), 'marker')}" if stars else "combinations only")
+           + f" · <span data-tip='{_e(_REGION_TIP)}'>{len(regs)} genome "
+           f"{_pl(len(regs), 'region')}</span>")
+    weak = []
+    if not stars:
+        weak.append("no ★ marker")
+    if len(regs) <= 1:
+        weak.append("one region only")
+    if weak and n >= 2:
+        txt += f" — <b>weak: {', '.join(weak)}</b>"
+    return txt
 
 
 def _tree_cell(r, color, dot_kind, name_html, tip):
@@ -286,8 +384,55 @@ def _pattern_row(muts, days, cities, sel, style_full, style_one, color, evidence
 
 # ── the whole view ─────────────────────────────────────────────────────────
 
+def _near_rows(r, v, changes, cities, sel, gid, n_cols):
+    """The folded "± 1 change" rows under panel variant v (hidden until its
+    tag is clicked)."""
+    d = r["depth"] + 1
+    guides = (r["guides"] + [not r["last"]]) if r["depth"] >= 1 else []
+    out = []
+    for i, c in enumerate(changes):
+        last = (i == len(changes) - 1) and not r["has_children"]
+        pr = {"depth": d, "guides": guides, "last": last, "has_children": False}
+        gain = c["sign"] == "+"
+        name = (f"<span class='nl'>{_e(v)} {'+' if gain else '−'} "
+                f"<span class='mono'>{_e(c['mut'])}</span></span>")
+        what = (f"reads = {v} plus {c['mut']}" if gain
+                else f"reads = {v} but the reference base at {c['mut'][:-1]} (no {c['mut']})")
+        tc = _tree_cell(pr, AMBER, "dashed" if not gain else "ring", name,
+                        f"{c['label']}: {what}. One mutation only — a hint to watch, not a finding.")
+        cells = []
+        for city in cities:
+            n = c["per_city"].get(city)
+            reads = c.get("reads", {}).get(city, 0)
+            if not n:
+                cells.append(_empty(f"{city_name(city)}: "
+                                    + (f"{reads:,} reads, no day above the day rule" if reads
+                                       else "not seen"), city == sel))
+                continue
+            cells.append(_cell(n, S_NEAR if n >= 2 else S_NEAR1,
+                               f"{c['label']} · {city_name(city)}: {n} {_pl(n, 'day')} "
+                               f"({reads:,} reads)", city == sel))
+        n_sel = c["per_city"].get(sel, 0)
+        w = c.get("where")
+        if w:
+            more = (f" and {w['n_roots'] - len(w['roots'])} more" if w["n_roots"] > len(w["roots"])
+                    else "")
+            place = (f"{'gained' if gain else 'lost'} in {', '.join(w['roots'])}{more} "
+                     f"({w['n_lineages']} {_pl(w['n_lineages'], 'lineage')} with it)")
+        else:
+            place = (f"no designated sublineage of {v} {'carries' if gain else 'lacks'} it"
+                     + (" — not designated yet?" if gain else
+                        " — reversion, or reads at a coverage edge"))
+        ev = (f"{n_sel} {_pl(n_sel, 'day')} here · " if n_sel else
+              "<span class='dim'>not in this city · </span>") + place
+        if not gain:
+            ev = f"<span class='dim'>{ev}</span>"
+        out.append(f"<tr class='near g-{gid} hid'>{tc}{''.join(cells)}<td class='ev'>{ev}</td></tr>")
+    return out
+
+
 def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
-          novel=(), broad=(), novel_rest=None) -> str:
+          novel=(), broad=(), novel_rest=None, near=None, near_min_days=2) -> str:
     """cities: city names in column order; sel: the chosen city.
     rows: components.abundance_cooc_tree.tree_rows(...).
     verdicts: {city: {variant: {state, reason, n_present, n_measured, n_markers}}}.
@@ -295,7 +440,11 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
       stars, regions}}, addable: bool}}.
     current_panel: variants in the panel now (an added finding shows "added").
     novel: [(mutations, {city: days})]; broad: [(mutations, {city: days},
-      n_lineages, ancestor)]; novel_rest: reads text of novel patterns not listed."""
+      n_lineages, ancestor)]; novel_rest: reads text of novel patterns not listed.
+    near: {panel variant: [change, …]} from process.near_changes (each with
+      "where"); a variant with some gets a tag "◆ N changes" (gains counting
+      on >= near_min_days days) that unfolds them."""
+    near = near or {}
     ot = set(ot)
     n_c = len(cities)
     n_cols = n_c + 2
@@ -303,7 +452,7 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
             + "".join(f"<th class='cc{' sel' if c == sel else ''}'><button data-city='{_e(c)}' "
                       f"data-tip='{_e(city_name(c))} — click to colour the tree by this city'>"
                       f"{_e(city_code(c))}</button></th>" for c in cities)
-            + "<th style='padding-left:12px'>Evidence</th></tr>")
+            + f"<th style='padding-left:12px'>Evidence · {_e(city_name(sel))}</th></tr>")
     body = []
     sname = city_name(sel)
     for r in rows:
@@ -323,14 +472,15 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
             continue
         if kind in ("panel", "panel_ot"):
             pc = {c: verdicts[c][v] for c in cities if v in verdicts.get(c, {})}
-            st_ = (pc.get(sel) or {}).get("state", "no_data")
-            fill, _fg, _sym, lab, ncol = _PANEL.get(st_, _PANEL["no_data"])
-            tip = f"{v} · {sname}: {lab} — {(pc.get(sel) or {}).get('reason', 'no result')}"
+            dsel = pc.get(sel) or {}
+            _st, _lb, dcol, ncol, share = _scale(dsel) if dsel else (None, "", GREY, "#6b7280", None)
+            tip = (f"{v} · {sname}: " + (_vote_text(dsel) if dsel else "no result")
+                   + (f" = {share * 100:.0f} % present" if share is not None else ""))
             name = f"<span class='nm' style='color:{ncol}'>{_e(v)}</span>{chips}"
-            dcol = GREY if st_ in ("no_marker", "no_data") else fill
-            tc = _tree_cell(r, dcol, "dashed" if st_ == "no_data" else "filled", name, tip)
-            tint = _panel_tint(pc)
-            cells, ev = _panel_cells(v, pc, cities, sel), _panel_evidence(pc)
+            no_meas = share is None and dsel.get("n_markers", 0) > 0
+            tc = _tree_cell(r, dcol, "dashed" if (no_meas or not dsel) else "filled", name, tip)
+            tint = _panel_tint(pc, sel)
+            cells, ev = _panel_cells(v, pc, cities, sel), _panel_evidence(pc, sel)
         elif kind == "finding" and v in findings:
             f = findings[v]
             n_sel = int(((f.get("per_city") or {}).get(sel) or {}).get("days", 0) or 0)
@@ -347,13 +497,28 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
             name = (f"<span class='nm' style='color:{col}'>{_e(v)}</span>{chips}{btn}")
             tc = _tree_cell(r, col, dk, name, tip)
             tint = RED if f.get("status") == "confirmed" else None
-            cells, ev = _finding_cells(v, f, cities, sel), _finding_evidence(f)
+            cells, ev = _finding_cells(v, f, cities, sel), _finding_evidence(f, sel)
         else:  # tracked, not selected
             name = f"<span style='color:{TRACKED}'>{_e(v)}</span>{chips}"
             tc = _tree_cell(r, TRACKED, "ring", name, f"{v}: officially tracked, not in your panel")
             tint, cells, ev = None, f"<td colspan='{n_c}'></td>", "<span class='dim'>not in the run</span>"
-        bg = f" style='background:{tint}14'" if tint else ""
+        bg = f" style='background:{tint}{'22' if kind in ('panel', 'panel_ot') else '14'}'" if tint else ""
+        nch = near.get(v) if kind in ("panel", "panel_ot") else None
+        if nch:
+            gid = f"near{len(body)}"
+            n_tag = sum(1 for c in nch if c["sign"] == "+"
+                        and max(c["per_city"].values(), default=0) >= near_min_days)
+            tip = (f"{v} ± 1 change — reads that are {v} with one mutation more (+) or one "
+                   "less (−), on days with ≥ 20 such reads and ≥ 0.5 % of the day: "
+                   + "; ".join(f"{c['label']} ({max(c['per_city'].values())} d)" for c in nch[:8]))
+            label = (f"◆ {n_tag} {_pl(n_tag, 'change')}" if n_tag
+                     else f"◆ {len(nch)} weak {_pl(len(nch), 'change')}")
+            tag = (f"<span class='near-tag' data-grp='{gid}' data-tip='{_e(tip)}'>"
+                   f"{label} <span class='arr'>▸</span></span>")
+            tc = tc.replace("</span></td>", f"</span>{tag}</td>", 1) if tc.endswith("</span></td>") else tc
         body.append(f"<tr{bg}>{tc}{cells}<td class='ev'>{ev}</td></tr>")
+        if nch:
+            body += _near_rows(r, v, nch[:8], cities, sel, gid, n_cols)
 
     # ── unnamed signal ──
     rec = [(m, d) for m, d in novel if max(d.values(), default=0) >= 2]
@@ -399,9 +564,13 @@ def _ld(style, text):
 LEGEND = (
     "<div class='lg'>"
     "<div class='row'><span class='t'>Panel</span>"
-    + _li(S_PRESENT, "✓", "present")
-    + _li(S_NOTFOUND, "✗", "not found")
-    + _li(S_DISAGREE, "≠", "markers disagree")
+    "<span class='i'>markers present / measured:"
+    + "".join(f"<i class='c' style='width:auto;padding:0 6px;{_scale(d)[0]}'>{_scale(d)[1]}</i>"
+              for d in ({"n_markers": 4, "n_measured": 4, "n_present": 0},
+                        {"n_markers": 4, "n_measured": 4, "n_present": 2},
+                        {"n_markers": 4, "n_measured": 4, "n_present": 4},
+                        {"n_markers": 5, "n_measured": 2, "n_present": 2}))
+    + " the last: only 2 of 5 markers measured, so faint</span>"
     + _li(S_NOMARK, "·", "no ★ marker")
     + _li(S_NODATA, "?", "too few reads")
     + "</div><div class='row'><span class='t'>Found</span>"
@@ -410,13 +579,14 @@ LEGEND = (
     + _li(S_NAMED, "0", "named only (shared mutations)")
     + _li(S_NOVEL, "3", "novel · days")
     + _li(S_BROAD, "2", "too broad to name · days")
+    + _li(S_NEAR, "3", "◆ panel variant ± 1 change · days (a hint)")
     + "</div><div class='row'><span class='t'>Tree</span>"
     + _ld(f"background:{RED}", "found in this city")
     + _ld(f"border:1.8px dashed {RED}", "1 day here")
     + _ld(f"border:2px solid {RED}", "not seen here")
     + _ld(f"border:2px solid {TRACKED}", "tracked, not selected")
     + "<span class='i'>panel dots = the cell colours</span>"
-    + "<span class='i'>⚠ weak fact to judge · hover anything for details · "
+    + "<span class='i'>weak = no ★ marker or one genome region only · hover anything for details · "
       "click a city code to colour the tree</span></div></div>")
 
 
@@ -495,6 +665,37 @@ _FRONTEND = Path(__file__).parent / "variants_table_frontend"
 _COMPONENT = None
 
 
+# Click behaviour, sent with every render (index.html runs it once per
+# change): "+ Add", a city code, and unfolding a group / "± 1 change" tag.
+CLICK_JS = """
+window.vtClick = function (e, send, sendHeight) {
+  var b = e.target.closest("[data-add]");
+  if (b) {
+    b.disabled = true; b.textContent = "adding…";
+    send("streamlit:setComponentValue",
+         {value: {add: b.getAttribute("data-add"), t: Date.now()}, dataType: "json"});
+    return;
+  }
+  var c = e.target.closest("[data-city]");
+  if (c) {
+    send("streamlit:setComponentValue",
+         {value: {city: c.getAttribute("data-city"), t: Date.now()}, dataType: "json"});
+    return;
+  }
+  var g = e.target.closest("[data-grp]");
+  if (g) {
+    var id = g.getAttribute("data-grp"), open = false;
+    document.querySelectorAll("tr.g-" + id).forEach(function (r) {
+      open = r.classList.toggle("hid") === false;
+    });
+    var arr = g.querySelector(".arr");
+    if (arr) arr.textContent = open ? "▾" : "▸";
+    sendHeight();
+  }
+};
+"""
+
+
 def render(view_html: str, key: str):
     """Show the view; returns the last click, {"add": node, "t": ms} or
     {"city": name, "t": ms} (it stays the value on later reruns — compare t)."""
@@ -502,4 +703,4 @@ def render(view_html: str, key: str):
     if _COMPONENT is None:
         import streamlit.components.v1 as components
         _COMPONENT = components.declare_component("variants_table", path=str(_FRONTEND))
-    return _COMPONENT(html=view_html, key=key, default=None)
+    return _COMPONENT(html=view_html, js=CLICK_JS, key=key, default=None)

@@ -24,33 +24,23 @@ function sendHeight() {
   var h = Math.ceil(document.documentElement.scrollHeight);
   if (h !== lastH) { lastH = h; send("streamlit:setFrameHeight", {height: h}); }
 }
-var lastHtml = null;
+var lastHtml = null, lastJs = null;
+// The click behaviour comes from Python (args.js, see variants_table.py), so
+// changes to it never need a new copy of this file in the browser cache. It
+// defines window.vtClick(event, send, sendHeight).
 window.addEventListener("message", function (e) {
   var d = e.data;
   if (!d || d.type !== "streamlit:render") return;
-  var html = (d.args || {}).html || "";
+  var args = d.args || {};
+  var html = args.html || "";
   if (html !== lastHtml) { document.getElementById("root").innerHTML = html; lastHtml = html; }
+  if (args.js && args.js !== lastJs) {
+    try { (new Function(args.js))(); lastJs = args.js; } catch (err) { console.error(err); }
+  }
   sendHeight();
 });
 document.addEventListener("click", function (e) {
-  var b = e.target.closest("[data-add]");
-  if (b) {
-    b.disabled = true; b.textContent = "adding…";
-    send("streamlit:setComponentValue", {value: {add: b.getAttribute("data-add"), t: Date.now()}, dataType: "json"});
-    return;
-  }
-  var c = e.target.closest("[data-city]");
-  if (c) {
-    send("streamlit:setComponentValue", {value: {city: c.getAttribute("data-city"), t: Date.now()}, dataType: "json"});
-    return;
-  }
-  var g = e.target.closest("tr.grp");
-  if (g) {   // show / hide the rows of a group
-    var id = g.getAttribute("data-grp"), open = false;
-    document.querySelectorAll("tr.g-" + id).forEach(function (r) { open = r.classList.toggle("hid") === false; });
-    g.querySelector(".arr").textContent = open ? "▾" : "▸";
-    sendHeight();
-  }
+  if (window.vtClick) window.vtClick(e, send, sendHeight);
 });
 // hover: one tooltip that stays inside the frame
 var tip = document.getElementById("tip");
