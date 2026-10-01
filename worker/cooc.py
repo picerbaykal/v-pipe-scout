@@ -165,6 +165,27 @@ def _sig_positions(sig: set) -> set:
     return out
 
 
+def add_panel_positions(amp_dict: Dict[int, list], variant_signatures: Dict[str, set]) -> int:
+    """Add every panel variant's substitutions ("{pos}{alt}") to amp_dict
+    in place; returns how many mutations were new."""
+    added = 0
+    for sig in variant_signatures.values():
+        for m in sig or ():
+            mm = re.match(r"^(\d+)([ACGT])$", m)
+            if not mm:
+                continue
+            pos, alt = int(mm.group(1)), mm.group(2)
+            alts = amp_dict.setdefault(pos, [])
+            if alt in alts:
+                continue
+            if isinstance(alts, set):
+                alts.add(alt)
+            else:
+                alts.append(alt)
+            added += 1
+    return added
+
+
 def run_cooc_panel_completeness(
     location: str,
     start_date: datetime,
@@ -252,6 +273,18 @@ def run_cooc_panel_completeness(
         f"[cooc][{location}] amp_dict from "
         f"{'reference list' if reference_variants else 'panel'}: "
         f"{len(amp_dict)} positions"
+    )
+
+    # Panel variants' own mutations are completeness positions too
+    # (2026-09-30): before, a panel variant outside the reference list (e.g.
+    # PJ.2) had its own positions fetched for the check only — completeness
+    # and the scanner never saw them, so its parent's reads counted as
+    # "explained" by it and nothing beyond it could be named.
+    _n_before = len(amp_dict)
+    _added_muts = add_panel_positions(amp_dict, variant_signatures)
+    logger.info(
+        f"[cooc][{location}] panel signatures: +{_added_muts} mutations, "
+        f"+{len(amp_dict) - _n_before} positions in completeness"
     )
 
     if get_cooc_setting("scope.discriminating_positions_only", default=False):
