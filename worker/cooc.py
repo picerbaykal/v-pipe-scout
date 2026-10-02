@@ -217,48 +217,62 @@ def data_positions(location: str, start_date: datetime, end_date: datetime,
     return out
 
 
-def variant_check(location: str, start_date: datetime, end_date: datetime,
-                  variant: str, panel: List[str],
-                  progress_callback: Optional[Callable] = None) -> dict:
-    """"Investigate a variant" -> "Check in data" (2026-10-02): read counts at
-    one lineage's ★ markers in one city, as the panel check would collect them
-    if the lineage were added to `panel`. Reads only the lineage's own signature
-    positions (markers + neighbours for the link test), so it is quick.
+def lineages_check(location: str, start_date: datetime, end_date: datetime,
+                   variants: List[str], panel: List[str],
+                   progress_callback: Optional[Callable] = None, step: int = 2) -> dict:
+    """Read counts at the ★ markers of several lineages in one city, as the
+    panel check collects them for panel variants (2026-10-02). Each lineage's
+    markers are computed as if it alone were added to `panel`. Reads only the
+    lineages' own signature positions (markers + neighbours for the link test).
 
-    Returns {variant, markers, dates, per_date: {date: {marker: [cov, hit,
-    link_n, link_ok]}}}."""
+    Used by "Check in data" (one lineage) and by the deep scan for the lineages
+    it found, so their table cells show the same measure as the panel's.
+
+    Returns {dates, per_variant: {v: {markers, per_date: {date: {marker:
+    [cov, hit, link_n, link_ok]}}}}}."""
     pango_loader = PangoLoader(get_pango_summary_path())
-    vs = _build_variant_signatures(list(dict.fromkeys(list(panel or []) + [variant])),
-                                   pango_loader, _COWWID_VARIANTS)
-    markers = specific_markers(vs, get_all_lineage_signatures(),
-                               get_panel_parent_map()).get(variant, [])
+    all_sigs, parents = get_all_lineage_signatures(), get_panel_parent_map()
+    panel = list(panel or [])
+    sigs, markers = {}, {}
+    for v in dict.fromkeys(variants):
+        vs = _build_variant_signatures(list(dict.fromkeys(panel + [v])), pango_loader,
+                                       _COWWID_VARIANTS)
+        sigs[v] = vs.get(v, set())
+        try:
+            markers[v] = specific_markers(vs, all_sigs, parents).get(v, [])
+        except Exception as e:
+            logger.warning(f"[cooc][{location}] markers of {v} failed: {e}")
+            markers[v] = []
     client = WiseLoculusLapis(get_wiseloculus_url())
-    out = {"variant": variant, "markers": markers, "dates": [], "per_date": {}}
+    out = {"dates": [], "per_variant": {v: {"markers": markers[v], "per_date": {}}
+                                        for v in markers}}
+    todo = [v for v in markers if markers[v]]
 
     async def _run():
         dates = await client._get_sampling_dates(location, (start_date, end_date))
         out["dates"] = sorted(str(d)[:10] for d in dates)
-        if not markers or not dates:
+        if not todo or not dates:
             return
-        positions = sorted(_sig_positions(vs[variant]))
+        positions = sorted(set().union(*(_sig_positions(sigs[v]) for v in todo)))
         batches = [positions[i:i + 500] for i in range(0, len(positions), 500)]
         stats: Dict[str, dict] = {}
         import aiohttp
         from api.wiseloculus import MAX_CONCURRENT_CONNECTIONS, MAX_CONNECTIONS_PER_HOST
         sem = asyncio.Semaphore(BATCH_CONCURRENCY)
         n_q, done_q = len(batches) * len(dates), [0]
+        vsig = {v: sigs[v] for v in todo}
+        vmk = {v: markers[v] for v in todo}
 
         async def _one(session, bpos, d):
             try:
                 async with sem:
                     rows = await client._fetch_cooccurrence_for_date(session, location, d, bpos)
                 if rows:
-                    accumulate_check_stats(rows, bpos, {variant: vs[variant]},
-                                           {variant: markers}, stats)
+                    accumulate_check_stats(rows, bpos, vsig, vmk, stats)
             finally:
                 done_q[0] += 1
                 if progress_callback:
-                    progress_callback(2, f"Reading reads: {done_q[0]}/{n_q} queries",
+                    progress_callback(step, f"Checking ★ markers: {done_q[0]}/{n_q} queries",
                                       done_q[0] / n_q)
 
         async with aiohttp.ClientSession(
@@ -269,13 +283,25 @@ def variant_check(location: str, start_date: datetime, end_date: datetime,
                                        return_exceptions=True)
         n_err = sum(isinstance(r, Exception) for r in res)
         if n_err:
-            logger.error(f"[cooc][{location}] variant check {variant}: {n_err} queries failed")
-        out["per_date"] = stats.get(variant, {})
+            logger.error(f"[cooc][{location}] lineage check: {n_err} queries failed")
+        for v in todo:
+            out["per_variant"][v]["per_date"] = stats.get(v, {})
 
     asyncio.run(_run())
-    logger.info(f"[cooc][{location}] variant check {variant}: {len(markers)} markers, "
-                f"{len(out['dates'])} dates")
+    logger.info(f"[cooc][{location}] lineage check: {len(todo)} of {len(markers)} lineages "
+                f"with markers, {len(out['dates'])} dates")
     return out
+
+
+def variant_check(location: str, start_date: datetime, end_date: datetime,
+                  variant: str, panel: List[str],
+                  progress_callback: Optional[Callable] = None) -> dict:
+    """"Investigate a variant" -> "Check in data": one lineage (lineages_check).
+    Returns {variant, markers, dates, per_date}."""
+    r = lineages_check(location, start_date, end_date, [variant], panel, progress_callback)
+    pv = r["per_variant"].get(variant, {"markers": [], "per_date": {}})
+    return {"variant": variant, "markers": pv["markers"], "dates": r["dates"],
+            "per_date": pv["per_date"]}
 
 
 def coverage_from_rows(rows: List[dict], positions) -> Dict[str, int]:

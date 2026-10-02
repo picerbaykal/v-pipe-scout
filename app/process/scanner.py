@@ -833,7 +833,8 @@ def scan_unexplained_patterns(
     }
     # same rule as the main loop (fingerprint totals), so counts always agree
     novel["pattern_count"] = len(novel_patterns)
-    novel["groups"] = _novel_groups(novel_patterns, _day_tot)
+    novel["groups"] = _novel_groups(novel_patterns, _day_tot, _sampling, position_coverage)
+    _novel_clues(novel["groups"], novel_patterns, observed_full, _mut_index, tree)
 
     summary = _summary(resolved_clade, unresolved, novel)
     logger.info(
@@ -941,10 +942,15 @@ def _multi_alt_positions(patterns: List[dict], day_tot: Dict[str, int]) -> Dict[
 
 
 def _novel_groups(patterns: List[dict], day_tot: Dict[str, int],
+                  sampling: Optional[List[str]] = None,
+                  coverage: Optional[Dict[str, Dict[str, int]]] = None,
                   top: int = 20) -> List[dict]:
-    """Novel patterns grouped by mutation set: {mutations, reads, days}.
+    """Novel patterns grouped by mutation set: {mutations, reads, days, timeline}.
     days = dates passing the same per-day evidence rule as findings
     (>= EVIDENCE_MIN_READS reads and >= EVIDENCE_MIN_SHARE of the day).
+    timeline = [[date, mark]] for every sampling date: day (passes the rule) ·
+    seen (reads, below the rule) · gone (>= MIN_COVERAGE reads at its positions,
+    none with it) · uncovered (fewer) · unknown (no coverage data).
     Error hotspots are already out (_drop_hotspots)."""
     by: Dict[tuple, Dict[str, int]] = {}
     for p in patterns:
@@ -955,9 +961,63 @@ def _novel_groups(patterns: List[dict], day_tot: Dict[str, int],
     out = []
     for k, per_day in by.items():
         days = sorted(d for d, n in per_day.items() if _day_passes(n, day_tot.get(d, 0)))
-        out.append({"mutations": list(k), "reads": sum(per_day.values()), "days": days})
+        tl = []
+        for d in (sampling or sorted(day_tot)):
+            n = per_day.get(d, 0)
+            if d in days:
+                mark = "day"
+            elif n:
+                mark = "seen"
+            elif coverage is None or d not in coverage:
+                mark = "unknown"
+            else:
+                cov = min((int(coverage[d].get(str(_mut_pos(m)), 0)) for m in k), default=0)
+                mark = "gone" if cov >= MIN_COVERAGE else "uncovered"
+            tl.append([d, mark])
+        out.append({"mutations": list(k), "reads": sum(per_day.values()), "days": days,
+                    "timeline": tl})
     out.sort(key=lambda g: (-len(g["days"]), -g["reads"]))
     return out[:top]
+
+
+def _novel_clues(groups: List[dict], patterns: List[dict], observed_full: List,
+                 mut_index: Dict[str, Set[str]], tree) -> None:
+    """Clues that a novel group is a real mutation + a steady misread rather
+    than a new variant (2026-10-02). Nothing is hidden on them; the table shows
+    them. Adds g["clue"] = {anchor, lineage, partners, together}:
+      anchor    the group's mutation on the most reads (the common background
+                the others ride on)
+      lineage   who carries the anchor: the one carrier, or the clade most
+                carriers sit in; None when no lineage does or none dominates
+      n_lineages how many pango lineages carry the anchor
+      partners  different other mutations the anchor has across novel patterns
+      together  of the reads carrying the anchor that also cover the group's
+                other positions, the share carrying all of the group — a real
+                new combination is on most of them, a misread on ~1 %"""
+    partners: Dict[str, Set[str]] = {}
+    for p in patterns:
+        for m in p["mutations"]:
+            partners.setdefault(m, set()).update(x for x in p["mutations"] if x != m)
+    reads: Dict[str, int] = {}
+    want = {m for g in groups for m in g["mutations"]}
+    for present, _absent, cnt, _d in observed_full:
+        for m in want & present:
+            reads[m] = reads.get(m, 0) + cnt
+    for g in groups:
+        muts = g["mutations"]
+        anchor = max(muts, key=lambda m: (reads.get(m, 0), m))
+        cs = sorted(mut_index.get(anchor, ()))
+        lin = cs[0] if len(cs) == 1 else (tree.dominant_clade(cs, 0.6) if cs else None)
+        rest = [m for m in muts if m != anchor]
+        num = den = 0
+        for present, absent, cnt, _d in observed_full:
+            if anchor in present and all(m in present or m in absent for m in rest):
+                den += cnt
+                if all(m in present for m in rest):
+                    num += cnt
+        g["clue"] = {"anchor": anchor, "lineage": lin, "n_lineages": len(cs),
+                     "partners": len(partners.get(anchor, ())),
+                     "together": round(num / den, 4) if den else None}
 
 
 # a later sample "covered" a finding when this many reads spanned one of its

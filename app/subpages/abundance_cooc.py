@@ -171,7 +171,10 @@ def _panel_verdicts(cooc_res: dict, variants: list) -> dict:
     process.cooc.check_verdicts), no_marker (nothing specific to test),
     no_data (no check data, or no marker measurable)."""
     from process.cooc import check_verdicts
+    from process.variant_explorer import check_in_data
     pc = (cooc_res or {}).get("panel_check", {}) or {}
+    _dates = [str(d)[:10] for d in ((cooc_res or {}).get("dates") or [])]
+    _RECENT = int(get_cooc_setting("check.recent_samples", default=5))
     sym = {"present": "✓", "absent": "✗", "unmeasured": "?"}
     out = {}
     for v in variants:
@@ -180,7 +183,12 @@ def _panel_verdicts(cooc_res: dict, variants: list) -> dict:
             out[v] = {"state": "no_data", "reason": "no check data — re-run the scan",
                       "n_present": 0, "n_measured": 0, "n_markers": 0}
             continue
-        res = check_verdicts(ci.get("markers") or [], ci.get("per_date") or {})
+        # the vote uses the last RECENT covered samples ("is it there now?",
+        # 2026-10-02); the timeline covers the window
+        _cid = check_in_data(ci.get("markers") or [], ci.get("per_date") or {}, _dates,
+                             recent=_RECENT)
+        _pdr = {d: (ci.get("per_date") or {}).get(d, {}) for d in _cid["recent_dates"]}
+        res = check_verdicts(ci.get("markers") or [], _pdr)
         nd, np_, nm = res["n_markers"], res["n_present"], res["n_measured"]
         mk = [f"{k} {(m['freq'] or 0) * 100:.0f}% {sym[m['status']]}"
               if m["cov"] else f"{k} no reads ?" for k, m in res["markers"].items()]
@@ -195,7 +203,9 @@ def _panel_verdicts(cooc_res: dict, variants: list) -> dict:
                      "inconsistent": "inconsistent"}.get(res["verdict"], "no_data")
             reason = f"{np_} of {nm} measurable markers present — {mtxt}"
         out[v] = {"state": state, "reason": reason,
-                  "n_present": np_, "n_measured": nm, "n_markers": nd}
+                  "n_present": np_, "n_measured": nm, "n_markers": nd,
+                  # one mark per sampling day, for the Evidence calendar
+                  "timeline": _cid["timeline"], "recent_dates": _cid["recent_dates"]}
     return out
 
 
@@ -1195,6 +1205,19 @@ def app():
                   _novel_total = 0
                   _novel_pats = 0
 
+                  from process.variant_explorer import check_in_data as _cid
+
+                  def _fcheck(_loc, _node):
+                      """The panel check for a found lineage in one city (the deep
+                      scan's findings_check): same measure as the panel cells."""
+                      _fc = (_scan_res_all.get(_loc) or {}).get("findings_check") or {}
+                      _pv = (_fc.get("per_variant") or {}).get(_node)
+                      if not _pv:
+                          return None
+                      return _cid(_pv.get("markers") or [], _pv.get("per_date") or {},
+                                  _fc.get("dates") or [],
+                                  recent=int(get_cooc_setting("check.recent_samples", default=5)))
+
                   def _ingest_clade(_c, _loc, _bucket=None):
                       # Route one finding (top-level OR a promoted sub-finding) into
                       # the new/sub bucket and aggregate its reads across cities.
@@ -1269,6 +1292,8 @@ def app():
                           "regions": list(_c.get("evidence_regions", []) or []),
                           # one-day findings: what happened after that day
                           "after": _c.get("one_day_after"),
+                          # the panel check on its ★ markers (2026-10-02)
+                          "check": _fcheck(_loc, _node),
                           # this city's own blocks, for this city's heatmap
                           "blocks": _c.get("member_blocks", []) or [],
                       }
@@ -1356,11 +1381,20 @@ def app():
                           _pc = {c: {"days": 0} for c in _slot.get("cities", [])}
                       else:
                           _pc = {c: {"days": p.get("days", 0), "stars": p.get("star", []),
-                                     "regions": p.get("regions", []), "after": p.get("after")}
+                                     "regions": p.get("regions", []), "after": p.get("after"),
+                                     "check": p.get("check")}
                                  for c, p in (_slot.get("per_city") or {}).items()}
                       _ok = any((d.get("days") or 0) >= 2 for d in _pc.values())
+                      # + Add (2026-10-02): the panel check would confirm it in at
+                      # least one city, and it is more than one sample (>= 2 days
+                      # in a city, or 1 day in >= 2 cities)
+                      _present = any((d.get("check") or {}).get("state") == "present"
+                                     for d in _pc.values())
+                      _samples = _ok or sum(1 for d in _pc.values()
+                                            if (d.get("days") or 0) >= 1) >= 2
                       return {"status": _status if _status != "confirmed" or _ok else "1 day",
-                              "per_city": _pc, "addable": _status == "confirmed" and _ok}
+                              "per_city": _pc,
+                              "addable": _status != "named" and _present and _samples}
 
                   _findings = {}
                   if not _scan_running:
@@ -1373,6 +1407,7 @@ def app():
 
                   # ---- unnamed signal: novel patterns grouped by mutations ----
                   _nov = {}   # mutations -> {city: days}
+                  _nov_info = {}   # mutations -> {city: {timeline, clue}}
                   # error-hotspot patterns the scanner left out (_drop_hotspots)
                   _hot_p = sum(int(((_r.get("novel") or {}).get("hotspot") or {}).get("patterns", 0))
                                for _r in _scan_res_all.values())
@@ -1384,6 +1419,8 @@ def app():
                               continue
                           _k = tuple(_g["mutations"])
                           _nov.setdefault(_k, {})[_loc] = len(_g.get("days", []))
+                          _nov_info.setdefault(_k, {})[_loc] = {
+                              "timeline": _g.get("timeline"), "clue": _g.get("clue")}
                   _nov_order = lambda kv: (-max(kv[1].values(), default=0),
                                            -sum(kv[1].values()), kv[0])
                   _nov_list = sorted([(list(k), v) for k, v in _nov.items()], key=_nov_order)
@@ -1442,6 +1479,7 @@ def app():
                                     ot=curated_variants, novel=_nov_list, broad=_broad,
                                     novel_hotspot=((_hot_p, _human_reads(_hot_r))
                                                    if _hot_p else None),
+                                    novel_info=_nov_info,
                                     novel_rest=_human_reads(_nov_rest) if _nov_rest else None,
                                     near=_near, near_min_days=EVIDENCE_MIN_DAYS,
                                     data_until={l: _dshort(d) for l, d in _until_short.items()})
@@ -1454,51 +1492,8 @@ def app():
                           st.session_state["acooc_tree_city"] = _click["city"]
                       st.rerun()
 
-                  # ---- signal over time in the chosen city ----
-                  _hm_slots = {x["node"]: x for x in _conf_ok + _one + _broader
-                               if _tcity in (x.get("per_city") or {})}
-                  _hm_nov = {"novel: " + " ".join(k[:4]): list(k) for k, v in _nov.items()
-                             if v.get(_tcity, 0) >= 2}
-                  _hm_opts = list(_hm_slots) + list(_hm_nov)
-                  if _hm_opts:
-                      _tname = _tcity.split("(")[0].strip()
-                      st.markdown(f"#### Signal over time in {_tname}")
-                      _hm_sel = st.multiselect(
-                          "Findings", _hm_opts, default=_hm_opts[:1],
-                          key=f"acooc_hm_{_tcity}", label_visibility="collapsed")
-                      from components.scanner_heatmap import render_clade_heatmap
-                      _nov_sigs = st.session_state.get("acooc_all_sigs_cache") or {}
-                      for _hn in _hm_sel:
-                          st.markdown(f"**{_hn} · {_tname}**")
-                          if _hn in _hm_slots:
-                              _hs = _hm_slots[_hn]
-                              render_clade_heatmap(
-                                  clade_node=_hn,
-                                  shared_mutations=_hs.get("shared_mutations", []),
-                                  member_blocks=(_hs["per_city"].get(_tcity, {}).get("blocks")
-                                                 or _hs.get("member_blocks", [])),
-                                  client=wiseLoculus,
-                                  location=_tcity,
-                                  date_range=(start_date, end_date),
-                              )
-                          else:
-                              _pm = _hm_nov[_hn]
-                              render_clade_heatmap(
-                                  clade_node=f"novel_{_tcity}_{'_'.join(_pm[:3])}",
-                                  shared_mutations=[],
-                                  member_blocks=[{
-                                      "member": "novel pattern",
-                                      "discriminating": _pm,
-                                      "member_count": 1,
-                                      "reads": 0,
-                                      "mut_carriers": ({_m: sum(1 for _s in _nov_sigs.values()
-                                                                if _m in _s) for _m in _pm}
-                                                       if _nov_sigs else {}),
-                                  }],
-                                  client=wiseLoculus,
-                                  location=_tcity,
-                                  date_range=(start_date, end_date),
-                              )
+                  st.caption("📈 Signal over time (co-occurrence and mutation heatmaps) "
+                             "of any lineage or novel pattern: **Investigate a variant**.")
 
 
             if _active_section == "Investigate a variant":
@@ -1506,6 +1501,18 @@ def app():
               st.markdown("---")
               # "Check in data" uses the run's cities, window and panel, so its
               # answer matches the results above
+              # the scanner's groups per city and finding, and the recurring novel
+              # patterns, for the heatmaps
+              _inv_sr = ({} if _outstanding
+                         else st.session_state.get("acooc_scanner_results", {}) or {})
+              _inv_blocks = {
+                  _c: {f["node"]: f.get("member_blocks") or []
+                       for _k in ("resolved_clade", "one_day") for f in (_r.get(_k) or [])}
+                  for _c, _r in _inv_sr.items()}
+              _inv_novel = {" ".join(g["mutations"]): list(g["mutations"])
+                            for _r in _inv_sr.values()
+                            for g in ((_r.get("novel") or {}).get("groups") or [])
+                            if len(g.get("days") or []) >= 2 and not g.get("likely_error")}
               _rd = st.session_state.get("acooc_ran_dates") or (start_date.isoformat(),
                                                                 end_date.isoformat())
               render_variant_explorer(
@@ -1514,6 +1521,10 @@ def app():
                   # the look-up always works; "Check in data" waits for the run
                   cities=None if _outstanding else list(location_names), start_date=_rd[0], end_date=_rd[1],
                   celery_app=celery_app,
+                  # "Signal over time" heatmaps (moved here from the bottom of the
+                  # co-occurrence results, 2026-10-02)
+                  client=wiseLoculus, novel=_inv_novel, finding_blocks=_inv_blocks,
+                  default_city=st.session_state.get("acooc_tree_city"),
               )
 
 

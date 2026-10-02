@@ -418,10 +418,10 @@ def run_cooc_deep_scan_lapis(self, location: str, start_date: str, end_date: str
     task_id = self.request.id
     progress_key = f"task_progress:{task_id}"
 
-    _p = _reporter(progress_key)
+    _p = _reporter(progress_key, total=5)
     # the read-level step of run_cooc_panel_completeness (its steps 1-3) is this
     # task's step 2; its step 4 (aggregating) is this task's step 3
-    _inner = _reporter(progress_key, remap=lambda s: 2 if s <= 3 else 3)
+    _inner = _reporter(progress_key, total=5, remap=lambda s: 2 if s <= 3 else 3)
     try:
         d0, d1 = datetime.fromisoformat(start_date), datetime.fromisoformat(end_date)
         extra, hot = {}, set()
@@ -457,7 +457,20 @@ def run_cooc_deep_scan_lapis(self, location: str, start_date: str, end_date: str
                                 day_totals, res.get("position_coverage"), hotspots=hot)
         result["deep"] = {"data_positions": len(extra),
                           "hotspots": len(hot) if hot is not None else None}
-        _p(4, "Deep scan complete.")
+        # the lineages it found get the panel's own check (★ markers present /
+        # measurable per day), so their table cells mean the same as the panel's
+        nodes = list(dict.fromkeys(
+            c["node"] for k in ("resolved_clade", "one_day") for c in (result.get(k) or [])
+            if c.get("node")))[:40]
+        if nodes:
+            from cooc import lineages_check
+            _p(4, f"Checking ★ markers of {len(nodes)} found lineages...")
+            try:
+                result["findings_check"] = lineages_check(location, d0, d1, nodes, variants,
+                                                          progress_callback=_p, step=4)
+            except Exception as e:
+                logger.warning(f"[deep scan] findings check failed in {location}: {e}")
+        _p(5, "Deep scan complete.")
         return result
     except Exception as e:
         _p(0, f"Error: {str(e)}")

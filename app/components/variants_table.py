@@ -192,9 +192,14 @@ def _mix(a, b, t):
     return tuple(a[i] + (b[i] - a[i]) * t for i in range(3))
 
 
-def _scale(d):
+_SC_GREY, _SC_RED = (229, 231, 235), (220, 38, 38)
+
+
+def _scale(d, found=False):
     """(cell style, label, dot colour, name colour, share present or None)
-    for one city's check result."""
+    for one city's check result. found: a lineage not in the panel — grey
+    (absent) → red (present) instead of orange → green; absent is no warning
+    for a lineage you don't track."""
     n_mk, p, a, u = _vote_counts(d)
     if n_mk == 0:
         return S_NOMARK, "·", GREY, "#6b7280", None
@@ -202,6 +207,12 @@ def _scale(d):
     if m == 0:
         return S_NODATA, "?", GREY, "#6b7280", None
     share = p / m
+    if found:
+        hue = _mix(_SC_GREY, _SC_RED, share)
+        depth = 0.3 + 0.7 * (m / n_mk)
+        bg = _mix((255, 255, 255), hue, depth)
+        fg = "#fff" if share >= 0.7 and depth > 0.8 else "#111827"
+        return _fill(_hex(bg), fg), f"{p}/{m}", _hex(bg), RED, share
     hue = _mix(_SC_LO, _SC_MID, share * 2) if share <= 0.5 else _mix(_SC_MID, _SC_HI, share * 2 - 1)
     depth = 0.3 + 0.7 * (m / n_mk)                 # 30 % strength at the least
     bg = _mix((255, 255, 255), hue, depth)
@@ -310,6 +321,67 @@ def _marker_details(d, v):
     return " — " + " · ".join(out[:10]) + more
 
 
+# ── the Evidence calendar (2026-10-02): one square per sampling day of the
+#    chosen city, for every row ─────────────────────────────────────────────
+def _day_marks(top):
+    """mark -> (square style, meaning). top = colour of a present day."""
+    return {
+        # lineages (★ markers pooled per day, process.variant_explorer.check_in_data)
+        "present": (f"background:{top};", "★ markers present (≥ 5 % of ≥ 100 reads)"),
+        "weak": (f"background:{top}55;", "★ markers between absent and present"),
+        "absent": ("background:#d1d5db;", "★ markers absent (< 1 % of ≥ 100 reads)"),
+        # novel combinations (scanner timeline)
+        "day": (f"background:{top};", "passes the day rule (≥ 20 reads, ≥ 0.5 % of the day)"),
+        "seen": (f"background:{top}55;", "seen, below the day rule"),
+        "gone": ("background:#d1d5db;", "≥ 100 reads at its positions, not there"),
+        "uncovered": ("background:#fff;border:1.5px dashed #9ca3af;",
+                      "under 100 reads at its positions — couldn't show"),
+        "unknown": ("background:#e5e7eb;", "no coverage data (re-run)"),
+    }
+
+
+def _recent_n():
+    try:
+        from process.cooc import _check_cfg
+        return int(_check_cfg().get("recent_samples", 5))
+    except Exception:
+        return 5
+
+
+def _day_cal(tl, top):
+    """The last N covered samples only (check.recent_samples): what the cell
+    voted on — "is it there now?". Days with too few reads are skipped."""
+    n = _recent_n()
+    last = [(d, m) for d, m in (tl or []) if m not in ("uncovered", "unknown")][-n:]
+    if not last:
+        return ""
+    mk = _day_marks(top)
+    sq = "".join(f"<i style='{mk.get(m, mk['unknown'])[0]}' "
+                 f"data-tip='{_e(_short_date(d) + ': ' + mk.get(m, mk['unknown'])[1])}'></i>"
+                 for d, m in last)
+    pad = "".join("<i style='background:transparent'></i>" for _ in range(n - len(last)))
+    return f"<span class='cal' style='margin-left:0;margin-right:8px'>{pad}{sq}</span>"
+
+
+def _cal_phrase(tl, word="present"):
+    """'present on 4 of 9 covered days · in the latest sample' — what the
+    calendar says, in a few words."""
+    if not tl:
+        return ""
+    on = {"present", "day"}
+    cov = [(d, m) for d, m in tl if m not in ("uncovered", "unknown")]
+    hits = [d for d, m in cov if m in on]
+    if not cov:
+        return "not covered — under 100 reads at its positions"
+    if not hits:
+        weak = sum(1 for _d, m in cov if m in ("weak", "seen"))
+        return (f"absent all {len(cov)} {_pl(len(cov), 'day')}" if not weak
+                else f"weak {weak} of {len(cov)} {_pl(len(cov), 'day')}, never present")
+    after = sum(1 for d, _m in cov if d > hits[-1])
+    tail = "in the latest sample" if not after else f"last {_short_date(hits[-1])}"
+    return f"{word} {len(hits)} of {len(cov)} {_pl(len(cov), 'day')} · {tail}"
+
+
 def _panel_evidence(per_city, sel, v=""):
     d = per_city.get(sel)
     if not d:
@@ -317,11 +389,15 @@ def _panel_evidence(per_city, sel, v=""):
     n_mk, p, a, u = _vote_counts(d)
     if n_mk == 0:
         return f"<span class='dim'>{_vote_text(d)}</span>"
-    tip = (f"{v} · the cell shows present / (present + absent) = {p}/{p + a}. "
-           f"Markers that are neither present nor absent don't count either way"
+    tip = (f"{v} · the cell votes on the last {_recent_n()} samples with enough reads: "
+           f"present / (present + absent) = {p}/{p + a} — "
+           + _breakdown(d, v, html=False)
+           + ". Markers that are neither present nor absent don't count either way"
            + _marker_details(d, v))
-    line = _breakdown(d, v)
-    return f"<span data-tip='{_e(tip)}'>{line}</span>"
+    tl = d.get("timeline")
+    if not tl:                                      # results from before 2026-10-02
+        return f"<span data-tip='{_e(tip)}'>{_breakdown(d, v)}</span>"
+    return f"{_day_cal(tl, GREEN)}<span data-tip='{_e(tip)}'>{_e(_cal_phrase(tl))}</span>"
 
 
 def _panel_tint(per_city, sel):
@@ -343,6 +419,14 @@ def _finding_cells(v, f, cities, sel):
             continue
         n = int(d.get("days", 0) or 0)
         stars, regs = d.get("stars") or [], d.get("regions") or []
+        chk = d.get("check")
+        if chk and n > 0:
+            # the same measure as the panel: ★ markers present / measurable
+            style, label, _dot, _ink, _share = _scale(chk, found=True)
+            out.append(_cell(label, style, f"{v} · {city_name(c)}, last {_recent_n()} samples "
+                             f"with enough reads: {_vote_text(chk)} · the scanner counted "
+                             f"{n} {_pl(n, 'day')} of evidence in the window", c == sel))
+            continue
         if n == 0:
             out.append(_cell("0", S_NAMED, f"{v} · {city_name(c)}: named only — reads point to "
                              f"{v}, but they also fit related lineages, so no day has evidence "
@@ -437,12 +521,22 @@ def _finding_evidence(f, sel):
         return ("<span class='dim'>named only — reads point to it but also fit related "
                 "lineages; no day with specific evidence</span>")
     stars, regs = d.get("stars") or [], d.get("regions") or []
-    txt = (f"{n} {_pl(n, 'day')} · "
-           + (f"{len(stars)} ★ {_pl(len(stars), 'marker')}" if stars else "combinations only")
-           + f" · <span data-tip='{_e(_REGION_TIP)}'>{len(regs)} genome "
-           f"{_pl(len(regs), 'region')}</span>")
-    if n == 1 and d.get("after"):
-        txt += _after_cal(d["after"]) or (" — " + _after_text(d["after"]))
+    facts = (f"scanner: {n} {_pl(n, 'day')} · "
+             + (f"{len(stars)} ★ {_pl(len(stars), 'marker')}" if stars else "combinations only")
+             + f" · {len(regs)} genome {_pl(len(regs), 'region')}"
+             + (" · 1 day " + _after_text(d["after"], html=False)
+                if n == 1 and d.get("after") else ""))
+    tl = (d.get("check") or {}).get("timeline")
+    if tl:
+        txt = (f"{_day_cal(tl, RED)}<span data-tip='{_e(facts + '. ' + _REGION_TIP)}'>"
+               f"{_e(_cal_phrase(tl))}</span>")
+    else:                                        # results from before 2026-10-02
+        txt = (f"{n} {_pl(n, 'day')} · "
+               + (f"{len(stars)} ★ {_pl(len(stars), 'marker')}" if stars else "combinations only")
+               + f" · <span data-tip='{_e(_REGION_TIP)}'>{len(regs)} genome "
+               f"{_pl(len(regs), 'region')}</span>")
+        if n == 1 and d.get("after"):
+            txt += _after_cal(d["after"]) or (" — " + _after_text(d["after"]))
     weak = []
     if not stars:
         weak.append("no ★ marker")
@@ -559,7 +653,7 @@ def _near_rows(r, v, changes, cities, sel, gid, n_cols):
 
 def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
           novel=(), broad=(), novel_rest=None, near=None, near_min_days=2,
-          novel_hotspot=None, data_until=None) -> str:
+          novel_hotspot=None, data_until=None, novel_info=None) -> str:
     """cities: city names in column order; sel: the chosen city.
     rows: components.abundance_cooc_tree.tree_rows(...).
     verdicts: {city: {variant: {state, reason, n_present, n_measured, n_markers}}}.
@@ -570,6 +664,8 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
       n_lineages, ancestor)]; novel_rest: reads text of novel patterns not listed.
     novel_hotspot: (patterns, reads text) left out at error-hotspot positions
       (scanner._drop_hotspots), shown as one grey line.
+    novel_info: {tuple(mutations): {city: {timeline, clue}}} — the Evidence
+      calendar and clues of each novel row (scanner._novel_groups / _novel_clues).
     near: {panel variant: [change, …]} from process.near_changes (each with
       "where"); a variant with some gets a tag "◆ N changes" (gains counting
       on >= near_min_days days) that unfolds them."""
@@ -619,7 +715,8 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
             cells, ev = _panel_cells(v, pc, cities, sel), _panel_evidence(pc, sel, v)
         elif kind == "finding" and v in findings:
             f = findings[v]
-            n_sel = int(((f.get("per_city") or {}).get(sel) or {}).get("days", 0) or 0)
+            _dsel = (f.get("per_city") or {}).get(sel) or {}
+            n_sel = int(_dsel.get("days", 0) or 0)
             named = f.get("status") == "named"
             col = VIOLET if named else RED
             dk = ("ring" if named or n_sel == 0 else "filled" if n_sel >= 2 else "dashed")
@@ -672,17 +769,26 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
     low = [(m, d) for m, d in novel if max(d.values(), default=0) == 0]
     if novel or broad or novel_rest or novel_hotspot:
         body.append(f"<tr class='sec'><td colspan='{n_cols}'>Unnamed signal</td></tr>")
-        nov_ev = "<span class='dim'>novel — no pango lineage has this combination</span>"
+        novel_info = novel_info or {}
+
+        def nov_ev_for(m, d):
+            info = (novel_info.get(tuple(m)) or {}).get(sel)
+            if not info:
+                n_other = sum(1 for c, x in d.items() if c != sel)
+                return (f"<span class='dim'>not in this city"
+                        + (f" · in {n_other} other {_pl(n_other, 'city')}" if n_other else "")
+                        + "</span>")
+            return _novel_evidence(m, info)
         body += _group("nrec", f"<b style='color:{BLUE}'>Novel, recurring ({len(rec)})</b> "
                        "<span class='dim'>· on ≥ 2 days in a city</span>", n_cols,
-                       [_pattern_row(m, d, cities, sel, S_NOVEL, S_NOVEL1, BLUE, nov_ev, "seen")
+                       [_pattern_row(m, d, cities, sel, S_NOVEL, S_NOVEL1, BLUE, nov_ev_for(m, d), "seen")
                         for m, d in rec], open_=True)
         body += _group("none", f"<b style='color:{BLUE}'>Novel, 1 day ({len(one)})</b>", n_cols,
-                       [_pattern_row(m, d, cities, sel, S_NOVEL, S_NOVEL1, BLUE, nov_ev, "seen")
+                       [_pattern_row(m, d, cities, sel, S_NOVEL, S_NOVEL1, BLUE, nov_ev_for(m, d), "seen")
                         for m, d in one])
         body += _group("nlow", f"<b style='color:{BLUE}'>Novel, below the day rule ({len(low)})</b> "
                        "<span class='dim'>· never 20 reads and 0.5% of a day</span>", n_cols,
-                       [_pattern_row(m, d, cities, sel, S_NOVEL, S_NOVEL1, BLUE, nov_ev, "seen")
+                       [_pattern_row(m, d, cities, sel, S_NOVEL, S_NOVEL1, BLUE, nov_ev_for(m, d), "seen")
                         for m, d in low])
         body += _group("broad", f"<b style='color:{SLATE}'>Too broad to name ({len(broad)})</b> "
                        "<span class='dim'>· the combination fits many unrelated lineages</span>",
@@ -702,10 +808,43 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
                         "positions — left out ⓘ</span></td></tr>")
         if novel_rest:
             body.append(f"<tr class='note'><td colspan='{n_cols}'>+ more small novel patterns "
-                        f"({novel_rest} reads) — not listed</td></tr>")
+                        f"({novel_rest} reads, summed over cities and days) — not listed</td></tr>")
 
     return (CSS + f"<table class='vt'><thead>{head}</thead><tbody>{''.join(body)}</tbody></table>"
             + LEGEND)
+
+
+def _novel_evidence(muts, info):
+    """A novel row in the chosen city: its calendar, then the clues that it may
+    be a real mutation + a steady misread rather than a new variant."""
+    tl = info.get("timeline") or []
+    cl = info.get("clue") or {}
+    words = []
+    a, lin, n_p, tog = cl.get("anchor"), cl.get("lineage"), cl.get("partners"), cl.get("together")
+    n_l = cl.get("n_lineages") or 0
+    if a and n_l == 1 and lin:
+        words.append(f"{a} is {lin}'s")
+    elif a and n_l > 1:
+        words.append(f"{a} is in {n_l} lineages" + (f", mostly under {lin}" if lin else ""))
+    if a and n_p and n_p >= 2:
+        words.append(f"{a} seen with {n_p} partners")
+    if tog is not None and len(muts) >= 2:
+        words.append(f"together on {tog * 100:.0f} % of covering reads"
+                     if tog >= 0.01 else "together on < 1 % of covering reads")
+    pf = _thr()[1] / 100
+    hint = ""
+    if n_l and tog is not None and tog < pf:
+        hint = " → likely a real mutation + misread"
+    elif tog is not None and tog >= 0.5:
+        hint = " → the mutations travel together"
+    tip = ("Clues, nothing hidden: a real new combination is on most reads covering its "
+           "positions and keeps the same partners; a real lineage mutation plus a steady "
+           "misread is on few of them (around the error rate) and changes partners. "
+           f"Hint when together < {_pct(pf * 100)} % (the check's present share).")
+    phrase = _cal_phrase(tl, word="passes") if tl else ""
+    clue = " · ".join(words)
+    return (f"{_day_cal(tl, BLUE)}<span class='dim'>{_e(phrase)}</span>"
+            + (f"<br><span data-tip='{_e(tip)}'>{_e(clue)}<b>{_e(hint)}</b></span>" if clue else ""))
 
 
 def _li(style, sym, text):
@@ -729,15 +868,23 @@ _LEGEND_ROWS = (
     + _li(S_NOMARK, "·", "no ★ marker")
     + _li(S_NODATA, "?", "too few reads")
     + "</div><div class='row'><span class='t'>Found</span>"
-    + _li(S_FOUND, "5", "not in panel · days with evidence")
-    + _li(S_ONEDAY, "1", "1 day only, then per sample:")
-    + "<span class='i'><span class='cal'>" + "".join(
-        f"<i style='{st}'></i>" for st, _t in (_CAL["day"], _CAL["seen"], _CAL["gone"], _CAL["uncovered"]))
-    + "</span> seen · back, weak · gone · too few reads</span>"
+    + "<span class='i'>not in your panel, same check:"
+    + "".join(f"<i class='c' style='width:auto;padding:0 6px;{_scale(d, found=True)[0]}'>"
+              f"{_scale(d, found=True)[1]}</i>"
+              for d in ({"n_markers": 3, "n_measured": 3, "n_present": 0},
+                        {"n_markers": 3, "n_measured": 3, "n_present": 3}))
+    + "</span>"
+    + _li(S_FOUND, "5", "older results: days with evidence")
     + _li(S_NAMED, "0", "named only (shared mutations)")
+
     + _li(S_NOVEL, "3", "novel · days")
     + _li(S_BROAD, "2", "too broad to name · days")
     + _li(S_NEAR, "3", "◆ panel variant ± 1 change · days (a hint)")
+    + "</div><div class='row'><span class='t'>Days</span>"
+    + "<span class='i'>Evidence, one square per sampling day in the chosen city:"
+    + "<span class='cal'>" + "".join(
+        f"<i style='{_day_marks(GREEN)[k][0]}'></i>" for k in ("present", "weak", "absent", "uncovered"))
+    + "</span> present · weak · absent · under 100 reads (red for found, blue for novel)</span>"
     + "</div><div class='row'><span class='t'>Tree</span>"
     + _ld(f"background:{RED}", "found in this city")
     + _ld(f"border:1.8px dashed {RED}", "1 day here")

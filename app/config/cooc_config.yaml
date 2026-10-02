@@ -37,6 +37,8 @@ check:
   absent_freq: 0.01     # absent: < 1% carry it
   confirm_share: 0.75   # present / measurable >= this -> confirmed
   notfound_share: 0.25  # present / measurable <= this -> not found; between -> inconsistent
+  recent_samples: 5     # Variants table cells vote on the last N covered samples of a
+                        #   city ("is it there now?"); the Evidence text covers the window
 
 # ── Scanner: names co-occurrence signal the panel doesn't explain ──────────
 # Worker settings: changing them needs a worker restart + re-scan.

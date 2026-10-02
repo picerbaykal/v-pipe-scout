@@ -18,6 +18,12 @@ from typing import Dict, List, Optional, Set
 _SUB = "ACGT"
 
 
+def _pos(m: str) -> int:
+    """'29774T' -> 29774."""
+    d = "".join(ch for ch in m if ch.isdigit())
+    return int(d) if d else 0
+
+
 class _Tree:
     """Cheap parent/child index over the pango raw data."""
     def __init__(self, raw: dict):
@@ -63,6 +69,34 @@ def variant_markers(variant: str, pango_loader, panel: Optional[List[str]] = Non
     _, sigs, parent, _ = _indices(pango_loader)
     vs = {v: sigs.get(v, set()) for v in list(dict.fromkeys(list(panel or []) + [variant]))}
     return specific_markers(vs, sigs, parent).get(variant, [])
+
+
+def marker_blocks(variant: str, pango_loader, panel: Optional[List[str]] = None,
+                  span: int = 300) -> List[Dict]:
+    """Groups of the lineage's own mutations that one read can cover (within
+    `span` bases), keeping the groups with a ★ marker — the input of the
+    co-occurrence heatmap (components.scanner_heatmap) for ANY lineage, also
+    one the scanner didn't report. Same shape as the scanner's member blocks:
+    {member, discriminating, mut_star, mut_carriers, reads}."""
+    _raw, sigs, _parent, _tree = _indices(pango_loader)
+    sig = sorted(sigs.get(variant, set()), key=lambda m: int(_pos(m)))
+    stars = set(variant_markers(variant, pango_loader, panel))
+    groups, cur = [], []
+    for m in sig:
+        if cur and int(_pos(m)) - int(_pos(cur[0])) > span:
+            groups.append(cur)
+            cur = []
+        cur.append(m)
+    if cur:
+        groups.append(cur)
+    out = []
+    for g in groups:
+        if not stars & set(g):
+            continue
+        car = {m: sum(1 for s in sigs.values() if m in s) for m in g}
+        out.append({"member": variant, "discriminating": g, "reads": 0,
+                    "mut_star": {m: m in stars for m in g}, "mut_carriers": car})
+    return out
 
 
 def investigate_variant(variant: str, pango_loader,
@@ -117,13 +151,17 @@ def investigate_variant(variant: str, pango_loader,
 
 
 def check_in_data(markers: List[str], per_date: Dict[str, Dict[str, list]],
-                  dates: List[str]) -> Dict:
+                  dates: List[str], recent: Optional[int] = None) -> Dict:
     """One city's answer from the worker's counts.
 
     per_date: {date: {marker: [cov, hit, link_n, link_ok]}} (accumulate_check_stats)
     dates:    every sampling date in the window (also those with no reads on it)
 
-    Returns {state, n_present, n_measured, n_markers, timeline}
+    recent:   when set, the vote (state, n_present, n_measured) uses only the
+              last `recent` covered sampling days ("is it there now?"); the
+              timeline still covers the whole window. recent_dates lists them.
+
+    Returns {state, n_present, n_measured, n_markers, timeline, recent_dates}
       state: present / absent / mixed / not_covered / no_marker
              (the check's own vote, process.cooc.check_verdicts)
       timeline: [[date, mark]], mark per day pooled over the markers:
@@ -136,10 +174,7 @@ def check_in_data(markers: List[str], per_date: Dict[str, Dict[str, list]],
     c = _check_cfg()
     if not markers:
         return {"state": "no_marker", "n_present": 0, "n_measured": 0,
-                "n_markers": 0, "timeline": []}
-    res = check_verdicts(markers, per_date or {})
-    state = {"confirmed": "present", "not_found": "absent",
-             "inconsistent": "mixed"}.get(res["verdict"], "not_covered")
+                "n_markers": 0, "timeline": [], "recent_dates": []}
     tl = []
     for d in sorted(set(dates or []) | set(per_date or {})):
         cells = (per_date or {}).get(d, {})
@@ -155,5 +190,11 @@ def check_in_data(markers: List[str], per_date: Dict[str, Dict[str, list]],
         else:
             mark = "weak"
         tl.append([d, mark])
+    recent_dates = ([d for d, m in tl if m != "uncovered"][-recent:] if recent else [])
+    pd_ = ({d: (per_date or {}).get(d, {}) for d in recent_dates} if recent
+           else (per_date or {}))
+    res = check_verdicts(markers, pd_)
+    state = {"confirmed": "present", "not_found": "absent",
+             "inconsistent": "mixed"}.get(res["verdict"], "not_covered")
     return {"state": state, "n_present": res["n_present"], "n_measured": res["n_measured"],
-            "n_markers": res["n_markers"], "timeline": tl}
+            "n_markers": res["n_markers"], "timeline": tl, "recent_dates": recent_dates}

@@ -10,14 +10,16 @@ from __future__ import annotations
 
 import streamlit as st
 
-from process.variant_explorer import check_in_data, investigate_variant
+from process.variant_explorer import check_in_data, investigate_variant, marker_blocks
+
+NOVEL_PREFIX = "novel · "
 
 # day marks of the calendar (same look as the Variants table)
 _DAY = {
     "present":   ("#16a34a", "1px solid #16a34a", "markers present"),
     "weak":      ("#bbf7d0", "1px solid #86efac", "markers weak (between absent and present)"),
     "absent":    ("#d1d5db", "1px solid #d1d5db", "markers absent"),
-    "uncovered": ("#ffffff", "1px dashed #9ca3af", "under 100 reads at its markers"),
+    "uncovered": ("#ffffff", "1px dashed #9ca3af", "under 100 reads at its markers that day (pooled over the window there can be enough)"),
 }
 _STATE = {
     "present":     ("#dcfce7", "#166534", "present"),
@@ -93,8 +95,11 @@ def _check_section(variant, panel, cities, start_date, end_date, celery_app, key
             elif c in cur["res"]:
                 r = cur["res"][c]
                 bg, fg, word = _STATE[r["state"]]
-                cnt = (f"<span style='color:#6b7280;'>{r['n_present']}/{r['n_measured']} "
-                       f"★ present</span>" if r["n_measured"] else "")
+                _low = r["n_markers"] - r["n_measured"]
+                cnt = (f"<span style='color:#6b7280;'>{r['n_present']} of {r['n_measured']} "
+                       f"measurable ★ present"
+                       + (f" ({_low} with too few reads)" if _low > 0 else "")
+                       + "</span>" if r["n_measured"] else "")
                 right = (_pill(bg, fg, word, "#d1d5db" if bg == "#ffffff" else None)
                          + f" {_calendar(r['timeline'])} {cnt}")
             else:
@@ -129,10 +134,47 @@ def _check_section(variant, panel, cities, start_date, end_date, celery_app, key
             st.rerun()
 
 
+def _signal_over_time(name, muts_or_none, panel, pango_loader, cities, start_date, end_date,
+                      client, finding_blocks, default_city, key_prefix):
+    """Co-occurrence and mutation heatmaps of one lineage (or novel pattern) in
+    one of the run's cities (2026-10-02; moved here from the bottom of the
+    co-occurrence results). A lineage the scanner reported in that city uses
+    the scanner's groups; any other lineage, groups of its ★ markers."""
+    if not (cities and start_date and end_date and client):
+        return
+    st.markdown("<div style='font-size:14px;font-weight:600;margin-top:14px;'>"
+                "Signal over time</div>", unsafe_allow_html=True)
+    c1, c2 = st.columns([2, 3])
+    with c1:
+        idx = cities.index(default_city) if default_city in cities else 0
+        city = st.selectbox("City", cities, index=idx, key=f"{key_prefix}_hm_city",
+                            label_visibility="collapsed")
+    with c2:
+        show = st.toggle("Show heatmaps", key=f"{key_prefix}_hm_on", value=False)
+    if not show:
+        return
+    from datetime import date
+    from components.scanner_heatmap import render_clade_heatmap
+    dr = (date.fromisoformat(str(start_date)[:10]), date.fromisoformat(str(end_date)[:10]))
+    if muts_or_none is not None:
+        blocks = [{"member": "novel pattern", "discriminating": list(muts_or_none), "reads": 0,
+                   "mut_star": {m: True for m in muts_or_none}}]
+    else:
+        blocks = ((finding_blocks or {}).get(city) or {}).get(name)
+        if not blocks:
+            blocks = marker_blocks(name, pango_loader, panel)
+    if not blocks:
+        st.caption("No ★ marker — nothing specific to show.")
+        return
+    render_clade_heatmap(clade_node=name, shared_mutations=[], member_blocks=blocks,
+                         client=client, location=city, date_range=dr)
+
+
 def render_variant_explorer(pango_loader, panel=None, options=None,
                             disabled=False, key_prefix="acooc_explorer",
                             cities=None, start_date=None, end_date=None,
-                            celery_app=None):
+                            celery_app=None, client=None, novel=None,
+                            finding_blocks=None, default_city=None):
     """Render 'Investigate a variant'.
 
     Args:
@@ -142,6 +184,9 @@ def render_variant_explorer(pango_loader, panel=None, options=None,
         disabled: True while a run is still going (avoids rerun races).
         cities, start_date, end_date, celery_app: enable "Check in data" for
             these cities and window.
+        client, finding_blocks ({city: {node: scanner blocks}}), novel
+            ({label: mutations}, the run's recurring novel patterns),
+            default_city: the "Signal over time" heatmaps.
     """
     st.markdown("#### 🔎 Investigate a variant")
     st.caption("Quick look-up of any lineage, in the panel or not: can reads tell it "
@@ -154,6 +199,8 @@ def render_variant_explorer(pango_loader, panel=None, options=None,
 
     if options is None:
         options = sorted(pango_loader.get_raw_data().keys())
+    novel = novel or {}
+    options = [NOVEL_PREFIX + k for k in novel] + list(options)
 
     # index=None + placeholder: the box starts empty, so you can type at once
     # (an "" option shown as text had to be deleted first)
@@ -162,6 +209,15 @@ def render_variant_explorer(pango_loader, panel=None, options=None,
         key=f"{key_prefix}_pick", label_visibility="collapsed",
     )
     if not variant:
+        return
+
+    if variant.startswith(NOVEL_PREFIX):
+        lab = variant[len(NOVEL_PREFIX):]
+        st.markdown(f"<div style='font-size:15px;font-weight:600;margin-top:4px;'>{lab} "
+                    + _pill("#dbeafe", "#1e40af", "novel pattern") + "</div>",
+                    unsafe_allow_html=True)
+        _signal_over_time(lab, novel[lab], panel, pango_loader, cities, start_date, end_date,
+                          client, finding_blocks, default_city, key_prefix)
         return
 
     r = investigate_variant(variant, pango_loader, panel=panel)
@@ -193,3 +249,5 @@ def render_variant_explorer(pango_loader, panel=None, options=None,
 
     if r["detectable"]:
         _check_section(variant, panel, cities, start_date, end_date, celery_app, key_prefix)
+        _signal_over_time(variant, None, panel, pango_loader, cities, start_date, end_date,
+                          client, finding_blocks, default_city, key_prefix)
