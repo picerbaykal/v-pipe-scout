@@ -294,16 +294,48 @@ def _cell(n, cov, days, min_reads, what, dot=False):
     """One week cell: share n / cov, with the numbers on hover."""
     tip = (f"week of {_short(days[0])} · {len(days)} sample{'s' if len(days) != 1 else ''} "
            f"({', '.join(_short(d) for d in days)})")
+    if cov == 0:
+        tip += " · no read covers these positions this week"
+        return (f"<td class='c' style='background:{_GREY};color:#9ca3af' "
+                f"data-tip=\"{_esc(tip)}\">—</td>")
     if cov < min_reads:
-        tip += f" · {cov:,} covering reads — too few (< {min_reads})"
-        return f"<td class='c' style='background:{_GREY}' title=\"{_esc(tip)}\"></td>"
+        tip += (f" · {what}: {n:,} of only {cov:,} covering reads — too few to give a share "
+                f"(needs {min_reads})")
+        return (f"<td class='c' style='background:{_GREY};color:#6b7280;font-size:10px' "
+                f"data-tip=\"{_esc(tip)}\">{cov}r</td>")
     sh = n / cov
     bg, fg = _colour(sh)
     tip += f" · {what}: {n:,} of {cov:,} covering reads = {sh * 100:.2f} %"
     if dot:
         tip += " · the scanner counted a day of evidence this week"
-    return (f"<td class='c' style='background:{bg};color:{fg}' title=\"{_esc(tip)}\">{_pct(sh)}"
+    return (f"<td class='c' style='background:{bg};color:{fg}' data-tip=\"{_esc(tip)}\">{_pct(sh)}"
             + ("<span class='dot'>●</span>" if dot else "") + "</td>")
+
+
+_TIP = """<div id="tip"></div><style>
+body{margin:0;font-family:"Source Sans Pro","Source Sans 3",-apple-system,BlinkMacSystemFont,
+"Segoe UI",sans-serif;color:#31333f}
+#tip{position:fixed;z-index:10;display:none;max-width:340px;padding:5px 8px;border-radius:6px;
+background:#31333f;color:#fff;font-size:12px;pointer-events:none;line-height:1.35}
+</style><script>
+var tip=document.getElementById("tip");
+document.addEventListener("mousemove",function(e){
+ var t=e.target.closest?e.target.closest("[data-tip]"):null;
+ if(!t){tip.style.display="none";return;}
+ tip.textContent=t.getAttribute("data-tip");tip.style.display="block";
+ var w=tip.offsetWidth,h=tip.offsetHeight,x=e.clientX+12,y=e.clientY+14;
+ if(x+w>window.innerWidth-4)x=Math.max(4,e.clientX-w-12);
+ if(y+h>window.innerHeight-4)y=Math.max(4,e.clientY-h-12);
+ tip.style.left=x+"px";tip.style.top=y+"px";});
+document.addEventListener("mouseleave",function(){tip.style.display="none";});
+</script>"""
+
+
+def _show(table_html, n_rows):
+    """A table in its own small frame, so the hover box works (Streamlit's
+    markdown drops scripts)."""
+    import streamlit.components.v1 as components
+    components.html(_CSS + table_html + _TIP, height=24 * n_rows + 80, scrolling=False)
 
 
 def _esc(t):
@@ -339,7 +371,7 @@ def _cooc_table(positions, mut_base, star_pos, dates, per_date, covered, finding
     pw = max(30, (_LEFT_W - 72 - 2 * len(positions)) // max(1, len(positions)))
     cols = "".join(f"<col style='width:{pw}px'>" for _ in positions) + "<col style='width:72px'>" \
         + "".join("<col style='width:50px'>" for _ in weeks)
-    head = ("<tr>" + "".join(f"<th title=\"position {p}: {mut_base[p]} = the variant's base\">{p}"
+    head = ("<tr>" + "".join(f"<th data-tip=\"position {p}: {mut_base[p]} is the variant's base\">{p}"
                              f"{' ★' if p in star_pos else ''}</th>" for p in positions)
             + "<th style='text-align:right;padding-right:8px'>reads</th>"
             + "".join(f"<th>{_short(w)}</th>" for w in weeks) + "</tr>")
@@ -358,8 +390,9 @@ def _cooc_table(positions, mut_base, star_pos, dates, per_date, covered, finding
             if rest else "")
     return (f"<table class='hm'>{cols}{head}{''.join(body)}</table>"
             f"<div class='hmnote'>{note}first row = {finding}'s combination (all its "
-            f"mutations) · blue base = the variant's, grey = reference · grey cell = fewer than "
-            f"{mr} reads cover all positions that week</div>")
+            f"mutations) · blue base = the variant's, grey = reference · — = no read covers all "
+            f"positions that week · 12r = only 12 such reads, fewer than {mr} · hover a cell "
+            f"for its numbers</div>"), len(body)
 
 
 def _render_haplotype_blocks(clade_node, star_blocks, is_star, n_outside, client,
@@ -381,20 +414,25 @@ def _render_haplotype_blocks(clade_node, star_blocks, is_star, n_outside, client
                 "all positions of a region · cell = share of those reads, per week · ● = the "
                 "scanner counted a day of evidence that week</div>", unsafe_allow_html=True)
     _legend()
-    for positions, mut_base, star_pos in blocks:
+    for i, (positions, mut_base, star_pos) in enumerate(blocks):
         muts = [f"{p}{mut_base[p]}" for p in positions]
         label = (_region_title(muts) + " · "
                  + " + ".join(f"{m}{'★' if _pos(m) in star_pos else ''}" for m in muts))
-        with st.expander(label, expanded=False):
+        # a switch, not an expander: Streamlit runs a closed expander's code,
+        # so every region would be fetched at once; this loads on demand
+        if not st.toggle(label, key=f"hmc_{clade_node}_{location}_{i}", value=False):
+            continue
+        with st.container(border=True):
             with st.spinner("Reading co-occurrence…"):
                 dates, per_date, covered = _fetch_haplotypes(client, location, date_range,
                                                              tuple(positions))
             if not sum(covered.values()):
-                st.caption("No read covers all of these positions in the window.")
-                continue
-            st.markdown(_CSS + _cooc_table(positions, mut_base, star_pos, dates, per_date,
-                                           covered, clade_node, ev_weeks),
-                        unsafe_allow_html=True)
+                st.caption("No read covers all of these positions together in the window — "
+                           "they are too far apart for one read here, or the region was "
+                           "not sequenced well.")
+            tbl, n_rows = _cooc_table(positions, mut_base, star_pos, dates, per_date,
+                                      covered, clade_node, ev_weeks)
+            _show(tbl, n_rows)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -421,13 +459,15 @@ def _render_per_mutation_blocks(clade_node, shared_mutations, member_blocks,
                 "</div>", unsafe_allow_html=True)
     _legend()
     mc = _min_cov()
-    for g in groups:
+    for i, g in enumerate(groups):
         stars = sorted((m for m in g if _is_star(m)), key=_pos)
         rest = sorted((m for m in g if not _is_star(m)), key=_pos)
         ordered = (stars + rest)[:max_muts_per_block]
         label = (_region_title(g) + (f" · {len(stars)} ★" if stars
                                      else " · no ★ — shared mutations only"))
-        with st.expander(label, expanded=False):
+        if not st.toggle(label, key=f"hmm_{clade_node}_{location}_{i}", value=False):
+            continue
+        with st.container(border=True):
             with st.spinner("Reading mutation frequencies…"):
                 df = _fetch_frequencies(client, location, date_range, ordered)
             if df is None or df.empty:
@@ -452,11 +492,12 @@ def _render_per_mutation_blocks(clade_node, shared_mutations, member_blocks,
                 n_out = _n_out(m)
                 tip = (f"{m}: carried by {n_out} lineages outside this family" if n_out is not None
                        else m)
-                body.append(f"<tr><td class='l' title=\"{_esc(tip)}\">{m}{star}</td>"
+                body.append(f"<tr><td class='l' data-tip=\"{_esc(tip)}\">{m}{star}</td>"
                             f"{''.join(cells)}</tr>")
-            st.markdown(_CSS + f"<table class='hm'>{cols}{head}{''.join(body)}</table>"
-                        f"<div class='hmnote'>grey cell = fewer than {mc} reads cover the "
-                        f"position that week</div>", unsafe_allow_html=True)
+            _show(f"<table class='hm'>{cols}{head}{''.join(body)}</table>"
+                  f"<div class='hmnote'>— = no read covers the position that week · "
+                  f"12r = only 12 reads, fewer than {mc} · hover a cell for its numbers</div>",
+                  len(body))
 
 
 # ─────────────────────────────────────────────────────────────────────────────

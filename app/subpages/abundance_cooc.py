@@ -1528,6 +1528,7 @@ def app():
                   scanner_results=({} if _outstanding else
                                    st.session_state.get("acooc_scanner_results", {}) or {}),
                   default_city=st.session_state.get("acooc_tree_city"),
+                  scanning=_outstanding,
               )
 
 

@@ -44,13 +44,25 @@ def _scan_index(scanner_results):
 
 def render_signal_over_time(pango_loader, client, cities, start_date, end_date,
                             panel=None, scanner_results=None, default_city=None,
-                            key_prefix="acooc_sot"):
+                            key_prefix="acooc_sot", scanning=False):
     st.markdown("#### 📈 Signal over time")
     st.caption("Per week, in one city: which base combinations sit on the same reads "
-               "(co-occurrence) and how frequent each mutation is. Regions are folded — "
-               "open the ones you want.")
+               "(co-occurrence) and how frequent each mutation is. Each region loads when "
+               "you switch it on.")
     if not (cities and start_date and end_date and client):
         st.info("Available once the run has cities and dates.")
+        return
+    if scanning:
+        # wait for the deep scan: before it ends there are no found lineages,
+        # no scanner groups and no evidence marks, and reads are still being read
+        st.markdown(
+            "<div style='display:flex;align-items:center;gap:10px;padding:9px 14px;"
+            "margin:4px 0 10px;border-radius:8px;background:#fffbeb;border:1px solid #fcd34d;"
+            "border-left:4px solid #f59e0b;font-size:13px;color:#78350f;'>"
+            "<span style='font-size:18px'>⏳</span><span><b>Waiting for the deep scan to "
+            "finish</b> — the lineages it finds come first in the list, with their own "
+            "regions and ● evidence marks. Available when the run is done.</span></div>",
+            unsafe_allow_html=True)
         return
 
     blocks_by, days_by, found, novel = _scan_index(scanner_results)
@@ -62,18 +74,19 @@ def render_signal_over_time(pango_loader, client, cities, start_date, end_date,
 
     c1, c2 = st.columns([3, 2])
     with c1:
-        pick = st.selectbox("Lineage or pattern", options, index=0 if options else None,
-                            placeholder="Search a lineage…", key=f"{key_prefix}_pick",
+        # starts empty: nothing is fetched until a lineage is picked
+        pick = st.selectbox("Lineage or pattern", options, index=None,
+                            placeholder="Pick a lineage or pattern…", key=f"{key_prefix}_pick",
                             label_visibility="collapsed")
     with c2:
         idx = cities.index(default_city) if default_city in cities else 0
         city = st.selectbox("City", cities, index=idx, key=f"{key_prefix}_city",
                             label_visibility="collapsed")
-    if not pick:
-        return
     if found:
         st.caption(f"Found by the deep scan: {', '.join(found[:8])}"
                    + (" …" if len(found) > 8 else "") + " — listed first.")
+    if not pick:
+        return
 
     from components.scanner_heatmap import render_clade_heatmap
     dr = (date.fromisoformat(str(start_date)[:10]), date.fromisoformat(str(end_date)[:10]))
