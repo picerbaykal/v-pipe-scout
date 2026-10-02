@@ -1382,8 +1382,19 @@ def app():
                             for u in sorted(_agg_unres.values(), key=lambda x: -x["reads"])[:25]]
 
                   if _scan_running:
-                      st.caption("🔍 Deep scan running — lineages not in your panel and "
-                                 "novel patterns appear here when it ends.")
+                      st.markdown(
+                          "<style>@keyframes acoocspin{to{transform:rotate(360deg)}}"
+                          "@keyframes acoocpulse{50%{box-shadow:0 0 0 4px rgba(37,99,235,.15)}}</style>"
+                          "<div style='display:flex;align-items:center;gap:10px;padding:9px 14px;"
+                          "margin:4px 0 10px;border-radius:8px;background:#eff6ff;"
+                          "border:1px solid #93c5fd;border-left:4px solid #2563eb;"
+                          "animation:acoocpulse 2s ease-in-out infinite;'>"
+                          "<span style='width:14px;height:14px;border-radius:50%;flex:none;"
+                          "border:2px solid #bfdbfe;border-top-color:#2563eb;"
+                          "animation:acoocspin .9s linear infinite;'></span>"
+                          "<span style='font-size:13px;color:#1e3a8a;'><b>Deep scan running</b> — "
+                          "lineages not in your panel and novel patterns appear here when it ends."
+                          "</span></div>", unsafe_allow_html=True)
                   if "acooc_recomb_parents" not in st.session_state:
                       st.session_state["acooc_recomb_parents"] = recombinant_parents()
                   _rows = tree_rows(_run_panel, curated_variants, cached_get_pango_loader(),
