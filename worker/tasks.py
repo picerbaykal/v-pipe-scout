@@ -356,7 +356,8 @@ def run_cooc_completeness_lapis(self, location: str, start_date: str, end_date: 
         raise
 
 
-def _scan_and_name(location, variants, unexplained_patterns, day_totals, position_coverage):
+def _scan_and_name(location, variants, unexplained_patterns, day_totals, position_coverage,
+                   hotspots=None):
     """The scanner on unexplained patterns, plus designation dates for the UI."""
     import pandas as pd
     from process.scanner import scan_unexplained_patterns
@@ -367,7 +368,7 @@ def _scan_and_name(location, variants, unexplained_patterns, day_totals, positio
         unexplained_patterns=patterns_df, panel_variants=variants,
         all_lineage_signatures=get_all_lineage_signatures(),
         panel_parent_map=get_panel_parent_map(), min_read_count=500,
-        day_totals=day_totals, position_coverage=position_coverage)
+        day_totals=day_totals, position_coverage=position_coverage, hotspots=hotspots)
     try:
         from api.pango_loader import PangoLoader, get_pango_summary_path as _gp
         _raw = PangoLoader(_gp()).get_raw_data()
@@ -378,9 +379,28 @@ def _scan_and_name(location, variants, unexplained_patterns, day_totals, positio
     return result
 
 
+def _data_positions_cached(location, d0, d1, share, cov):
+    """cooc.data_positions, shared between tasks for an hour (every city's
+    deep scan needs every location's data for the hotspot positions)."""
+    from cooc import data_positions
+    key = f"cooc:datapos:{location}:{d0.date()}:{d1.date()}:{share}:{cov}"
+    try:
+        raw = redis_client.get(key)
+        if raw:
+            return {int(p): set(a) for p, a in json.loads(raw).items()}
+    except Exception:
+        pass
+    out = data_positions(location, d0, d1, share, cov)
+    try:
+        redis_client.set(key, json.dumps({str(p): sorted(a) for p, a in out.items()}), ex=3600)
+    except Exception:
+        pass
+    return out
+
+
 @app.task(bind=True)
 def run_cooc_deep_scan_lapis(self, location: str, start_date: str, end_date: str,
-                             variants: list):
+                             variants: list, reference_locations: list = None):
     """Phase 2 of a run (2026-10-02): read-level scan at today's positions PLUS
     the positions where the data shows a mutation (cooc.data_positions), then
     the scanner on what the panel doesn't explain. Replaces the scanner task fed
@@ -404,11 +424,25 @@ def run_cooc_deep_scan_lapis(self, location: str, start_date: str, end_date: str
     _inner = _reporter(progress_key, remap=lambda s: 2 if s <= 3 else 3)
     try:
         d0, d1 = datetime.fromisoformat(start_date), datetime.fromisoformat(end_date)
-        extra = {}
+        extra, hot = {}, set()
         if get_cooc_setting("scope.data_positions", default=True):
             _p(1, f"Finding positions with signal in {location}...")
             c = _check_cfg()
-            extra = data_positions(location, d0, d1, float(c["absent_freq"]), int(c["min_cov"]))
+            _sh, _cv = float(c["absent_freq"]), int(c["min_cov"])
+            extra = _data_positions_cached(location, d0, d1, _sh, _cv)
+            # error hotspots: positions where ANY location's data shows >= 2
+            # different new bases — an error-prone spot comes from the protocol,
+            # it only crosses 1 % in some cities. All available locations, not
+            # the run's, so the novel list doesn't depend on the selection.
+            hot = {p for p, a in extra.items() if len(a) >= 2}
+            refs = [l for l in (reference_locations or []) if l != location]
+            for i, ref in enumerate(refs):
+                _p(1, f"Error hotspots: {ref}...", (i + 1) / (len(refs) + 1))
+                try:
+                    hot |= {p for p, a in _data_positions_cached(ref, d0, d1, _sh, _cv).items()
+                            if len(a) >= 2}
+                except Exception as e:
+                    logger.warning(f"[deep scan] hotspots from {ref} failed: {e}")
         _p(2, f"Reading reads (+{len(extra)} positions from the data)...")
         res = run_cooc_panel_completeness(location=location, start_date=d0, end_date=d1,
                                           variants=variants, extra_positions=extra,
@@ -416,9 +450,13 @@ def run_cooc_deep_scan_lapis(self, location: str, start_date: str, end_date: str
         _p(3, "Classifying unexplained patterns...")
         day_totals = {str(d)[:10]: int(m) + int(u) for d, m, u in zip(
             res.get("dates", []), res.get("matched_counts", []), res.get("unexplained_counts", []))}
+        # error hotspots: positions where the data shows >= 2 different new
+        # bases (scanner._drop_hotspots); None without data positions
+        hot = sorted(hot) if extra else None
         result = _scan_and_name(location, variants, res.get("unexplained_patterns", []),
-                                day_totals, res.get("position_coverage"))
-        result["deep"] = {"data_positions": len(extra)}
+                                day_totals, res.get("position_coverage"), hotspots=hot)
+        result["deep"] = {"data_positions": len(extra),
+                          "hotspots": len(hot) if hot is not None else None}
         _p(4, "Deep scan complete.")
         return result
     except Exception as e:

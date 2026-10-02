@@ -398,6 +398,7 @@ def scan_unexplained_patterns(
     truly_private_muts: Optional[Dict[str, Set[str]]] = None,
     day_totals: Optional[Dict[str, int]] = None,
     position_coverage: Optional[Dict[str, Dict[str, int]]] = None,
+    hotspots=None,
 ) -> dict:
     """Classify unexplained co-occurrence patterns (Option C).
 
@@ -414,6 +415,10 @@ def scan_unexplained_patterns(
         position_coverage: {date: {position: reads covering it}} (all reads)
             from the completeness result; lets a one-day finding say whether
             later samples covered its positions (one_day_after).
+        hotspots: positions where this city's data shows >= 2 different new
+            bases (the deep scan, from nucleotideMutations). None: taken from
+            the novel reads themselves (_multi_alt_positions). See
+            _drop_hotspots.
 
     Returns dict with keys:
         resolved_lineage:  [{node, relationship, panel_ancestor, total_reads,
@@ -816,7 +821,11 @@ def scan_unexplained_patterns(
         unresolved_hits.values(), key=lambda x: -x["total_reads"]
     )
 
+    novel_patterns, _hot = _drop_hotspots(
+        novel_patterns, hotspots, _day_tot, _mut_index, _candidates_for)
+    novel_reads = sum(int(p["count"]) for p in novel_patterns)
     novel = {
+        "hotspot": _hot,
         "total_reads": novel_reads,
         "top_patterns": sorted(
             novel_patterns, key=lambda x: -x["count"]
@@ -874,6 +883,38 @@ def _day_passes(n: int, day_total: int) -> bool:
     return n >= EVIDENCE_MIN_READS and n >= EVIDENCE_MIN_SHARE * day_total
 
 
+def _drop_hotspots(patterns: List[dict], hotspots, day_tot: Dict[str, int],
+                   mut_index: Dict[str, Set[str]], candidates_for) -> tuple:
+    """Error hotspots out of novel patterns (2026-10-02).
+
+    A position where the city's data shows >= 2 different new bases is an
+    error hotspot: a virus has one new base at a position. A mutation there
+    that NO pango lineage carries is left out of the pattern; a lineage's own
+    mutation is always kept (22896G, 11851T…: hotspot positions include real
+    lineage sites, whose noise reaches 1 % at deep coverage).
+    A pattern left with < 2 mutations (a real mutation + noise, e.g.
+    11851T + 11878T) or one a pango lineage carries is no longer novel.
+
+    hotspots: positions from the data (deep scan); None -> positions where the
+    novel reads themselves show >= 2 bases on days passing the day rule.
+    Returns (kept patterns, {reads, patterns, positions}). No threshold of its
+    own: the data side uses the check's absent_freq and min_cov."""
+    hot = ({int(p) for p in hotspots} if hotspots is not None
+           else set(_multi_alt_positions(patterns, day_tot)))
+    kept, n_reads, n_pats = [], 0, 0
+    for p in patterns:
+        clean = [m for m in p["mutations"] if _mut_pos(m) not in hot or m in mut_index]
+        if len(clean) == len(p["mutations"]):
+            kept.append(p)
+            continue
+        if len(clean) < MIN_FINGERPRINT or candidates_for(clean):
+            n_reads += int(p["count"])
+            n_pats += 1
+            continue
+        kept.append({**p, "mutations": clean})
+    return kept, {"reads": n_reads, "patterns": n_pats, "positions": len(hot)}
+
+
 def _multi_alt_positions(patterns: List[dict], day_tot: Dict[str, int]) -> Dict[int, List[str]]:
     """Positions where novel reads show SEVERAL different new bases, each on
     some day passing the evidence rule — {position: [bases]}.
@@ -900,15 +941,11 @@ def _multi_alt_positions(patterns: List[dict], day_tot: Dict[str, int]) -> Dict[
 
 
 def _novel_groups(patterns: List[dict], day_tot: Dict[str, int],
-                  top: int = 20, top_errors: int = 10) -> List[dict]:
-    """Novel patterns grouped by mutation set: {mutations, reads, days,
-    likely_error, error_positions}.
+                  top: int = 20) -> List[dict]:
+    """Novel patterns grouped by mutation set: {mutations, reads, days}.
     days = dates passing the same per-day evidence rule as findings
     (>= EVIDENCE_MIN_READS reads and >= EVIDENCE_MIN_SHARE of the day).
-    likely_error: the group has a position where novel reads show several
-    different new bases (see _multi_alt_positions) — listed separately, so
-    error hotspots don't crowd the real candidates out of the top list."""
-    multi = _multi_alt_positions(patterns, day_tot)
+    Error hotspots are already out (_drop_hotspots)."""
     by: Dict[tuple, Dict[str, int]] = {}
     for p in patterns:
         k = tuple(p["mutations"])
@@ -918,13 +955,9 @@ def _novel_groups(patterns: List[dict], day_tot: Dict[str, int],
     out = []
     for k, per_day in by.items():
         days = sorted(d for d, n in per_day.items() if _day_passes(n, day_tot.get(d, 0)))
-        err = {str(_mut_pos(m)): multi[_mut_pos(m)] for m in k if _mut_pos(m) in multi}
-        out.append({"mutations": list(k), "reads": sum(per_day.values()), "days": days,
-                    "likely_error": bool(err), "error_positions": err})
+        out.append({"mutations": list(k), "reads": sum(per_day.values()), "days": days})
     out.sort(key=lambda g: (-len(g["days"]), -g["reads"]))
-    real = [g for g in out if not g["likely_error"]][:top]
-    errors = [g for g in out if g["likely_error"]][:top_errors]
-    return real + errors
+    return out[:top]
 
 
 # a later sample "covered" a finding when this many reads spanned one of its

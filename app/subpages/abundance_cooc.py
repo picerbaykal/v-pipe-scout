@@ -656,6 +656,10 @@ def app():
             # cooc results + auto-submit scanner
             _cooc_res = st.session_state.get("acooc_cooc_results", {})
             _scanner_tasks = st.session_state.get("acooc_scanner_tasks", {})
+            try:
+                _ref_locs = [str(x) for x in (cached_fetch_locations() or [])]
+            except Exception:
+                _ref_locs = list(location_tasks)
             for _loc, _tid in list(st.session_state.get("acooc_cooc_tasks", {}).items()):
                 if _loc not in _cooc_res and _loc not in _failed.get("completeness", {}):
                     _t = celery_app.AsyncResult(_tid)
@@ -680,6 +684,9 @@ def app():
                             "start_date": start_date.isoformat(),
                             "end_date": end_date.isoformat(),
                             "variants": all_selected_variants,
+                            # error hotspots come from every available
+                            # location, not only the run's cities
+                            "reference_locations": _ref_locs,
                         }
                     )
                     _scanner_tasks[_loc] = _stask.id
@@ -1366,19 +1373,20 @@ def app():
 
                   # ---- unnamed signal: novel patterns grouped by mutations ----
                   _nov = {}   # mutations -> {city: days}
-                  _nov_err = {}   # mutations -> {position: [bases]} (likely sequencing error)
+                  # error-hotspot patterns the scanner left out (_drop_hotspots)
+                  _hot_p = sum(int(((_r.get("novel") or {}).get("hotspot") or {}).get("patterns", 0))
+                               for _r in _scan_res_all.values())
+                  _hot_r = sum(int(((_r.get("novel") or {}).get("hotspot") or {}).get("reads", 0))
+                               for _r in _scan_res_all.values())
                   for _loc, _res in _scan_res_all.items():
                       for _g in (_res.get("novel", {}) or {}).get("groups", []) or []:
+                          if _g.get("likely_error"):      # results from before 2026-10-02
+                              continue
                           _k = tuple(_g["mutations"])
                           _nov.setdefault(_k, {})[_loc] = len(_g.get("days", []))
-                          if _g.get("likely_error"):
-                              _nov_err.setdefault(_k, {}).update(_g.get("error_positions") or {})
                   _nov_order = lambda kv: (-max(kv[1].values(), default=0),
                                            -sum(kv[1].values()), kv[0])
-                  _nov_list = sorted([(list(k), v) for k, v in _nov.items() if k not in _nov_err],
-                                     key=_nov_order)
-                  _nov_err_list = sorted([(list(k), v, _nov_err[k]) for k, v in _nov.items()
-                                          if k in _nov_err], key=_nov_order)
+                  _nov_list = sorted([(list(k), v) for k, v in _nov.items()], key=_nov_order)
                   _nov_listed = sum(
                       _g.get("reads", 0) for _res in _scan_res_all.values()
                       for _g in (_res.get("novel", {}) or {}).get("groups", []) or [])
@@ -1432,7 +1440,8 @@ def app():
                   _view = _vt.build(_cities_all, _tcity, _rows, _verdicts_by_city, _findings,
                                     current_panel=set(all_selected_variants),
                                     ot=curated_variants, novel=_nov_list, broad=_broad,
-                                    novel_errors=_nov_err_list,
+                                    novel_hotspot=((_hot_p, _human_reads(_hot_r))
+                                                   if _hot_p else None),
                                     novel_rest=_human_reads(_nov_rest) if _nov_rest else None,
                                     near=_near, near_min_days=EVIDENCE_MIN_DAYS,
                                     data_until={l: _dshort(d) for l, d in _until_short.items()})
@@ -1449,7 +1458,7 @@ def app():
                   _hm_slots = {x["node"]: x for x in _conf_ok + _one + _broader
                                if _tcity in (x.get("per_city") or {})}
                   _hm_nov = {"novel: " + " ".join(k[:4]): list(k) for k, v in _nov.items()
-                             if v.get(_tcity, 0) >= 2 and k not in _nov_err}
+                             if v.get(_tcity, 0) >= 2}
                   _hm_opts = list(_hm_slots) + list(_hm_nov)
                   if _hm_opts:
                       _tname = _tcity.split("(")[0].strip()
