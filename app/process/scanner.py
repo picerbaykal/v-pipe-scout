@@ -844,11 +844,47 @@ def scan_unexplained_patterns(
     return result
 
 
+def _day_passes(n: int, day_total: int) -> bool:
+    """The per-day evidence rule (>= EVIDENCE_MIN_READS reads and
+    >= EVIDENCE_MIN_SHARE of the day's informative reads)."""
+    return n >= EVIDENCE_MIN_READS and n >= EVIDENCE_MIN_SHARE * day_total
+
+
+def _multi_alt_positions(patterns: List[dict], day_tot: Dict[str, int]) -> Dict[int, List[str]]:
+    """Positions where novel reads show SEVERAL different new bases, each on
+    some day passing the evidence rule — {position: [bases]}.
+
+    A virus has one base at a position; a sequencing-error hotspot shows every
+    base (Zürich 17857A / 17857C / 17857G, each next to the real 17859C). Such
+    patterns repeat over days and cities because the error is steady, so the
+    day rule cannot remove them; this can. No new threshold: every base must
+    pass the same rule as findings."""
+    per: Dict[tuple, Dict[str, int]] = {}          # (pos, base) -> {date: reads}
+    for p in patterns:
+        d = str(p.get("date", ""))[:10]
+        for m in p["mutations"]:
+            pos = _mut_pos(m)
+            if pos < 0 or not m[-1:].isalpha():
+                continue
+            slot = per.setdefault((pos, m[-1]), {})
+            slot[d] = slot.get(d, 0) + int(p["count"])
+    bases: Dict[int, List[str]] = {}
+    for (pos, base), by_day in per.items():
+        if any(_day_passes(n, day_tot.get(d, 0)) for d, n in by_day.items()):
+            bases.setdefault(pos, []).append(base)
+    return {pos: sorted(b) for pos, b in bases.items() if len(b) >= 2}
+
+
 def _novel_groups(patterns: List[dict], day_tot: Dict[str, int],
-                  top: int = 20) -> List[dict]:
-    """Novel patterns grouped by mutation set: {mutations, reads, days}.
+                  top: int = 20, top_errors: int = 10) -> List[dict]:
+    """Novel patterns grouped by mutation set: {mutations, reads, days,
+    likely_error, error_positions}.
     days = dates passing the same per-day evidence rule as findings
-    (>= EVIDENCE_MIN_READS reads and >= EVIDENCE_MIN_SHARE of the day)."""
+    (>= EVIDENCE_MIN_READS reads and >= EVIDENCE_MIN_SHARE of the day).
+    likely_error: the group has a position where novel reads show several
+    different new bases (see _multi_alt_positions) — listed separately, so
+    error hotspots don't crowd the real candidates out of the top list."""
+    multi = _multi_alt_positions(patterns, day_tot)
     by: Dict[tuple, Dict[str, int]] = {}
     for p in patterns:
         k = tuple(p["mutations"])
@@ -857,12 +893,14 @@ def _novel_groups(patterns: List[dict], day_tot: Dict[str, int],
         by[k][d] = by[k].get(d, 0) + int(p["count"])
     out = []
     for k, per_day in by.items():
-        days = sorted(d for d, n in per_day.items()
-                      if n >= EVIDENCE_MIN_READS
-                      and n >= EVIDENCE_MIN_SHARE * day_tot.get(d, 0))
-        out.append({"mutations": list(k), "reads": sum(per_day.values()), "days": days})
+        days = sorted(d for d, n in per_day.items() if _day_passes(n, day_tot.get(d, 0)))
+        err = {str(_mut_pos(m)): multi[_mut_pos(m)] for m in k if _mut_pos(m) in multi}
+        out.append({"mutations": list(k), "reads": sum(per_day.values()), "days": days,
+                    "likely_error": bool(err), "error_positions": err})
     out.sort(key=lambda g: (-len(g["days"]), -g["reads"]))
-    return out[:top]
+    real = [g for g in out if not g["likely_error"]][:top]
+    errors = [g for g in out if g["likely_error"]][:top_errors]
+    return real + errors
 
 
 def _evidence_regions(pats: Dict[tuple, int], min_reads: int) -> List[List[int]]:

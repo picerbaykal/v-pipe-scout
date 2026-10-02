@@ -490,7 +490,8 @@ def _near_rows(r, v, changes, cities, sel, gid, n_cols):
 
 
 def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
-          novel=(), broad=(), novel_rest=None, near=None, near_min_days=2) -> str:
+          novel=(), broad=(), novel_rest=None, near=None, near_min_days=2,
+          novel_errors=()) -> str:
     """cities: city names in column order; sel: the chosen city.
     rows: components.abundance_cooc_tree.tree_rows(...).
     verdicts: {city: {variant: {state, reason, n_present, n_measured, n_markers}}}.
@@ -593,7 +594,7 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
     rec = [(m, d) for m, d in novel if max(d.values(), default=0) >= 2]
     one = [(m, d) for m, d in novel if max(d.values(), default=0) == 1]
     low = [(m, d) for m, d in novel if max(d.values(), default=0) == 0]
-    if novel or broad or novel_rest:
+    if novel or broad or novel_rest or novel_errors:
         body.append(f"<tr class='sec'><td colspan='{n_cols}'>Unnamed signal</td></tr>")
         nov_ev = "<span class='dim'>novel — no pango lineage has this combination</span>"
         body += _group("nrec", f"<b style='color:{BLUE}'>Novel, recurring ({len(rec)})</b> "
@@ -614,12 +615,28 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
                                      f"<span class='dim'>fits {n} lineages"
                                      + (f" · mostly {_e(a)}" if a else "") + "</span>", "seen")
                         for m, d, n, a in broad])
+        body += _group("nerr", f"<b style='color:{GREY}'>Likely sequencing errors "
+                       f"({len(novel_errors)})</b> <span class='dim'>· one position shows several "
+                       "different new bases — a virus has one</span>", n_cols,
+                       [_pattern_row(m, d, cities, sel, _fill("#e5e7eb", "#4b5563"), _dashed(GREY),
+                                     "#6b7280", _error_evidence(err), "seen")
+                        for m, d, err in novel_errors])
         if novel_rest:
             body.append(f"<tr class='note'><td colspan='{n_cols}'>+ more small novel patterns "
                         f"({novel_rest} reads) — not listed</td></tr>")
 
     return (CSS + f"<table class='vt'><thead>{head}</thead><tbody>{''.join(body)}</tbody></table>"
             + LEGEND)
+
+
+def _error_evidence(err):
+    """'position 29279 shows A, C, T' for a likely-error novel group."""
+    parts = [f"{int(p):,} shows {', '.join(b)}" for p, b in sorted(err.items(), key=lambda x: int(x[0]))]
+    tip = ("Reads with this combination show several different new bases at the same "
+           "position, each on a day passing the evidence rule (20 reads and 0.5 % of the day). "
+           "A virus has one base there; an error-prone spot in sequencing shows all of them, "
+           "and steadily — so it repeats over days and cities.")
+    return f"<span class='dim' data-tip='{_e(tip)}'>position {'; '.join(parts)}</span>"
 
 
 def _li(style, sym, text):
@@ -648,6 +665,7 @@ _LEGEND_ROWS = (
     + _li(S_NAMED, "0", "named only (shared mutations)")
     + _li(S_NOVEL, "3", "novel · days")
     + _li(S_BROAD, "2", "too broad to name · days")
+    + _li(_fill("#e5e7eb", "#4b5563"), "2", "likely sequencing error · days")
     + _li(S_NEAR, "3", "◆ panel variant ± 1 change · days (a hint)")
     + "</div><div class='row'><span class='t'>Tree</span>"
     + _ld(f"background:{RED}", "found in this city")

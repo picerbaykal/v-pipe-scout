@@ -565,6 +565,7 @@ def app():
             st.session_state["acooc_cooc_results"] = {}
             # clear scanner state too so it re-scans fresh (was showing stale 6/6)
             st.session_state["acooc_scanner_results"] = {}
+            st.session_state["acooc_failed"] = {}
             st.session_state["acooc_scanner_tasks"] = {}
             st.session_state["acooc_scanner_panels"] = {}
             # reset bucket expand flags so scanner starts collapsed on a new run
@@ -606,47 +607,56 @@ def app():
                            + ". Results below reflect the previous run.")
             # collect completed results — track if anything new arrives this cycle
             _new_collected = False
+            # failed tasks: {stage: {city: message}}. A failed task is "ready" but
+            # has no result; without recording it the poller saw it as a fresh
+            # result on every tick and reran the whole page every 3 s forever
+            # (flickering, clicks lost).
+            _failed = st.session_state.setdefault("acooc_failed", {})
+
+            def _fail(stage, loc, err):
+                _failed.setdefault(stage, {})[loc] = str(err)[:300]
+                logger.error(f"{stage} task failed for {loc}: {err}")
 
             # deconvolution results
             _loc_res = st.session_state.get("location_results", {})
             for _loc, _tid in list(location_tasks.items()):
-                if _loc not in _loc_res:
+                if _loc not in _loc_res and _loc not in _failed.get("deconvolution", {}):
                     _t = celery_app.AsyncResult(_tid)
                     if _t.ready():
                         try:
                             _loc_res[_loc] = _t.get()
                             st.session_state["location_results"] = _loc_res
-                            _new_collected = True
-                        except Exception:
-                            pass
+                        except Exception as _e:
+                            _fail("deconvolution", _loc, _e)
+                        _new_collected = True
 
             # scanner results
             scanner_tasks_map = st.session_state.get("acooc_scanner_tasks", {})
             for _loc, _tid in list(scanner_tasks_map.items()):
-                if _loc not in scanner_results:
+                if _loc not in scanner_results and _loc not in _failed.get("scanner", {}):
                     _t = celery_app.AsyncResult(_tid)
                     if _t.ready():
                         try:
                             scanner_results[_loc] = _t.get()
                             st.session_state["acooc_scanner_results"] = scanner_results
-                            _new_collected = True
                             logger.info(f"Scanner results collected for {_loc}")
                         except Exception as _e:
-                            logger.error(f"Scanner task failed for {_loc}: {_e}")
+                            _fail("scanner", _loc, _e)
+                        _new_collected = True
 
             # cooc results + auto-submit scanner
             _cooc_res = st.session_state.get("acooc_cooc_results", {})
             _scanner_tasks = st.session_state.get("acooc_scanner_tasks", {})
             for _loc, _tid in list(st.session_state.get("acooc_cooc_tasks", {}).items()):
-                if _loc not in _cooc_res:
+                if _loc not in _cooc_res and _loc not in _failed.get("completeness", {}):
                     _t = celery_app.AsyncResult(_tid)
                     if _t.ready():
                         try:
                             _cooc_res[_loc] = _t.get()
                             st.session_state["acooc_cooc_results"] = _cooc_res
-                            _new_collected = True
-                        except Exception:
-                            pass
+                        except Exception as _e:
+                            _fail("completeness", _loc, _e)
+                        _new_collected = True
                 # auto-submit scanner when completeness is ready and scanner not yet run
                 if (_loc in _cooc_res
                         and _cooc_res[_loc].get("unexplained_patterns")
@@ -687,12 +697,13 @@ def app():
             _outstanding = False
             for _ln in location_names:
                 # deconv or completeness not yet collected → running
-                if _ln not in _lr_now or _ln not in _cr_now:
+                if ((_ln not in _lr_now and _ln not in _failed.get("deconvolution", {}))
+                        or (_ln not in _cr_now and _ln not in _failed.get("completeness", {}))):
                     _outstanding = True
                     break
                 # completeness done but scanner not yet done → running
                 if (_cr_now.get(_ln, {}).get("unexplained_patterns")
-                        and _ln not in _sr_now):
+                        and _ln not in _sr_now and _ln not in _failed.get("scanner", {})):
                     _outstanding = True
                     break
             if _outstanding:
@@ -712,12 +723,16 @@ def app():
                          _ss.get("acooc_scanner_results", {})),
                     ]
                     _parts, _ready = [], False
+                    _fl = _ss.get("acooc_failed", {})
                     for _name, _tasks, _done in _groups:
                         if not _tasks:
                             continue
-                        _parts.append(f"{_name} {sum(1 for l in _tasks if l in _done)}/{len(_tasks)}")
+                        _bad = _fl.get(_name, {})
+                        _parts.append(f"{_name} {sum(1 for l in _tasks if l in _done)}/{len(_tasks)}"
+                                      + (f" ({len(_bad)} failed)" if _bad else ""))
                         for _l, _tid in _tasks.items():
-                            if _l not in _done and celery_app.AsyncResult(_tid).ready():
+                            if (_l not in _done and _l not in _bad
+                                    and celery_app.AsyncResult(_tid).ready()):
                                 _ready = True
                     if _ready:
                         st.rerun(scope="app")
@@ -829,7 +844,14 @@ def app():
                 )
 
             _agg_bar("Deconvolution", _n_deconv, "#185FA5")
+            _agg_bar("Completeness", _n_cooc, "#16a34a")
             _agg_bar("Scanner", _n_scan, "#EF9F27")
+            _fl_all = st.session_state.get("acooc_failed", {})
+            if any(_fl_all.values()):
+                st.error("Failed: " + " · ".join(
+                    f"{_stg} in {', '.join(c.split('(')[0].strip() for c in _cs)}"
+                    for _stg, _cs in _fl_all.items() if _cs)
+                    + " — the worker may have restarted or run out of memory; re-run to retry.")
 
             # per-city checklist
             _chk_html = "<div style='display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;padding-top:8px;border-top:0.5px solid rgba(0,0,0,.06);'>"
@@ -1260,13 +1282,19 @@ def app():
 
                   # ---- unnamed signal: novel patterns grouped by mutations ----
                   _nov = {}   # mutations -> {city: days}
+                  _nov_err = {}   # mutations -> {position: [bases]} (likely sequencing error)
                   for _loc, _res in _scan_res_all.items():
                       for _g in (_res.get("novel", {}) or {}).get("groups", []) or []:
                           _k = tuple(_g["mutations"])
                           _nov.setdefault(_k, {})[_loc] = len(_g.get("days", []))
-                  _nov_list = sorted([(list(k), v) for k, v in _nov.items()],
-                                     key=lambda kv: (-max(kv[1].values(), default=0),
-                                                     -sum(kv[1].values()), kv[0]))
+                          if _g.get("likely_error"):
+                              _nov_err.setdefault(_k, {}).update(_g.get("error_positions") or {})
+                  _nov_order = lambda kv: (-max(kv[1].values(), default=0),
+                                           -sum(kv[1].values()), kv[0])
+                  _nov_list = sorted([(list(k), v) for k, v in _nov.items() if k not in _nov_err],
+                                     key=_nov_order)
+                  _nov_err_list = sorted([(list(k), v, _nov_err[k]) for k, v in _nov.items()
+                                          if k in _nov_err], key=_nov_order)
                   _nov_listed = sum(
                       _g.get("reads", 0) for _res in _scan_res_all.values()
                       for _g in (_res.get("novel", {}) or {}).get("groups", []) or [])
@@ -1309,6 +1337,7 @@ def app():
                   _view = _vt.build(_cities_all, _tcity, _rows, _verdicts_by_city, _findings,
                                     current_panel=set(all_selected_variants),
                                     ot=curated_variants, novel=_nov_list, broad=_broad,
+                                    novel_errors=_nov_err_list,
                                     novel_rest=_human_reads(_nov_rest) if _nov_rest else None,
                                     near=_near, near_min_days=EVIDENCE_MIN_DAYS)
                   _click = _vt.render(_view, key="acooc_variants_view")
@@ -1324,7 +1353,7 @@ def app():
                   _hm_slots = {x["node"]: x for x in _conf_ok + _one + _broader
                                if _tcity in (x.get("per_city") or {})}
                   _hm_nov = {"novel: " + " ".join(k[:4]): list(k) for k, v in _nov.items()
-                             if v.get(_tcity, 0) >= 2}
+                             if v.get(_tcity, 0) >= 2 and k not in _nov_err}
                   _hm_opts = list(_hm_slots) + list(_hm_nov)
                   if _hm_opts:
                       _tname = _tcity.split("(")[0].strip()
