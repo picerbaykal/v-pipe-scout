@@ -186,6 +186,22 @@ def add_panel_positions(amp_dict: Dict[int, list], variant_signatures: Dict[str,
     return added
 
 
+def coverage_from_rows(rows: List[dict], positions) -> Dict[str, int]:
+    """{position: reads covering it} for one LAPIS co-occurrence answer (one
+    date, one batch). A read covers a position when its base there is not N
+    and not a deletion; rows are read patterns with a "count"."""
+    if not rows:
+        return {}
+    df = pd.DataFrame(rows)
+    cols = [f"[{p}]" for p in positions if f"[{p}]" in df.columns]
+    if not cols or "count" not in df.columns:
+        return {}
+    cnt = pd.to_numeric(df["count"], errors="coerce").fillna(0)
+    covered = df[cols].notna() & ~df[cols].isin(["N", "-"])
+    tot = covered.mul(cnt, axis=0).sum()
+    return {c[1:-1]: int(n) for c, n in tot.items() if n > 0}
+
+
 def run_cooc_panel_completeness(
     location: str,
     start_date: datetime,
@@ -206,7 +222,8 @@ def run_cooc_panel_completeness(
 
     Returns:
         Dict with keys: location, dates, matched_counts, unexplained_counts, completeness,
-        unexplained_patterns and panel_check (co-occurrence check:
+        unexplained_patterns, position_coverage ({date: {position: reads}})
+        and panel_check (co-occurrence check:
         per variant {"markers": [...], "per_date": {date: {marker: [cov, hit,
         link_n, link_ok]}}}). List values are aligned by index (one per date).
     """
@@ -348,7 +365,7 @@ def run_cooc_panel_completeness(
         dates = await client._get_sampling_dates(location, (start_date, end_date))
         logger.info(f"[cooc][{location}] {len(dates)} sampling dates")
         if not dates:
-            return [], []
+            return [], [], {}
 
         # Flat concurrent pool: pre-build ALL (batch, date) pairs and run them
         # in one shared session with a single semaphore. This avoids the nested
@@ -372,6 +389,10 @@ def run_cooc_panel_completeness(
         # confirmed_present spans only its own chunk since reads are short).
         per_date_results = []
         per_date_unexplained = []
+        # reads covering each fetched position per date (base not N / deletion),
+        # ALL reads, explained or not: tells the scanner whether a later sample
+        # could have shown a one-day finding again (2026-10-02)
+        position_coverage: Dict[str, Dict[str, int]] = {}
 
         async def _one_query(session, batch_idx, batch_positions, date_str):
             async with sem:
@@ -380,6 +401,9 @@ def run_cooc_panel_completeness(
                 )
             if not rows:
                 return
+            _slot = position_coverage.setdefault(str(date_str)[:10], {})
+            for _k, _n in coverage_from_rows(rows, batch_positions).items():
+                _slot[_k] = _slot.get(_k, 0) + _n
             # New check (Part B): raw per-date marker counts. Pure and
             # synchronous, so no interleaving between concurrent tasks.
             accumulate_check_stats(rows, batch_positions, variant_signatures,
@@ -423,7 +447,7 @@ def run_cooc_panel_completeness(
             f"[cooc][{location}] processed {len(per_date_results)} dates, "
             f"{len(per_date_unexplained)} with unexplained patterns"
         )
-        return per_date_results, per_date_unexplained
+        return per_date_results, per_date_unexplained, position_coverage
 
     try:
         loop = asyncio.get_event_loop()
@@ -431,11 +455,12 @@ def run_cooc_panel_completeness(
             import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor() as pool:
                 future = pool.submit(asyncio.run, _query_all_batches())
-                per_batch_results, pattern_results = future.result()
+                per_batch_results, pattern_results, position_coverage = future.result()
         else:
-            per_batch_results, pattern_results = loop.run_until_complete(_query_all_batches())
+            per_batch_results, pattern_results, position_coverage = loop.run_until_complete(
+                _query_all_batches())
     except RuntimeError:
-        per_batch_results, pattern_results = asyncio.run(_query_all_batches())
+        per_batch_results, pattern_results, position_coverage = asyncio.run(_query_all_batches())
 
     panel_check = {
         v: {"markers": list(check_markers.get(v, [])),
@@ -454,6 +479,7 @@ def run_cooc_panel_completeness(
             "completeness": [],
             "unexplained_patterns": [],
             "panel_check": panel_check,
+            "position_coverage": position_coverage,
         }
 
     combined = pd.concat(per_batch_results, ignore_index=True)
@@ -478,4 +504,6 @@ def run_cooc_panel_completeness(
         "completeness": per_date["completeness"].astype(float).tolist(),
         "unexplained_patterns": unexplained_agg.to_dict("records"),
         "panel_check": panel_check,
+        # {date: {position: reads covering it}} — see _query_all_batches
+        "position_coverage": position_coverage,
     }

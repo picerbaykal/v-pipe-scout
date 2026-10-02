@@ -349,8 +349,44 @@ def _finding_cells(v, f, cities, sel):
                   if stars else "no ★ marker (combinations only)")
                + (f" · {len(regs)} genome {_pl(len(regs), 'region')}: "
                   + ", ".join(f"{lo:,}–{hi:,}" for lo, hi in regs[:5]) if regs else ""))
+        if n == 1 and d.get("after"):
+            tip += " · 1 day " + _after_text(d["after"], html=False)
         out.append(_cell(n, S_FOUND if n >= 2 else S_ONEDAY, tip, c == sel))
     return "".join(out)
+
+
+def _after_text(a, html=True):
+    """A one-day finding: what happened after its day, in words."""
+    if not a:
+        return ""
+    st, k, cov, seen = a.get("state"), a.get("later", 0), a.get("covered"), a.get("seen", 0)
+    day = _short_date(a.get("day", ""))
+    if st == "latest":
+        t = f"on {day}, the latest sample — too early to tell, watch it"
+    elif st == "seen_again":
+        t = (f"on {day}; back on {seen} of {k} later {_pl(k, 'sample')}, but too weak "
+             "to count as a second day")
+    elif st == "not_covered":
+        t = (f"on {day}; {k} later {_pl(k, 'sample')}, none with ≥ 100 reads at its "
+             "positions — could not have shown up")
+    elif cov is None:
+        t = f"on {day}; not seen in {k} later {_pl(k, 'sample')}"
+    else:
+        t = (f"on {day}; not seen since — {cov} later {_pl(cov, 'sample')} covered its "
+             "positions without it (likely a one-sample artefact)")
+    if html and st in ("latest", "seen_again"):
+        return f"<b>{t}</b>"
+    return t
+
+
+def _short_date(d):
+    """'2026-08-22' -> '22 Aug'."""
+    try:
+        from datetime import date
+        x = date.fromisoformat(str(d)[:10])
+        return f"{x.day} {x.strftime('%b')}"
+    except Exception:
+        return str(d)
 
 
 _REGION_TIP = ("genome regions = separate stretches of the genome where evidence reads "
@@ -375,6 +411,8 @@ def _finding_evidence(f, sel):
            + (f"{len(stars)} ★ {_pl(len(stars), 'marker')}" if stars else "combinations only")
            + f" · <span data-tip='{_e(_REGION_TIP)}'>{len(regs)} genome "
            f"{_pl(len(regs), 'region')}</span>")
+    if n == 1 and d.get("after"):
+        txt += " — " + _after_text(d["after"])
     weak = []
     if not stars:
         weak.append("no ★ marker")

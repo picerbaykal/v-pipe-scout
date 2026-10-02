@@ -677,6 +677,9 @@ def app():
                                     _cooc_res[_loc].get("dates", []),
                                     _cooc_res[_loc].get("matched_counts", []),
                                     _cooc_res[_loc].get("unexplained_counts", []))},
+                            # reads per position per date: did later samples
+                            # cover a one-day finding?
+                            "position_coverage": _cooc_res[_loc].get("position_coverage"),
                         }
                     )
                     _scanner_tasks[_loc] = _stask.id
@@ -1178,6 +1181,8 @@ def app():
                           # facts for the table (scanner _add_notes)
                           "evidence_days": dict(_c.get("evidence_days", {}) or {}),
                           "regions": list(_c.get("evidence_regions", []) or []),
+                          # one-day findings: what happened after that day
+                          "after": _c.get("one_day_after"),
                           # this city's own blocks, for this city's heatmap
                           "blocks": _c.get("member_blocks", []) or [],
                       }
@@ -1265,7 +1270,7 @@ def app():
                           _pc = {c: {"days": 0} for c in _slot.get("cities", [])}
                       else:
                           _pc = {c: {"days": p.get("days", 0), "stars": p.get("star", []),
-                                     "regions": p.get("regions", [])}
+                                     "regions": p.get("regions", []), "after": p.get("after")}
                                  for c, p in (_slot.get("per_city") or {}).items()}
                       _ok = any((d.get("days") or 0) >= 2 for d in _pc.values())
                       return {"status": _status if _status != "confirmed" or _ok else "1 day",

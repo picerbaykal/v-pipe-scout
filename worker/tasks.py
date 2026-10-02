@@ -346,7 +346,7 @@ def run_cooc_completeness_lapis(self, location: str, start_date: str, end_date: 
 @app.task(bind=True)
 def run_cooc_scanner_lapis(self, location: str, start_date: str, end_date: str,
                            variants: list, unexplained_patterns: list,
-                           day_totals: dict = None):
+                           day_totals: dict = None, position_coverage: dict = None):
     """
     Celery task for the co-occurrence panel scanner.
 
@@ -364,6 +364,9 @@ def run_cooc_scanner_lapis(self, location: str, start_date: str, end_date: str,
             from run_cooc_completeness_lapis result["unexplained_patterns"]
         day_totals: {date: matched + unexplained reads} from the same result —
             the denominator of the scanner's per-day evidence share
+        position_coverage: {date: {position: reads covering it}} from the same
+            result — lets the scanner tell, for a finding seen on one day only,
+            whether later samples covered its positions
     """
     import sys, re
     import pandas as pd
@@ -414,6 +417,7 @@ def run_cooc_scanner_lapis(self, location: str, start_date: str, end_date: str,
             panel_parent_map=panel_parent_map,
             min_read_count=500,
             day_totals=day_totals,
+            position_coverage=position_coverage,
         )
         # fill designation dates on clade findings for the UI
         try:

@@ -388,6 +388,7 @@ def scan_unexplained_patterns(
     cowwid_signatures: Optional[Dict[str, Set[str]]] = None,
     truly_private_muts: Optional[Dict[str, Set[str]]] = None,
     day_totals: Optional[Dict[str, int]] = None,
+    position_coverage: Optional[Dict[str, Dict[str, int]]] = None,
 ) -> dict:
     """Classify unexplained co-occurrence patterns (Option C).
 
@@ -401,6 +402,9 @@ def scan_unexplained_patterns(
         day_totals: {date: informative reads that day (matched + unexplained)}
             from the completeness result; without it the day's unexplained
             reads are used (stricter share test, never looser).
+        position_coverage: {date: {position: reads covering it}} (all reads)
+            from the completeness result; lets a one-day finding say whether
+            later samples covered its positions (one_day_after).
 
     Returns dict with keys:
         resolved_lineage:  [{node, relationship, panel_ancestor, total_reads,
@@ -411,7 +415,8 @@ def scan_unexplained_patterns(
         (every clade finding also carries evidence_days {date: ★ reads} and
          counted_days [dates passing the day test])
         one_day:           clade findings with ★ evidence on fewer than
-                           EVIDENCE_MIN_DAYS days (possible jackpot, watch)
+                           EVIDENCE_MIN_DAYS days (possible jackpot, watch);
+                           each has one_day_after (see _one_day_after)
         unresolved:        [{fingerprint, candidate_count, common_ancestor,
                              total_reads, pattern_count}]
         novel:             {total_reads, pattern_count, top_patterns}
@@ -756,6 +761,9 @@ def scan_unexplained_patterns(
     confirmed = [c for c in _all_clades if len(c["counted_days"]) >= EVIDENCE_MIN_DAYS]
     one_day = [c for c in _all_clades if 0 < len(c["counted_days"]) < EVIDENCE_MIN_DAYS]
     _add_notes(confirmed, one_day, panel_set, all_lineage_signatures, tree)
+    _sampling = sorted(set(_day_tot) | set(str(d)[:10] for d in (position_coverage or {})))
+    for c in one_day:
+        c["one_day_after"] = _one_day_after(c, _sampling, position_coverage)
     for c in _all_clades:
         c.pop("_evidence_patterns", None)       # sets: not JSON, never shipped
     _backbone = [c for c in _all_clades if not c["counted_days"]]
@@ -901,6 +909,53 @@ def _novel_groups(patterns: List[dict], day_tot: Dict[str, int],
     real = [g for g in out if not g["likely_error"]][:top]
     errors = [g for g in out if g["likely_error"]][:top_errors]
     return real + errors
+
+
+# a later sample "covered" a finding when this many reads spanned one of its
+# ★ positions — the same minimum the co-occurrence check uses to measure a marker
+MIN_COVERAGE = int(_cfg("check.min_cov", 100))
+
+
+def _one_day_after(c: dict, sampling: List[str],
+                   coverage: Optional[Dict[str, Dict[str, int]]]) -> dict:
+    """What happened after a one-day finding's day, in this city:
+
+      latest       its day is the last sample — too early to tell, watch it
+      seen_again   later samples had some evidence reads, but on no day enough
+                   to count (day rule) — weak recurrence
+      not_covered  later samples exist but none had >= MIN_COVERAGE reads at
+                   its ★ positions — it could not have shown up
+      not_seen     later samples covered its positions and it was gone —
+                   likely a one-sample artefact
+
+    Returns {state, day, later, covered, seen, last}; `covered` is None when
+    the result has no per-position coverage (older completeness results)."""
+    days = sorted(str(d)[:10] for d in c.get("counted_days", []) or [])
+    day = days[-1] if days else ""
+    later = [d for d in sampling if d > day]
+    ev = {str(d)[:10]: n for d, n in (c.get("evidence_days") or {}).items()}
+    seen = [d for d in later if ev.get(d, 0) > 0]
+    out = {"day": day, "later": len(later), "seen": len(seen),
+           "last": sampling[-1] if sampling else "", "covered": None}
+    pos = sorted({_mut_pos(m) for b in c.get("member_blocks", []) or []
+                  for m, s in (b.get("mut_star") or {}).items() if s})
+    if not pos:             # combinations only: their mutations' positions
+        pos = sorted({_mut_pos(m) for b in c.get("member_blocks", []) or []
+                      for m in b.get("discriminating", [])})
+    if coverage is not None:
+        out["covered"] = sum(
+            1 for d in later
+            if max((int((coverage.get(d) or {}).get(str(p), 0)) for p in pos), default=0)
+            >= MIN_COVERAGE)
+    if not later:
+        out["state"] = "latest"
+    elif seen:
+        out["state"] = "seen_again"
+    elif out["covered"] == 0:
+        out["state"] = "not_covered"
+    else:
+        out["state"] = "not_seen"
+    return out
 
 
 def _evidence_regions(pats: Dict[tuple, int], min_reads: int) -> List[List[int]]:
