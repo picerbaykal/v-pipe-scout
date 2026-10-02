@@ -478,6 +478,29 @@ def run_cooc_deep_scan_lapis(self, location: str, start_date: str, end_date: str
 
 
 @app.task(bind=True)
+def run_cooc_lineages_check_lapis(self, location: str, start_date: str, end_date: str,
+                                  variants: list, panel: list):
+    """Phase 3, cross-check (2026-10-02): the ★ marker check for lineages the
+    deep scan named in OTHER cities (cooc.lineages_check). Returns {dates,
+    per_variant: {v: {markers, per_date}}}."""
+    import sys
+    from datetime import datetime
+    sys.path.insert(0, "/app_shared")
+    from cooc import lineages_check
+    _p = _reporter(f"task_progress:{self.request.id}", total=2)
+    try:
+        _p(1, f"Checking {len(variants)} lineages in {location}...")
+        r = lineages_check(location, datetime.fromisoformat(start_date),
+                           datetime.fromisoformat(end_date), variants, panel,
+                           progress_callback=_p, step=1)
+        _p(2, "Done.")
+        return r
+    except Exception as e:
+        _p(0, f"Error: {str(e)}")
+        raise
+
+
+@app.task(bind=True)
 def run_cooc_variant_check_lapis(self, location: str, start_date: str, end_date: str,
                                  variant: str, panel: list):
     """"Investigate a variant" -> "Check in data": read counts at one lineage's

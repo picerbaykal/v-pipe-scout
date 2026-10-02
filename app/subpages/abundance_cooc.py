@@ -580,6 +580,8 @@ def app():
             st.session_state["acooc_failed"] = {}
             st.session_state["acooc_scanner_tasks"] = {}
             st.session_state["acooc_scanner_panels"] = {}
+            st.session_state["acooc_xcheck_tasks"] = {}
+            st.session_state["acooc_xcheck_results"] = {}
             # start times of the two progress phases (for "time left")
             st.session_state["acooc_phase_t0"] = {0: time.time()}
             # reset bucket expand flags so scanner starts collapsed on a new run
@@ -707,6 +709,50 @@ def app():
 
             location_names = list(location_tasks.keys())
 
+            # ── phase 3: cross-check (2026-10-02) ─────────────────────────────
+            # A lineage the deep scan named in SOME city is checked by its ★
+            # markers in EVERY city (the panel's check). A city's scan names a
+            # lineage only from reads with >= 2 mutations beyond the panel, so a
+            # young sublineage of a panel variant (PQ.16.1.1 under NB.1.8.1 in
+            # Basel: one extra mutation per read) stayed "–" although its marker
+            # was on 44 % of the reads.
+            _xt = st.session_state.setdefault("acooc_xcheck_tasks", {})
+            _xr = st.session_state.setdefault("acooc_xcheck_results", {})
+            for _ln, _tid in list(_xt.items()):
+                if _ln not in _xr and _ln not in _failed.get("cross-check", {}):
+                    _t = celery_app.AsyncResult(_tid)
+                    if _t.ready():
+                        try:
+                            _xr[_ln] = _t.get()
+                        except Exception as _e:
+                            _fail("cross-check", _ln, _e)
+                        _new_collected = True
+            _scan_all = st.session_state.get("acooc_scanner_results", {})
+            _scans_done = all(_l in _scan_all or _l in _failed.get("scanner", {})
+                              for _l in location_names)
+            if _scans_done and not _xt and _scan_all:
+                _found_in = {}
+                for _l, _r in _scan_all.items():
+                    for _k in ("resolved_clade", "one_day"):
+                        for _c in (_r.get(_k) or []):
+                            if _c.get("node"):
+                                _found_in.setdefault(_c["node"], set()).add(_l)
+                _ran_pan = set(st.session_state.get("acooc_ran_panel") or all_selected_variants)
+                for _l in location_names:
+                    _miss = sorted(n for n, cs in _found_in.items()
+                                   if _l not in cs and n not in _ran_pan)[:40]
+                    if not _miss or _l in _failed.get("scanner", {}):
+                        _xr[_l] = {"dates": [], "per_variant": {}, "found_in": {}}
+                        _xt[_l] = ""
+                        continue
+                    _xtask = celery_app.send_task("tasks.run_cooc_lineages_check_lapis", kwargs={
+                        "location": _l, "start_date": start_date.isoformat(),
+                        "end_date": end_date.isoformat(), "variants": _miss,
+                        "panel": sorted(_ran_pan)})
+                    _xt[_l] = _xtask.id
+                st.session_state["acooc_xcheck_found_in"] = {n: sorted(cs) for n, cs in _found_in.items()}
+                logger.info(f"Cross-check submitted: {sum(1 for t in _xt.values() if t)} cities")
+
             # ── Autorefresh decision — AFTER collection + scanner submission ───
             # Base it on "is there outstanding work?" rather than raw task state,
             # so newly-submitted scanner tasks keep the refresh alive and the bars
@@ -726,6 +772,13 @@ def app():
                         and _ln not in _sr_now and _ln not in _failed.get("scanner", {})):
                     _outstanding = True
                     break
+            # phase 3 (cross-check) not yet in → running
+            if not _outstanding and _sr_now:
+                _xt_now = st.session_state.get("acooc_xcheck_tasks", {})
+                _xr_now = st.session_state.get("acooc_xcheck_results", {})
+                if not _xt_now or any(_l not in _xr_now and _l not in _failed.get("cross-check", {})
+                                      for _l in location_names):
+                    _outstanding = True
             if not _outstanding and _new_collected:
                 # final result(s) just arrived and nothing is left running —
                 # force one full-page rerun so the left column (Run button) and
@@ -832,6 +885,8 @@ def app():
                 ("2 · " + ("Deep scan — panel + positions with a mutation in the data"
                            if _deep_on else "Scanner — panel positions only"),
                  [("scanner", "acooc_scanner_tasks", "acooc_scanner_results")], "#EF9F27"),
+                ("3 · Cross-check — lineages found in any city, checked in every city",
+                 [("cross-check", "acooc_xcheck_tasks", "acooc_xcheck_results")], "#dc2626"),
             ]
 
             def _task_frac(tid):
@@ -1219,6 +1274,17 @@ def app():
                                   _fc.get("dates") or [],
                                   recent=int(get_cooc_setting("check.recent_samples", default=5)))
 
+                  def _xcheck(_loc, _node):
+                      """Phase 3: the ★ marker check of a lineage named in another
+                      city, for this city (None when it wasn't checked here)."""
+                      _x = (st.session_state.get("acooc_xcheck_results", {}) or {}).get(_loc) or {}
+                      _pv = (_x.get("per_variant") or {}).get(_node)
+                      if not _pv or not _pv.get("markers"):
+                          return None
+                      return _cid(_pv.get("markers") or [], _pv.get("per_date") or {},
+                                  _x.get("dates") or [],
+                                  recent=int(get_cooc_setting("check.recent_samples", default=5)))
+
                   def _ingest_clade(_c, _loc, _bucket=None):
                       # Route one finding (top-level OR a promoted sub-finding) into
                       # the new/sub bucket and aggregate its reads across cities.
@@ -1385,6 +1451,16 @@ def app():
                                      "regions": p.get("regions", []), "after": p.get("after"),
                                      "check": p.get("check")}
                                  for c, p in (_slot.get("per_city") or {}).items()}
+                          # phase 3: the other cities, by the cross-check
+                          _fin = (st.session_state.get("acooc_xcheck_found_in") or {}).get(
+                              _slot.get("node"), sorted(_pc))
+                          for _xc in location_names:
+                              if _xc in _pc:
+                                  continue
+                              _chk = _xcheck(_xc, _slot.get("node"))
+                              if _chk is not None:
+                                  _pc[_xc] = {"days": 0, "check": _chk, "xcheck": True,
+                                              "found_in": [c for c in _fin if c != _xc]}
                       _ok = any((d.get("days") or 0) >= 2 for d in _pc.values())
                       # + Add (2026-10-02): the panel check would confirm it in at
                       # least one city, and it is more than one sample (>= 2 days

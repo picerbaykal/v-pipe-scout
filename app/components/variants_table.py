@@ -420,6 +420,17 @@ def _finding_cells(v, f, cities, sel):
         n = int(d.get("days", 0) or 0)
         stars, regs = d.get("stars") or [], d.get("regions") or []
         chk = d.get("check")
+        if d.get("xcheck") and chk:
+            # phase 3: not named by this city's scan, checked because it was
+            # named elsewhere — same colours, dashed border
+            style, label, _dot, _ink, _share = _scale(chk, found=True)
+            style += "border:1.5px dashed #b91c1c;"
+            fi = ", ".join(city_name(x) for x in d.get("found_in") or [])
+            out.append(_cell(label, style, f"{v} · {city_name(c)}, last {_recent_n()} samples "
+                             f"with enough reads: {_vote_text(chk)} · not named by this city's "
+                             f"scan (its reads here may carry only one mutation beyond your "
+                             f"panel); checked because it was found in {fi}", c == sel))
+            continue
         if chk and n > 0:
             # the same measure as the panel: ★ markers present / measurable
             style, label, _dot, _ink, _share = _scale(chk, found=True)
@@ -517,6 +528,13 @@ def _finding_evidence(f, sel):
         where = (f" · evidence in {n_cities} other {_pl(n_cities, 'city')}" if n_cities else "")
         return f"<span class='dim'>not seen in this city{where}</span>"
     n = int(d.get("days", 0) or 0)
+    if d.get("xcheck"):
+        tl = (d.get("check") or {}).get("timeline")
+        fi = ", ".join(city_name(x) for x in d.get("found_in") or [])
+        why = (f"not named by this city's scan; checked because it was found in {fi} — "
+               "its ★ markers one by one, as for panel variants")
+        return (f"{_day_cal(tl, RED)}<span data-tip='{_e(why)}'>{_e(_cal_phrase(tl))}"
+                f" <span class='dim'>· cross-check</span></span>")
     if n == 0:
         return ("<span class='dim'>named only — reads point to it but also fit related "
                 "lineages; no day with specific evidence</span>")
@@ -720,6 +738,8 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
             named = f.get("status") == "named"
             col = VIOLET if named else RED
             dk = ("ring" if named or n_sel == 0 else "filled" if n_sel >= 2 else "dashed")
+            if _dsel.get("xcheck"):
+                dk = "dashed" if (_dsel.get("check") or {}).get("state") == "present" else "ring"
             tip = (f"{v}: not in your panel · {sname}: "
                    + ("named only" if named else f"evidence on {n_sel} {_pl(n_sel, 'day')}"
                       if n_sel else "not seen here"))
@@ -874,6 +894,10 @@ _LEGEND_ROWS = (
               for d in ({"n_markers": 3, "n_measured": 3, "n_present": 0},
                         {"n_markers": 3, "n_measured": 3, "n_present": 3}))
     + "</span>"
+    + "<span class='i'><i class='c' style='width:auto;padding:0 6px;"
+    + _scale({"n_markers": 2, "n_measured": 1, "n_present": 1}, found=True)[0]
+    + "border:1.5px dashed #b91c1c;'>1/1</i>dashed = not named by this city's scan, "
+      "checked because found in another city</span>"
     + _li(S_FOUND, "5", "older results: days with evidence")
     + _li(S_NAMED, "0", "named only (shared mutations)")
 
