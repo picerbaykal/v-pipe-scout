@@ -957,7 +957,8 @@ def app():
             # CSS on their container) so they read as navigation, not as another
             # row of city buttons.
             st.session_state.setdefault("acooc_section", "Deconvolution results")
-            _sections = ["Deconvolution results", "Co-occurrence results", "Investigate a variant"]
+            _sections = ["Deconvolution results", "Co-occurrence results", "Signal over time",
+                         "Investigate a variant"]
             _scols = st.columns(len(_sections))
             for _si, _snm in enumerate(_sections):
                 with _scols[_si]:
@@ -1492,8 +1493,8 @@ def app():
                           st.session_state["acooc_tree_city"] = _click["city"]
                       st.rerun()
 
-                  st.caption("📈 Signal over time (co-occurrence and mutation heatmaps) "
-                             "of any lineage or novel pattern: **Investigate a variant**.")
+                  st.caption("📈 Per-week heatmaps of any lineage or novel pattern: "
+                             "**Signal over time**.")
 
 
             if _active_section == "Investigate a variant":
@@ -1501,18 +1502,6 @@ def app():
               st.markdown("---")
               # "Check in data" uses the run's cities, window and panel, so its
               # answer matches the results above
-              # the scanner's groups per city and finding, and the recurring novel
-              # patterns, for the heatmaps
-              _inv_sr = ({} if _outstanding
-                         else st.session_state.get("acooc_scanner_results", {}) or {})
-              _inv_blocks = {
-                  _c: {f["node"]: f.get("member_blocks") or []
-                       for _k in ("resolved_clade", "one_day") for f in (_r.get(_k) or [])}
-                  for _c, _r in _inv_sr.items()}
-              _inv_novel = {" ".join(g["mutations"]): list(g["mutations"])
-                            for _r in _inv_sr.values()
-                            for g in ((_r.get("novel") or {}).get("groups") or [])
-                            if len(g.get("days") or []) >= 2 and not g.get("likely_error")}
               _rd = st.session_state.get("acooc_ran_dates") or (start_date.isoformat(),
                                                                 end_date.isoformat())
               render_variant_explorer(
@@ -1521,9 +1510,23 @@ def app():
                   # the look-up always works; "Check in data" waits for the run
                   cities=None if _outstanding else list(location_names), start_date=_rd[0], end_date=_rd[1],
                   celery_app=celery_app,
-                  # "Signal over time" heatmaps (moved here from the bottom of the
-                  # co-occurrence results, 2026-10-02)
-                  client=wiseLoculus, novel=_inv_novel, finding_blocks=_inv_blocks,
+              )
+
+            if _active_section == "Signal over time":
+              # ── per-week heatmaps (2026-10-02; were at the bottom of the
+              #    co-occurrence results) ─────────────────────────────────────────
+              st.markdown("---")
+              from components.signal_over_time_ui import render_signal_over_time
+              _rd2 = st.session_state.get("acooc_ran_dates") or (start_date.isoformat(),
+                                                                 end_date.isoformat())
+              render_signal_over_time(
+                  pango_loader=cached_get_pango_loader(), client=wiseLoculus,
+                  cities=list(location_names), start_date=_rd2[0], end_date=_rd2[1],
+                  panel=st.session_state.get("acooc_ran_panel") or all_selected_variants,
+                  # the scan's groups and evidence days once it is done; before
+                  # that, every lineage uses its ★ marker groups
+                  scanner_results=({} if _outstanding else
+                                   st.session_state.get("acooc_scanner_results", {}) or {}),
                   default_city=st.session_state.get("acooc_tree_city"),
               )
 
