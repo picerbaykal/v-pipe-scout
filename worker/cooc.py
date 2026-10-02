@@ -217,6 +217,67 @@ def data_positions(location: str, start_date: datetime, end_date: datetime,
     return out
 
 
+def variant_check(location: str, start_date: datetime, end_date: datetime,
+                  variant: str, panel: List[str],
+                  progress_callback: Optional[Callable] = None) -> dict:
+    """"Investigate a variant" -> "Check in data" (2026-10-02): read counts at
+    one lineage's ★ markers in one city, as the panel check would collect them
+    if the lineage were added to `panel`. Reads only the lineage's own signature
+    positions (markers + neighbours for the link test), so it is quick.
+
+    Returns {variant, markers, dates, per_date: {date: {marker: [cov, hit,
+    link_n, link_ok]}}}."""
+    pango_loader = PangoLoader(get_pango_summary_path())
+    vs = _build_variant_signatures(list(dict.fromkeys(list(panel or []) + [variant])),
+                                   pango_loader, _COWWID_VARIANTS)
+    markers = specific_markers(vs, get_all_lineage_signatures(),
+                               get_panel_parent_map()).get(variant, [])
+    client = WiseLoculusLapis(get_wiseloculus_url())
+    out = {"variant": variant, "markers": markers, "dates": [], "per_date": {}}
+
+    async def _run():
+        dates = await client._get_sampling_dates(location, (start_date, end_date))
+        out["dates"] = sorted(str(d)[:10] for d in dates)
+        if not markers or not dates:
+            return
+        positions = sorted(_sig_positions(vs[variant]))
+        batches = [positions[i:i + 500] for i in range(0, len(positions), 500)]
+        stats: Dict[str, dict] = {}
+        import aiohttp
+        from api.wiseloculus import MAX_CONCURRENT_CONNECTIONS, MAX_CONNECTIONS_PER_HOST
+        sem = asyncio.Semaphore(BATCH_CONCURRENCY)
+        n_q, done_q = len(batches) * len(dates), [0]
+
+        async def _one(session, bpos, d):
+            try:
+                async with sem:
+                    rows = await client._fetch_cooccurrence_for_date(session, location, d, bpos)
+                if rows:
+                    accumulate_check_stats(rows, bpos, {variant: vs[variant]},
+                                           {variant: markers}, stats)
+            finally:
+                done_q[0] += 1
+                if progress_callback:
+                    progress_callback(2, f"Reading reads: {done_q[0]}/{n_q} queries",
+                                      done_q[0] / n_q)
+
+        async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=120),
+                connector=aiohttp.TCPConnector(limit=MAX_CONCURRENT_CONNECTIONS,
+                                               limit_per_host=MAX_CONNECTIONS_PER_HOST)) as s:
+            res = await asyncio.gather(*[_one(s, b, d) for b in batches for d in dates],
+                                       return_exceptions=True)
+        n_err = sum(isinstance(r, Exception) for r in res)
+        if n_err:
+            logger.error(f"[cooc][{location}] variant check {variant}: {n_err} queries failed")
+        out["per_date"] = stats.get(variant, {})
+
+    asyncio.run(_run())
+    logger.info(f"[cooc][{location}] variant check {variant}: {len(markers)} markers, "
+                f"{len(out['dates'])} dates")
+    return out
+
+
 def coverage_from_rows(rows: List[dict], positions) -> Dict[str, int]:
     """{position: reads covering it} for one LAPIS co-occurrence answer (one
     date, one batch). A read covers a position when its base there is not N

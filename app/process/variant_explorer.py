@@ -1,24 +1,21 @@
-"""Variant explorer — on-demand investigation of ANY variant's co-occurrence
-detectability and its connections to other variants.
+"""Variant explorer — on-demand look-up of ANY pango lineage.
 
-Purpose (not detection — the scanner does that): let a user look up any pango
-lineage, including blind spots the scanner cannot surface (e.g. KP.2), to
-understand WHY it's a blind spot, HOW it connects to other variants, and its
-co-occurrence signal if any. Pure logic (no Streamlit, no IO): everything is
-derived from the pango tree + signatures, plus an optional co-occurrence result
-for "found in data". Not anchored to the officially-tracked list — works for any
-variant the user types.
+Two parts (2026-10-02):
+  1. investigate_variant — from the tree only: can co-occurrence tell this
+     lineage apart (★ markers, the SAME rule as the panel check:
+     process.cooc.specific_markers), and how it connects to others.
+  2. check_in_data — the worker's read counts at its ★ markers in one city
+     (tasks.run_cooc_variant_check_lapis) -> present / absent / mixed /
+     not covered, plus one mark per sampling day for a tiny calendar.
+
+Pure logic (no Streamlit, no IO). Not anchored to the panel or the tracked
+list: works for any lineage the user picks, also an old one — its markers are
+read and the answer is "absent" when the data covers them and they're not there.
 """
 
 from typing import Dict, List, Optional, Set
 
-# a mutation is "distinctive" (variant-discriminating) if carried by at most this
-# many lineages — the same notion the scanner uses for clade-distinctiveness
-_DISC_CARRIERS = 30
-
-
-def _pos(m: str) -> str:
-    return m[:-1] if m and m[-1].isalpha() else m
+_SUB = "ACGT"
 
 
 class _Tree:
@@ -30,14 +27,6 @@ class _Tree:
             if p:
                 self.child.setdefault(p, []).append(l)
 
-    def ancestors(self, v: str) -> List[str]:
-        out, cur, seen = [], v, set()
-        while cur in self.parent and self.parent[cur] and cur not in seen:
-            seen.add(cur)
-            cur = self.parent[cur]
-            out.append(cur)
-        return out
-
     def children(self, v: str) -> List[str]:
         return sorted(self.child.get(v, []))
 
@@ -48,147 +37,123 @@ class _Tree:
         return sorted(c for c in self.child.get(p, []) if c != v)
 
 
-def _mutation_carrier_counts(all_sigs: Dict[str, Set[str]]) -> Dict[str, int]:
-    counts: Dict[str, int] = {}
-    for s in all_sigs.values():
-        for m in s:
-            counts[m] = counts.get(m, 0) + 1
-    return counts
+# one index per pango loader (the page keeps one loader for its lifetime)
+_CACHE: Dict[int, tuple] = {}
 
 
-def investigate_variant(
-    variant: str,
-    pango_loader,
-    panel: Optional[List[str]] = None,
-    cooc_result: Optional[dict] = None,
-    all_sigs: Optional[Dict[str, Set[str]]] = None,
-    mut_carriers: Optional[Dict[str, int]] = None,
-) -> Dict:
-    """Return a fact sheet + connections for `variant`.
+def _indices(pango_loader):
+    k = id(pango_loader)
+    if k not in _CACHE:
+        raw = pango_loader.get_raw_data()
+        sigs = {}
+        for l in raw:
+            s = {m for m in (pango_loader.get_signature(l) or ()) if m and m[-1] in _SUB}
+            if len(s) >= 2:
+                sigs[l] = s
+        parent = {l: e.get("parent", "") for l, e in raw.items()}
+        _CACHE.clear()
+        _CACHE[k] = (raw, sigs, parent, _Tree(raw))
+    return _CACHE[k]
 
-    Args:
-        variant: the pango lineage to investigate (any lineage, not just OT/panel).
-        pango_loader: provides get_raw_data() and get_signature().
-        panel: current panel variant names (for the in-panel flag).
-        cooc_result: optional cooc-pipeline result (for found-in-data).
-        all_sigs / mut_carriers: optional precomputed indices (built if omitted).
 
-    Returns dict:
-        {found, name, in_data, in_panel, is_recombinant,
-         detectable, n_discriminating, reason,
-         found_in_data, found_reads,
-         parent, siblings, children, oscillates_with, nearest_detectable}
-    """
-    raw = pango_loader.get_raw_data()
+def variant_markers(variant: str, pango_loader, panel: Optional[List[str]] = None) -> List[str]:
+    """★ markers of `variant` as the panel check would compute them if it were
+    added to `panel` (most specific first)."""
+    from process.cooc import specific_markers
+    _, sigs, parent, _ = _indices(pango_loader)
+    vs = {v: sigs.get(v, set()) for v in list(dict.fromkeys(list(panel or []) + [variant]))}
+    return specific_markers(vs, sigs, parent).get(variant, [])
+
+
+def investigate_variant(variant: str, pango_loader,
+                        panel: Optional[List[str]] = None) -> Dict:
+    """Fact sheet for `variant`:
+        {found, name, in_panel, is_recombinant, detectable, markers, reason,
+         parent, siblings, children, oscillates_with}
+    detectable = it has >= 1 ★ marker (same rule as the panel check)."""
+    raw, sigs, _parent, tree = _indices(pango_loader)
     if variant not in raw:
         return {"found": False, "name": variant,
                 "reason": "Not a known pango lineage in the current data."}
-
-    if all_sigs is None:
-        all_sigs = {l: pango_loader.get_signature(l) for l in raw}
-        all_sigs = {l: s for l, s in all_sigs.items() if s}
-    if mut_carriers is None:
-        mut_carriers = _mutation_carrier_counts(all_sigs)
-
-    tree = _Tree(raw)
-    sig = pango_loader.get_signature(variant) or set()
-    panel = panel or []
-
-    # detectability: distinctive (few-carrier) mutations
-    disc = sorted(m for m in sig if mut_carriers.get(m, 0) <= _DISC_CARRIERS)
-    detectable = len(disc) >= 1
-    is_recomb = variant.startswith("X") and not raw.get(variant, {}).get("parent")
-
-    parent = raw.get(variant, {}).get("parent", "")
+    sig = sigs.get(variant, set())
+    panel = list(panel or [])
+    try:
+        markers = variant_markers(variant, pango_loader, panel)
+    except Exception:
+        markers = []
+    parent = raw[variant].get("parent", "")
     siblings = tree.siblings(variant)
-    children = tree.children(variant)
 
-    # reason string
-    if detectable:
-        reason = (f"{len(disc)} distinctive mutation(s) carried by ≤{_DISC_CARRIERS} "
-                  f"lineages (e.g. {', '.join(disc[:3])}) — co-occurrence can "
-                  f"resolve this clade.")
+    if markers:
+        reason = (f"{len(markers)} ★ marker{'s' if len(markers) > 1 else ''} "
+                  f"(e.g. {', '.join(markers[:3])}) — mutations it and its "
+                  f"sublineages carry, and at most a few other lineages.")
+    elif sig:
+        reason = ("no ★ marker — each of its mutations is also carried by another "
+                  "panel variant or by many lineages outside its family, so reads "
+                  "can't point to it. Quantify with deconvolution.")
     else:
-        # find the single lowest-carrier mutation to explain the sharing
-        if sig:
-            m_least = min(sig, key=lambda m: mut_carriers.get(m, 0))
-            n_least = mut_carriers.get(m_least, 0)
-            reason = (f"0 distinctive mutations — its rarest mutation ({m_least}) is "
-                      f"shared with {n_least} lineages, so no combination is unique "
-                      f"to it. Co-occurrence can't confirm it; quantify with "
-                      f"deconvolution.")
-        else:
-            reason = "No signature mutations available for this lineage."
+        reason = "No signature mutations available for this lineage."
 
-    # oscillating partners: siblings that are near-identical (Jaccard ≥ 0.98).
-    # Whole families (e.g. KP.*) can be mutually near-identical, so this may be
-    # several — that's the honest picture (they can't be told apart).
-    oscillates_with = []
-    for sib in siblings:
-        ss = all_sigs.get(sib, set())
-        if not ss or not sig:
-            continue
-        inter = len(sig & ss)
-        union = len(sig | ss)
-        if union and inter / union >= 0.98:
-            oscillates_with.append(sib)
-
-    # For a blind spot: anchor to the PARENT clade, and look within that parent's
-    # branch (its descendants) for any GENUINELY detectable variant the user could
-    # track instead. Honest and simple — no wide "nearest relative" hunt.
-    def _is_detectable(cand: str) -> bool:
-        cs = all_sigs.get(cand, set())
-        return sum(1 for m in cs if mut_carriers.get(m, 0) <= _DISC_CARRIERS) >= 1
-
-    def _branch(v: str) -> List[str]:
-        out, stack = [], [v]
-        seen = {v}
-        while stack:
-            x = stack.pop()
-            for c in tree.children(x):
-                if c not in seen:
-                    seen.add(c); out.append(c); stack.append(c)
-        return out
-
-    _osc = set(oscillates_with)
-    detectable_in_branch = None
-    if not detectable and parent:
-        # scan the parent's whole branch for a detectable member (excluding this
-        # variant's own near-identical oscillating siblings)
-        for cand in _branch(parent):
-            if cand == variant or cand in _osc:
-                continue
-            if _is_detectable(cand):
-                detectable_in_branch = cand
-                break
-    # keep the field name used downstream
-    nearest_detectable = detectable_in_branch
-
-    # found in data (from cooc result's unexplained + matched patterns if present)
-    found_in_data, found_reads = False, 0
-    if cooc_result and sig:
-        # a pattern "belongs" to this variant if it's a subset of its signature
-        for p in cooc_result.get("unexplained_patterns", []):
-            pat = set(p.get("confirmed_present", []))
-            if len(pat) >= 2 and pat.issubset(sig):
-                found_in_data = True
-                found_reads += int(p.get("count", 0))
+    # near-identical siblings (Jaccard >= 0.98): they can't be told apart
+    osc = []
+    for s in siblings:
+        ss = sigs.get(s, set())
+        if sig and ss and len(sig & ss) / len(sig | ss) >= 0.98:
+            osc.append(s)
 
     return {
-        "found": True,
-        "name": variant,
-        "in_data": True,
+        "found": True, "name": variant,
         "in_panel": variant in set(panel),
-        "is_recombinant": is_recomb,
-        "detectable": detectable,
-        "n_discriminating": len(disc),
-        "discriminating": disc[:8],
+        "is_recombinant": variant.startswith("X") and not parent,
+        "detectable": bool(markers),
+        "markers": markers,
         "reason": reason,
-        "found_in_data": found_in_data,
-        "found_reads": found_reads,
         "parent": parent,
         "siblings": siblings[:8],
-        "children": children[:8],
-        "oscillates_with": oscillates_with,
-        "nearest_detectable": nearest_detectable,
+        "children": tree.children(variant)[:8],
+        "oscillates_with": osc,
     }
+
+
+def check_in_data(markers: List[str], per_date: Dict[str, Dict[str, list]],
+                  dates: List[str]) -> Dict:
+    """One city's answer from the worker's counts.
+
+    per_date: {date: {marker: [cov, hit, link_n, link_ok]}} (accumulate_check_stats)
+    dates:    every sampling date in the window (also those with no reads on it)
+
+    Returns {state, n_present, n_measured, n_markers, timeline}
+      state: present / absent / mixed / not_covered / no_marker
+             (the check's own vote, process.cooc.check_verdicts)
+      timeline: [[date, mark]], mark per day pooled over the markers:
+             present  >= present_freq of >= min_cov reads
+             absent   <  absent_freq  of >= min_cov reads
+             weak     in between
+             uncovered < min_cov reads at its markers
+    """
+    from process.cooc import _check_cfg, check_verdicts
+    c = _check_cfg()
+    if not markers:
+        return {"state": "no_marker", "n_present": 0, "n_measured": 0,
+                "n_markers": 0, "timeline": []}
+    res = check_verdicts(markers, per_date or {})
+    state = {"confirmed": "present", "not_found": "absent",
+             "inconsistent": "mixed"}.get(res["verdict"], "not_covered")
+    tl = []
+    for d in sorted(set(dates or []) | set(per_date or {})):
+        cells = (per_date or {}).get(d, {})
+        cov = sum(cells.get(m, [0, 0])[0] for m in markers)
+        hit = sum(cells.get(m, [0, 0])[1] for m in markers)
+        # a day is covered when at least one marker has min_cov reads
+        if not any(cells.get(m, [0])[0] >= c["min_cov"] for m in markers):
+            mark = "uncovered"
+        elif hit / cov >= c["present_freq"]:
+            mark = "present"
+        elif hit / cov < c["absent_freq"]:
+            mark = "absent"
+        else:
+            mark = "weak"
+        tl.append([d, mark])
+    return {"state": state, "n_present": res["n_present"], "n_measured": res["n_measured"],
+            "n_markers": res["n_markers"], "timeline": tl}

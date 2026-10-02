@@ -427,6 +427,28 @@ def run_cooc_deep_scan_lapis(self, location: str, start_date: str, end_date: str
 
 
 @app.task(bind=True)
+def run_cooc_variant_check_lapis(self, location: str, start_date: str, end_date: str,
+                                 variant: str, panel: list):
+    """"Investigate a variant" -> "Check in data": read counts at one lineage's
+    ★ markers in one city (cooc.variant_check)."""
+    import sys
+    from datetime import datetime
+    sys.path.insert(0, "/app_shared")
+    from cooc import variant_check
+    _p = _reporter(f"task_progress:{self.request.id}", total=2)
+    try:
+        _p(1, f"Checking {variant} in {location}...")
+        r = variant_check(location, datetime.fromisoformat(start_date),
+                          datetime.fromisoformat(end_date), variant, panel,
+                          progress_callback=_p)
+        _p(2, "Done.")
+        return r
+    except Exception as e:
+        _p(0, f"Error: {str(e)}")
+        raise
+
+
+@app.task(bind=True)
 def run_cooc_scanner_lapis(self, location: str, start_date: str, end_date: str,
                            variants: list, unexplained_patterns: list,
                            day_totals: dict = None, position_coverage: dict = None):

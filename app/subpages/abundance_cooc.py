@@ -586,6 +586,11 @@ def app():
 
         if not location_tasks:
             st.info("Complete steps 1–5 on the left to see results here.")
+            # quick look-up works without a run: ★ markers and relatives come
+            # from the pango tree; "Check in data" needs a run's cities
+            st.markdown("---")
+            render_variant_explorer(pango_loader=cached_get_pango_loader(),
+                                    panel=all_selected_variants)
         else:
             # Smart "re-run needed" warning. A re-run is needed only when the
             # existing results become stale/incomplete:
@@ -1490,10 +1495,16 @@ def app():
             if _active_section == "Investigate a variant":
               # ── Investigate a variant (on-demand explorer) ─────────────────────
               st.markdown("---")
+              # "Check in data" uses the run's cities, window and panel, so its
+              # answer matches the results above
+              _rd = st.session_state.get("acooc_ran_dates") or (start_date.isoformat(),
+                                                                end_date.isoformat())
               render_variant_explorer(
                   pango_loader=cached_get_pango_loader(),
-                  panel=all_selected_variants,
-                  disabled=_outstanding,  # avoid rerun races during a scan
+                  panel=st.session_state.get("acooc_ran_panel") or all_selected_variants,
+                  # the look-up always works; "Check in data" waits for the run
+                  cities=None if _outstanding else list(location_names), start_date=_rd[0], end_date=_rd[1],
+                  celery_app=celery_app,
               )
 
 
