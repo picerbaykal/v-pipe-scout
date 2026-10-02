@@ -12,6 +12,8 @@ de-novo variant detection) are live — powered by the LAPIS /aggregated
 
 import streamlit as st
 import os
+import json
+import time
 from celery import Celery
 import redis
 from api.pango_loader import PangoLoader, get_pango_summary_path
@@ -568,6 +570,8 @@ def app():
             st.session_state["acooc_failed"] = {}
             st.session_state["acooc_scanner_tasks"] = {}
             st.session_state["acooc_scanner_panels"] = {}
+            # start times of the two progress phases (for "time left")
+            st.session_state["acooc_phase_t0"] = {0: time.time()}
             # reset bucket expand flags so scanner starts collapsed on a new run
             st.session_state["acooc_exp_missing"] = False
             st.session_state["acooc_exp_sub"] = False
@@ -700,40 +704,7 @@ def app():
                         and _ln not in _sr_now and _ln not in _failed.get("scanner", {})):
                     _outstanding = True
                     break
-            if _outstanding:
-                # Poll in a fragment (2026-09-30): only this line reruns every
-                # 3 s; the whole page reruns only when a task has finished, so
-                # the charts are redrawn once per result instead of fading
-                # grey on every tick.
-                @st.fragment(run_every=3)
-                def _poll_tasks():
-                    _ss = st.session_state
-                    _groups = [
-                        ("deconvolution", _ss.get("acooc_location_tasks", {}),
-                         _ss.get("location_results", {})),
-                        ("completeness", _ss.get("acooc_cooc_tasks", {}),
-                         _ss.get("acooc_cooc_results", {})),
-                        ("deep scan", _ss.get("acooc_scanner_tasks", {}),
-                         _ss.get("acooc_scanner_results", {})),
-                    ]
-                    _parts, _ready = [], False
-                    _fl = _ss.get("acooc_failed", {})
-                    for _name, _tasks, _done in _groups:
-                        if not _tasks:
-                            continue
-                        _bad = _fl.get(_name, {})
-                        _parts.append(f"{_name} {sum(1 for l in _tasks if l in _done)}/{len(_tasks)}"
-                                      + (f" ({len(_bad)} failed)" if _bad else ""))
-                        for _l, _tid in _tasks.items():
-                            if (_l not in _done and _l not in _bad
-                                    and celery_app.AsyncResult(_tid).ready()):
-                                _ready = True
-                    if _ready:
-                        st.rerun(scope="app")
-                    st.caption("⏳ Running — " + " · ".join(_parts)
-                               + " · the page updates when a result arrives")
-                _poll_tasks()
-            elif _new_collected:
+            if not _outstanding and _new_collected:
                 # final result(s) just arrived and nothing is left running —
                 # force one full-page rerun so the left column (Run button) and
                 # the progress bars reflect the completed state without a click.
@@ -824,24 +795,104 @@ def app():
                                 key="acooc_download_zip",
                                 use_container_width=True)
 
-            def _agg_bar(name, n_done, color):
-                _frac = n_done / _n_tot if _n_tot else 0
-                st.markdown(
-                    f"<div style='margin-bottom:8px;'>"
-                    f"<div style='display:flex;justify-content:space-between;font-size:11px;margin-bottom:3px;'>"
-                    f"<span style='font-weight:500;'>{name}</span>"
-                    f"<span style='color:#898781;'>{n_done} / {_n_tot} cities</span></div>"
-                    f"<div style='height:8px;background:#F1EFE8;border-radius:4px;overflow:hidden;'>"
-                    f"<div style='height:100%;border-radius:4px;width:{_frac*100:.0f}%;background:{color};'></div>"
-                    f"</div></div>",
-                    unsafe_allow_html=True,
-                )
+            # Two phases (2026-10-02). Phase 1 = deconvolution + completeness:
+            # the graph and abundances. Phase 2 = the deep scan: Variants table
+            # and the red / blue bands. Each bar: % of the work (from the
+            # worker's own progress, per city) and the time left at the pace so
+            # far. Drawn inside a fragment that reruns every 3 s while work is
+            # outstanding, so the bars move without redrawing the charts; the
+            # whole page reruns only when a task has finished.
+            _deep_on = get_cooc_setting("scope.data_positions", default=True)
+            _PHASES = [
+                ("1 · Abundance and completeness graph",
+                 [("deconvolution", "acooc_location_tasks", "location_results"),
+                  ("completeness", "acooc_cooc_tasks", "acooc_cooc_results")], "#185FA5"),
+                ("2 · " + ("Deep scan — panel + positions with a mutation in the data"
+                           if _deep_on else "Scanner — panel positions only"),
+                 [("scanner", "acooc_scanner_tasks", "acooc_scanner_results")], "#EF9F27"),
+            ]
 
-            _agg_bar("Deconvolution", _n_deconv, "#185FA5")
-            _agg_bar("Completeness", _n_cooc, "#16a34a")
-            _agg_bar("Deep scan — panel + positions with a mutation in the data"
-                     if get_cooc_setting("scope.data_positions", default=True)
-                     else "Scanner — panel positions only", _n_scan, "#EF9F27")
+            def _task_frac(tid):
+                """0-1 for a running task, from task_progress:{id} in redis."""
+                try:
+                    _raw = redis_client.get(f"task_progress:{tid}")
+                    if not _raw:
+                        return 0.0, ""
+                    _d = json.loads(_raw)
+                    _tot = max(1, int(_d.get("total") or 4))
+                    _cur = max(1, int(_d.get("current") or 1))
+                    _f = (_cur - 1 + float(_d.get("frac") or 0)) / _tot
+                    return min(0.99, max(0.0, _f)), str(_d.get("status") or "")
+                except Exception:
+                    return 0.0, ""
+
+            def _left(sec):
+                if sec < 60:
+                    return "< 1 min left"
+                return f"~{int(round(sec / 60))} min left"
+
+            def _phase_bars(live):
+                import time as _time
+                _ss = st.session_state
+                _fl = _ss.get("acooc_failed", {})
+                _t0s = _ss.setdefault("acooc_phase_t0", {})
+                _ready = False
+                _html = ""
+                for _pi, (_title, _stages, _col) in enumerate(_PHASES):
+                    _fs, _now_txt, _n_bad = [], "", 0
+                    for _stg, _tk, _rk in _stages:
+                        _tasks, _done = _ss.get(_tk, {}), _ss.get(_rk, {})
+                        _bad = _fl.get(_stg, {})
+                        _n_bad += len(_bad)
+                        for _l in location_names:
+                            if _l in _done or _l in _bad:
+                                _fs.append(1.0)
+                            elif _l in _tasks:
+                                if live and celery_app.AsyncResult(_tasks[_l]).ready():
+                                    _ready = True
+                                _f, _msg = _task_frac(_tasks[_l]) if live else (0.0, "")
+                                _fs.append(_f)
+                                if _msg and not _now_txt:
+                                    _now_txt = f"{_l.split('(')[0].strip()}: {_msg}"
+                            else:
+                                _fs.append(0.0)
+                    _frac = sum(_fs) / len(_fs) if _fs else 0.0
+                    _started = any(f > 0 for f in _fs) or any(
+                        _ss.get(_tk) for _, _tk, _ in _stages)
+                    if _started and _pi not in _t0s:
+                        _t0s[_pi] = _time.time()
+                    _right = f"{_frac * 100:.0f}%"
+                    if _frac >= 0.999:
+                        _right = "done"
+                    elif live and _started and _frac > 0.03 and _pi in _t0s:
+                        _el = _time.time() - _t0s[_pi]
+                        _right += " · " + _left(_el * (1 - _frac) / _frac)
+                    elif not _started:
+                        _right = "waiting for phase 1" if _pi else "—"
+                    if _n_bad:
+                        _right += f" · {_n_bad} failed"
+                    _sub = (f"<div style='font-size:10.5px;color:#898781;margin-top:2px;"
+                            f"white-space:nowrap;overflow:hidden;text-overflow:ellipsis;'>"
+                            f"{_now_txt}</div>" if (live and _now_txt and _frac < 0.999) else "")
+                    _html += (
+                        f"<div style='margin-bottom:8px;'>"
+                        f"<div style='display:flex;justify-content:space-between;font-size:11px;"
+                        f"margin-bottom:3px;'><span style='font-weight:500;'>{_title}</span>"
+                        f"<span style='color:#898781;'>{_right}</span></div>"
+                        f"<div style='height:8px;background:#F1EFE8;border-radius:4px;overflow:hidden;'>"
+                        f"<div style='height:100%;border-radius:4px;width:{_frac*100:.0f}%;"
+                        f"background:{_col};'></div></div>{_sub}</div>")
+                st.markdown(_html, unsafe_allow_html=True)
+                return _ready
+
+            if _outstanding:
+                @st.fragment(run_every=3)
+                def _poll_tasks():
+                    if _phase_bars(live=True):
+                        st.rerun(scope="app")
+                _poll_tasks()
+            else:
+                _phase_bars(live=False)
             _fl_all = st.session_state.get("acooc_failed", {})
             if any(_fl_all.values()):
                 st.error("Failed: " + " · ".join(
@@ -993,8 +1044,9 @@ def app():
               #    signal is made of, before the findings that fill the gaps) ─────
               _cr_all = st.session_state.get("acooc_cooc_results", {})
               _sr_all = st.session_state.get("acooc_scanner_results", {})
-              _ready_locs = [l for l in location_names
-                             if _cr_all.get(l) is not None and _sr_all.get(l) is not None]
+              # phase 1 is enough for the graph and the tree (panel variants and
+              # their +1 changes); the deep scan adds findings when it ends
+              _ready_locs = [l for l in location_names if _cr_all.get(l) is not None]
               # last sampling date with data per city — the window may run past it
               _win_end = str((st.session_state.get("acooc_ran_dates")
                               or (None, end_date.isoformat()))[1])[:10]
@@ -1330,8 +1382,8 @@ def app():
                             for u in sorted(_agg_unres.values(), key=lambda x: -x["reads"])[:25]]
 
                   if _scan_running:
-                      st.info("🔍 Scanning for variants not in your panel… findings "
-                              "appear in the tree when the scan completes.")
+                      st.caption("🔍 Deep scan running — lineages not in your panel and "
+                                 "novel patterns appear here when it ends.")
                   if "acooc_recomb_parents" not in st.session_state:
                       st.session_state["acooc_recomb_parents"] = recombinant_parents()
                   _rows = tree_rows(_run_panel, curated_variants, cached_get_pango_loader(),

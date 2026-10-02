@@ -273,10 +273,19 @@ def run_cooc_panel_completeness(
     # bound on range is ever needed again, enforce it in the UI/date-picker
     # rather than silently clamping here.
 
-    def _progress(step: int, msg: str):
+    def _progress(step: int, msg: str, frac: Optional[float] = None):
+        """frac: how far into this step (0-1), for the page's % and time left.
+        Callbacks that take only (step, msg) still work."""
         if progress_callback:
-            progress_callback(step, msg)
-        logger.info(f"[cooc][{location}] step {step}: {msg}")
+            if frac is None:
+                progress_callback(step, msg)
+            else:
+                try:
+                    progress_callback(step, msg, frac)
+                except TypeError:
+                    progress_callback(step, msg)
+        if frac is None:
+            logger.info(f"[cooc][{location}] step {step}: {msg}")
 
     _progress(1, f"Building amp_dict + signatures for {len(variants)} variants")
     pango_loader = PangoLoader(get_pango_summary_path())
@@ -476,11 +485,22 @@ def run_cooc_panel_completeness(
                     per_date_unexplained.append(unexp)
             del df, rows, annotated
 
+        _n_q = len(batches) * len(dates)
+        _done_q = [0]
+
+        async def _counted(session, bi, bpos, d):
+            try:
+                await _one_query(session, bi, bpos, d)
+            finally:
+                _done_q[0] += 1
+                _progress(3, f"Reading reads: {_done_q[0]}/{_n_q} queries",
+                          _done_q[0] / _n_q)
+
         async with aiohttp.ClientSession(
             timeout=timeout, connector=connector
         ) as session:
             tasks = [
-                _one_query(session, bi, bpos, d)
+                _counted(session, bi, bpos, d)
                 for bi, (_, bpos) in enumerate(batches)
                 for d in dates
             ]

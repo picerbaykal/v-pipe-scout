@@ -292,6 +292,23 @@ def run_deconvolve_lapis(self, location: str, start_date: str, end_date: str,
         raise
 
 
+def _reporter(progress_key: str, total: int = 4, remap=None):
+    """Progress writer for the page: {current, total, status, frac, t}.
+    frac = how far into the current step (0-1); the page turns it into a % and
+    a time left. remap(step) -> step lets a task show an inner function's steps
+    as one of its own."""
+    import time as _time
+
+    def _w(step, msg, frac=None):
+        if remap:
+            step = remap(step)
+        redis_client.set(progress_key, json.dumps({
+            "current": step, "total": total, "status": msg,
+            "frac": None if frac is None else round(float(frac), 3),
+            "t": _time.time()}), ex=3600)
+    return _w
+
+
 @app.task(bind=True)
 def run_cooc_completeness_lapis(self, location: str, start_date: str, end_date: str,
                                 variants: list):
@@ -321,11 +338,7 @@ def run_cooc_completeness_lapis(self, location: str, start_date: str, end_date: 
             start_date=datetime.fromisoformat(start_date),
             end_date=datetime.fromisoformat(end_date),
             variants=variants,
-            progress_callback=lambda step, msg: redis_client.set(
-                progress_key,
-                json.dumps({"current": step, "total": 4, "status": msg}),
-                ex=3600,
-            ),
+            progress_callback=_reporter(progress_key),
         )
 
         redis_client.set(progress_key, json.dumps({
@@ -385,9 +398,10 @@ def run_cooc_deep_scan_lapis(self, location: str, start_date: str, end_date: str
     task_id = self.request.id
     progress_key = f"task_progress:{task_id}"
 
-    def _p(step, msg, total=4):
-        redis_client.set(progress_key, json.dumps({"current": step, "total": total,
-                                                   "status": msg}), ex=3600)
+    _p = _reporter(progress_key)
+    # the read-level step of run_cooc_panel_completeness (its steps 1-3) is this
+    # task's step 2; its step 4 (aggregating) is this task's step 3
+    _inner = _reporter(progress_key, remap=lambda s: 2 if s <= 3 else 3)
     try:
         d0, d1 = datetime.fromisoformat(start_date), datetime.fromisoformat(end_date)
         extra = {}
@@ -395,9 +409,10 @@ def run_cooc_deep_scan_lapis(self, location: str, start_date: str, end_date: str
             _p(1, f"Finding positions with signal in {location}...")
             c = _check_cfg()
             extra = data_positions(location, d0, d1, float(c["absent_freq"]), int(c["min_cov"]))
-        _p(2, f"Reading co-occurrence at {len(extra)} extra positions...")
+        _p(2, f"Reading reads (+{len(extra)} positions from the data)...")
         res = run_cooc_panel_completeness(location=location, start_date=d0, end_date=d1,
-                                          variants=variants, extra_positions=extra)
+                                          variants=variants, extra_positions=extra,
+                                          progress_callback=_inner)
         _p(3, "Classifying unexplained patterns...")
         day_totals = {str(d)[:10]: int(m) + int(u) for d, m, u in zip(
             res.get("dates", []), res.get("matched_counts", []), res.get("unexplained_counts", []))}
