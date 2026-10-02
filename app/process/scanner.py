@@ -74,11 +74,17 @@ STAR_CARRIER_MAX = 30   # legacy global count; kept only for the UI heatmap ★
 
 # 2026-09: a block is discriminating when one of its mutations is rare OUTSIDE
 # the finding's own family (own sublineages never count against it — the global
-# count above breaks on the granular Nextclade tree, e.g. PQ.16.1.1). Carriers
-# under a different recombinant root (X..) mostly inherited the mutation and are
-# tolerated in larger numbers. Same rule as the co-occurrence check.
+# count above breaks on the granular Nextclade tree, e.g. PQ.16.1.1).
+# 2026-10-02 (option C): carriers under another recombinant don't count only if
+# that recombinant INHERITED the mutation from the finding (XFV for XFG's 8350C);
+# unrelated circulating recombinants count like any lineage (SV.4 for B.1.1.7's
+# 3267T). See process.recombinants. Same rule as the co-occurrence check.
 STAR_OUTSIDE_MAX = int(_cfg("markers.out_other_max", 5))
-STAR_OUT_REC_MAX = int(_cfg("markers.out_rec_max", 60))
+
+
+def _rc(tree, all_sigs):
+    from process.recombinants import get_recombinants
+    return get_recombinants(tree.parent, all_sigs)
 
 # 2026-09: a finding is confirmed by ★ evidence on several DAYS, not by a read
 # total over the window. PCR jackpots put one molecule's copies on one day
@@ -332,12 +338,15 @@ def _assign(
     clade = tree.dominant_clade(candidates)
     if clade is None:
         return None, "unresolved", candidates
-    # recombinants under a DIFFERENT recombinant root (e.g. XFY, XFV descending
-    # from XFG but parentless in the tree) inherited these mutations: they are
-    # relatives, not competitors, so they don't dilute the family share
+    # recombinants under a DIFFERENT recombinant root made FROM this clade (XFY,
+    # XFV from XFG, parentless in the tree) inherited these mutations: relatives,
+    # not competitors, so they don't dilute the family share. Unrelated
+    # recombinants count (option C).
     root = tree.rec_root(clade)
+    rc = _rc(tree, all_sigs)
     counted = [c for c in candidates
-               if not (tree.rec_root(c) and tree.rec_root(c) != root)]
+               if not (tree.rec_root(c) and tree.rec_root(c) != root
+                       and rc.made_from(tree.rec_root(c), clade))]
     fam = tree.family(clade)
     share = (len([c for c in counted if c in fam]) / len(counted)) if counted else 0.0
     def _holds_panel(c):
@@ -642,21 +651,29 @@ def scan_unexplained_patterns(
             _rroot_cache[lin] = found
         return _rroot_cache[lin]
 
+    _rcs = _rc(tree, all_lineage_signatures)
+
     def _annotate_outside(c):
         """Per block and mutation: carriers outside the finding's family."""
         for b in c.get("member_blocks", []) or []:
-            fam = _family(c["node"]) | _family(b.get("family_root") or c["node"])
-            roots = {_rroot(c["node"]), _rroot(b.get("family_root") or c["node"])}
+            fr = b.get("family_root") or c["node"]
+            fam = _family(c["node"]) | _family(fr)
+            roots = {_rroot(c["node"]), _rroot(fr)}
+
+            def _inh(l, m):
+                # under another recombinant that got m from the finding
+                r = _rroot(l)
+                return bool(r) and r not in roots and (
+                    _rcs.made_from(r, c["node"], m) or _rcs.made_from(r, fr, m))
             out = {}
             for m in b.get("discriminating", []):
                 outside = _mut_index.get(m, set()) - fam
-                n_rec = sum(1 for l in outside if _rroot(l) and _rroot(l) not in roots)
-                out[m] = (len(outside) - n_rec, n_rec)
+                n_inh = sum(1 for l in outside if _inh(l, m))
+                out[m] = (len(outside) - n_inh, n_inh)
             b["mut_outside"] = {m: v[0] for m, v in out.items()}
             # ★ per mutation, by the same rule the scanner confirms with — the
             # UI reads this instead of re-deriving it from global carrier counts
-            b["mut_star"] = {m: (v[0] <= STAR_OUTSIDE_MAX and v[1] <= STAR_OUT_REC_MAX)
-                             for m, v in out.items()}
+            b["mut_star"] = {m: v[0] <= STAR_OUTSIDE_MAX for m, v in out.items()}
             b["_outside_pairs"] = out
             # the block's mutations TOGETHER: lineages outside the family that
             # carry the whole combination, split the same way as for ★. A
@@ -664,14 +681,13 @@ def scan_unexplained_patterns(
             # (22792T+22865T+22893G+23021G: only XFG-family lineages).
             g = b.get("discriminating", [])
             outside_g = set(_candidates_for(g)) - fam if len(g) >= 2 else set()
-            n_rec_g = sum(1 for l in outside_g if _rroot(l) and _rroot(l) not in roots)
+            n_inh_g = sum(1 for l in outside_g if all(_inh(l, m) for m in g))
             b["combo_specific"] = bool(
-                len(g) >= 2 and len(outside_g) - n_rec_g <= STAR_OUTSIDE_MAX
-                and n_rec_g <= STAR_OUT_REC_MAX)
+                len(g) >= 2 and len(outside_g) - n_inh_g <= STAR_OUTSIDE_MAX)
 
     def _block_is_star(b):
-        return any(o <= STAR_OUTSIDE_MAX and r <= STAR_OUT_REC_MAX
-                   for o, r in (b.get("_outside_pairs") or {}).values())
+        return any(o <= STAR_OUTSIDE_MAX
+                   for o, _inh_n in (b.get("_outside_pairs") or {}).values())
 
     # informative reads per day: from the completeness result, else this
     # city's unexplained reads (a smaller total -> a stricter share test)
@@ -688,7 +704,8 @@ def scan_unexplained_patterns(
     # A read is evidence for a finding when the lineages that FIT it — carry
     # every mutation it shows and none of those where it shows the reference
     # — are inside the finding's family, with the ★ outsider limits
-    # (<= STAR_OUTSIDE_MAX ordinary, <= STAR_OUT_REC_MAX under other
+    # (<= STAR_OUTSIDE_MAX lineages that didn't inherit them from the finding;
+    # recombinants made from the finding are tolerated — option C) — under other
     # recombinant roots, which mostly inherited the mutations). Reads that
     # also fit an unrelated circulating lineage are not evidence: an XFG read
     # that looks like PY.1.1.1 on its present mutations shows the reference
@@ -701,9 +718,6 @@ def scan_unexplained_patterns(
         _r = _rroot(_l)
         if _r:
             _rec_mask[_r] = _rec_mask.get(_r, 0) | _b
-    _any_rec = 0
-    for _m in _rec_mask.values():
-        _any_rec |= _m
     _fit_cache: Dict[tuple, int] = {}
 
     def _fit_mask(present: frozenset, absent: frozenset) -> int:
@@ -729,7 +743,11 @@ def scan_unexplained_patterns(
         for l in _family(node):
             fam_mask |= _bit.get(l, 0)
         own = _rroot(node)
-        other_rec = _any_rec & ~_rec_mask.get(own, 0) if own else _any_rec
+        # lineages under recombinants made from this finding: tolerated
+        inh_mask = 0
+        for _r, _rm in _rec_mask.items():
+            if _r != own and _rcs.made_from(_r, node):
+                inh_mask |= _rm
         by_day: Dict[str, int] = {}
         by_pat: Dict[tuple, int] = {}
         if fam_mask:
@@ -737,11 +755,9 @@ def scan_unexplained_patterns(
                 fit = _fit_mask(present, absent)
                 if not fit & fam_mask:
                     continue                  # no family lineage fits the read
-                out = fit & ~fam_mask
-                if out:
-                    n_rec = _popcount(out & other_rec)
-                    if n_rec > STAR_OUT_REC_MAX or _popcount(out) - n_rec > STAR_OUTSIDE_MAX:
-                        continue              # fits outsiders too: not specific
+                out = fit & ~fam_mask & ~inh_mask
+                if out and _popcount(out) > STAR_OUTSIDE_MAX:
+                    continue                  # fits outsiders too: not specific
                 _d = str(date)[:10]
                 by_day[_d] = by_day.get(_d, 0) + cnt
                 by_pat[(present, absent)] = by_pat.get((present, absent), 0) + cnt
@@ -1154,6 +1170,7 @@ def _finalize_clade(s: dict, tree: "_Tree", all_sigs: Dict[str, Set[str]],
     # subset) — otherwise the variant's ★ block is never built.
     family = set(members) | tree.family(node)
     _node_root = tree.rec_root(node)
+    _rcf = _rc(tree, all_sigs)
     _nout: dict = {}
     combo_to_members = {}   # frozenset(group) -> {members, n_other, n_total}
     for m in members:
@@ -1165,13 +1182,16 @@ def _finalize_clade(s: dict, tree: "_Tree", all_sigs: Dict[str, Set[str]],
                 else:
                     carriers = [l for l, sg in all_sigs.items() if g.issubset(sg)]
                 _c_carr[g] = carriers
-            # recombinants under a different root (XFY, XFV … from XFG) inherited
-            # the group: relatives, not competitors — same rule as the ★ markers
+            # recombinants under a different root made from this node (XFY, XFV …
+            # from XFG) inherited the group: relatives, not competitors — same
+            # rule as the ★ markers (option C)
             n_outside = _nout.get(g)
             if n_outside is None:
                 n_outside = sum(1 for l in carriers
                                 if l not in family
-                                and not (tree.rec_root(l) and tree.rec_root(l) != _node_root))
+                                and not (tree.rec_root(l) and tree.rec_root(l) != _node_root
+                                         and all(_rcf.made_from(tree.rec_root(l), node, x)
+                                                 for x in g)))
                 _nout[g] = n_outside
             if n_outside > SMALL_SET:
                 continue          # not specific (many non-family carriers)

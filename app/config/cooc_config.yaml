@@ -12,12 +12,12 @@ scope:
 # ── ★ markers — shared by the co-occurrence check and the scanner ──────────
 # A mutation is a ★ (specific) marker for a variant/finding when few lineages
 # OUTSIDE its own family carry it (its own sublineages never count against it).
+# Carriers under a recombinant MADE FROM the variant (XFV = LP.8.1 × XFG.3.3.1
+# for XFG's 8350C) inherited it and don't count; every other carrier does,
+# including unrelated recombinants (parents from app/data/alias_key.json).
 # Worker setting: changing it needs a worker restart + re-scan.
 markers:
-  out_other_max: 5      # carriers outside the family and outside other
-                        #   recombinant roots (the real competitors)
-  out_rec_max: 60       # carriers under other recombinant roots (XFY, XHA … that
-                        #   inherited the mutation — relatives, tolerated)
+  out_other_max: 5      # carriers outside the family that didn't inherit it
 
 # ── Co-occurrence check: a vote among each panel variant's ★ markers ────────
 # Per city, pooled over the selected window. Reads only — never the
@@ -39,8 +39,6 @@ scanner:
   read_threshold_max: 500     # reads behind one fingerprint (summed over fragments),
   read_threshold_share: 0.005 #   scaled down for small cities: min(max, share x all
   read_threshold_floor: 20    #   unexplained reads), never below the floor
-
-                              #   many reads of its own
   small_candidate_set: 15     # <= this many matching lineages = specific enough to name
   min_family_share: 0.9       # more candidates: named if >= 90% fall in one family
   min_clade_depth: 6          # ... or if their common clade is at least this deep

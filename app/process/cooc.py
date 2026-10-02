@@ -315,10 +315,11 @@ import re as _re_presence
 # Part A — which markers: panel-private substitutions whose carriers OUTSIDE the
 #   variant's own family are few. Own sublineages never count against a variant
 #   (that is what broke the global <=30 rule on the granular Nextclade tree).
-#   Outside carriers are split into
-#     out_rec   under a DIFFERENT recombinant root (X..) — mostly recombinants
-#               that inherited the marker from this variant; tolerated if few
-#     out_other everything else — real competitors; must be ~0
+#   Outside carriers count, except those under a recombinant that INHERITED the
+#   marker from this variant (XFV = LP.8.1 × XFG.3.3.1 for XFG's 8350C) — see
+#   process.recombinants (2026-10-02, "option C"; before, every carrier under any
+#   other recombinant root was tolerated up to 60, including unrelated circulating
+#   ones such as SV.4 for B.1.1.7's 3267T).
 # Part B — reads: per date, each marker's coverage/frequency, plus "link": of
 #   reads carrying the marker that also cover other positions of the variant's
 #   signature, the share where every covered neighbour carries the variant base
@@ -333,8 +334,7 @@ _CHECK_UNCOVERED = {"N", "-"}
 
 CHECK_DEFAULTS = {
     # Part A — marker selection (worker; changing needs a re-scan)
-    "out_other_max": 5,      # carriers outside family & other recombinant roots
-    "out_rec_max": 60,       # carriers under other recombinant roots
+    "out_other_max": 5,      # carriers outside the family that didn't inherit it
     # Part B — the vote (UI; a streamlit restart is enough)
     "min_cov": 100,          # reads covering a marker (whole window) to measure it
     "present_freq": 0.05,    # present: >= this share of covering reads carry it ...
@@ -349,7 +349,7 @@ CHECK_DEFAULTS = {
 # "What makes a mutation a ★ marker" is shared with the scanner and lives under
 # `markers:` in cooc_config.yaml; `check.*` is still read as a fallback so older
 # config files keep working.
-_MARKER_KEYS = ("out_other_max", "out_rec_max")
+_MARKER_KEYS = ("out_other_max",)
 
 
 def _check_cfg(cfg: Optional[dict] = None) -> dict:
@@ -429,15 +429,11 @@ def specific_markers(variant_signatures: Dict[str, Set[str]],
     (KP.2/KP.3: their only own mutations are shared with unrelated variants).
     The variant's own sublineages in the panel don't count as "other" panel
     variants."""
+    from process.recombinants import get_recombinants
     c = _check_cfg(cfg)
     idx = _carrier_index(lineage_signatures)
     kids = _children_map(parent_map)
-    rroot_cache: Dict[str, Optional[str]] = {}
-
-    def rroot(lin):
-        if lin not in rroot_cache:
-            rroot_cache[lin] = _recombinant_root(lin, parent_map)
-        return rroot_cache[lin]
+    rc = get_recombinants(parent_map, lineage_signatures)
 
     out: Dict[str, List[str]] = {}
     for v, sig in variant_signatures.items():
@@ -451,14 +447,14 @@ def specific_markers(variant_signatures: Dict[str, Set[str]],
             if w != v and w not in fam:
                 others |= (s or set())
         private = {m for m in (sig or set()) - others if _SUB_RE.match(m)}
-        v_root = rroot(v) if v in parent_map else None
+        own = {rc.rec_root(v)} if v in parent_map else set()
         ranked = []
         for m in private:
             outside = idx.get(m, set()) - fam
-            n_rec = sum(1 for l in outside if rroot(l) and rroot(l) != v_root)
-            n_oth = len(outside) - n_rec
-            if n_oth <= c["out_other_max"] and n_rec <= c["out_rec_max"]:
-                ranked.append((n_oth, n_rec, int(_SUB_RE.match(m).group(1)), m))
+            n_inh = sum(1 for l in outside if rc.tolerated(l, v, m, own))
+            n_out = len(outside) - n_inh
+            if n_out <= c["out_other_max"]:
+                ranked.append((n_out, n_inh, int(_SUB_RE.match(m).group(1)), m))
         out[v] = [m for *_, m in sorted(ranked)]
     return out
 
