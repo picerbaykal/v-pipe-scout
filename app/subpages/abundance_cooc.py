@@ -98,7 +98,7 @@ def _render_composition(cooc_result: dict, scanner_result: dict, key: str = "",
     dates = [r["date"] for r in rows]
     layers = [
         ("explained by panel", "explained_pct", "#0F6E56", "rgba(15,110,86,0.85)"),
-        ("panel variant + 1 change", "near_pct", "#f59e0b", "rgba(245,158,11,0.60)"),
+        ("panel variant + 1 change", "near_pct", "#4ade80", "rgba(134,239,172,0.85)"),
         ("addable (not in panel)", "addable_pct", "#dc2626", "rgba(220,38,38,0.55)"),
         ("novel (investigate)", "novel_pct", "#2563eb", "rgba(37,99,235,0.45)"),
         ("unresolved / noise", "noise_pct", "#9ca3af", "rgba(156,163,175,0.40)"),
@@ -129,7 +129,7 @@ def _render_composition(cooc_result: dict, scanner_result: dict, key: str = "",
     if show_caption:
         st.caption(
             "Green = explained by your panel (its height = completeness) · "
-            "amber = a panel variant with one change (hover to see which; a growing "
+            "light green = a panel variant with one change (hover to see which; a growing "
             "band = a sublineage spreading) · red = addable (scanner found it) · "
             "blue = novel · grey = unresolved (beyond-panel signal the scanner "
             "can't name).")
@@ -1002,10 +1002,31 @@ def app():
               _sr_all = st.session_state.get("acooc_scanner_results", {})
               _ready_locs = [l for l in location_names
                              if _cr_all.get(l) is not None and _sr_all.get(l) is not None]
+              # last sampling date with data per city — the window may run past it
+              _win_end = str((st.session_state.get("acooc_ran_dates")
+                              or (None, end_date.isoformat()))[1])[:10]
+              _data_until = {l: max(str(d)[:10] for d in (_cr_all[l].get("dates") or []))
+                             for l in location_names
+                             if _cr_all.get(l) and _cr_all[l].get("dates")}
+              _until_short = {l: d for l, d in _data_until.items() if d < _win_end}
+
+              def _dshort(d):
+                  try:
+                      from datetime import date as _dt
+                      _x = _dt.fromisoformat(d)
+                      return f"{_x.day} {_x.strftime('%b')}"
+                  except Exception:
+                      return d
               if _ready_locs:
                   st.markdown("#### Panel completeness")
+                  if _until_short:
+                      st.caption("📅 Data until " + " · ".join(
+                          f"{l.split('(')[0].strip()} {_dshort(d)}"
+                          for l, d in sorted(_until_short.items()))
+                          + f" — the window runs to {_dshort(_win_end)}; later dates have "
+                          "no samples yet.")
                   st.caption("How much of each city's co-occurrence signal your panel "
-                             "explains (green) vs the rest. Green = explained · amber = a "
+                             "explains (green) vs the rest. Green = explained · light green = a "
                              "panel variant with one change (hover for which) · red = "
                              "addable (scanner found it) · blue = novel · grey = noise.")
                   # One shared legend ABOVE the grid; every plot has
@@ -1014,7 +1035,7 @@ def app():
                   # only and ate into its fixed height, making it shorter.)
                   _comp_leg = [
                       ("#0F6E56", "explained by panel"),
-                      ("#f59e0b", "panel variant + 1 change"),
+                      ("#4ade80", "panel variant + 1 change"),
                       ("#dc2626", "addable (not in panel)"),
                       ("#2563eb", "novel (investigate)"),
                       ("#9ca3af", "unresolved / noise"),
@@ -1043,8 +1064,10 @@ def app():
                       + "</div>", unsafe_allow_html=True)
                   _grid_locs = list(location_names)
                   def _one_city(_lc):
+                      _du = (f" <span style='font-weight:400;color:#6b7280;'>· data until "
+                             f"{_dshort(_until_short[_lc])}</span>" if _lc in _until_short else "")
                       st.markdown(f"<div style='font-size:12px;font-weight:600;'>"
-                                  f"{_lc}</div>", unsafe_allow_html=True)
+                                  f"{_lc}{_du}</div>", unsafe_allow_html=True)
                       if _cr_all.get(_lc) is not None and _sr_all.get(_lc) is not None:
                           _render_composition(_cr_all[_lc], _sr_all[_lc], key=_lc,
                                               show_legend=False, show_caption=False,
@@ -1344,7 +1367,8 @@ def app():
                                     ot=curated_variants, novel=_nov_list, broad=_broad,
                                     novel_errors=_nov_err_list,
                                     novel_rest=_human_reads(_nov_rest) if _nov_rest else None,
-                                    near=_near, near_min_days=EVIDENCE_MIN_DAYS)
+                                    near=_near, near_min_days=EVIDENCE_MIN_DAYS,
+                                    data_until={l: _dshort(d) for l, d in _until_short.items()})
                   _click = _vt.render(_view, key="acooc_variants_view")
                   if _click and _click.get("t") != st.session_state.get("acooc_vv_last_click"):
                       st.session_state["acooc_vv_last_click"] = _click.get("t")

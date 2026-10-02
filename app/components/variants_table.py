@@ -68,11 +68,11 @@ CSS = """
            text-overflow:ellipsis; vertical-align:middle; }
 .vt .par { color:#8a4e82; font-size:12.5px; margin-left:8px; }
 .vt .near-tag { font-size:12px; font-weight:600; margin-left:9px; padding:0 8px; line-height:19px;
-                border-radius:10px; background:#fef3c7; color:#92400e; cursor:pointer; vertical-align:1px; }
-.vt .near-tag:hover { background:#fde68a; }
+                border-radius:10px; background:#dcfce7; color:#166534; cursor:pointer; vertical-align:1px; }
+.vt .near-tag:hover { background:#bbf7d0; }
 .vt .near-tag.off { background:#f3f4f6; color:#9ca3af; font-weight:500; }
 .vt tr.near td { height:28px; }
-.vt .nl { color:#92400e; font-size:13.5px; }
+.vt .nl { color:#166534; font-size:13.5px; }
 .vt .nl .mono { font-size:13px; }
 .vt .grp-root { color:#6b7280; font-size:12.5px; font-weight:700; letter-spacing:.02em; }
 .vt .chip { font-size:11px; padding:0 7px; border-radius:8px; margin-left:6px; vertical-align:1px;
@@ -144,8 +144,9 @@ S_NAMED = _fill("#ede9fe", VIOLET)
 S_NOVEL = _fill(BLUE, "#fff")
 S_NOVEL1 = _dashed(BLUE)
 S_BROAD = _fill("#e2e8f0", "#334155")
-S_NEAR = _fill("#fde68a", "#78350f")
-S_NEAR1 = _dashed("#d97706")
+LIGHT_GREEN = "#4ade80"    # panel variant ± 1 change (as in the completeness graph)
+S_NEAR = _fill("#bbf7d0", "#14532d")
+S_NEAR1 = _dashed("#16a34a")
 
 
 def _cell(label, style, tip, sel) -> str:
@@ -523,7 +524,7 @@ def _near_rows(r, v, changes, cities, sel, gid, n_cols):
                 f"<span class='mono'>{_e(c['mut'])}</span></span>")
         what = (f"reads = {v} plus {c['mut']}" if gain
                 else f"reads = {v} but the reference base at {c['mut'][:-1]} (no {c['mut']})")
-        tc = _tree_cell(pr, AMBER, "dashed" if not gain else "ring", name,
+        tc = _tree_cell(pr, LIGHT_GREEN, "dashed" if not gain else "ring", name,
                         f"{c['label']}: {what}. One mutation only — a hint to watch, not a finding.")
         cells = []
         for city in cities:
@@ -558,7 +559,7 @@ def _near_rows(r, v, changes, cities, sel, gid, n_cols):
 
 def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
           novel=(), broad=(), novel_rest=None, near=None, near_min_days=2,
-          novel_errors=()) -> str:
+          novel_errors=(), data_until=None) -> str:
     """cities: city names in column order; sel: the chosen city.
     rows: components.abundance_cooc_tree.tree_rows(...).
     verdicts: {city: {variant: {state, reason, n_present, n_measured, n_markers}}}.
@@ -571,14 +572,20 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
       "where"); a variant with some gets a tag "◆ N changes" (gains counting
       on >= near_min_days days) that unfolds them."""
     near = near or {}
+    data_until = data_until or {}
     ot = set(ot)
     n_c = len(cities)
     n_cols = n_c + 2
     head = ("<tr><th>Variant</th>"
             + "".join(f"<th class='cc{' sel' if c == sel else ''}'><button data-city='{_e(c)}' "
-                      f"data-tip='{_e(city_name(c))} — click to colour the tree by this city'>"
+                      f"data-tip='{_e(city_name(c))}"
+                      + (f" · data until {_e(data_until[c])}" if c in data_until else "")
+                      + f" — click to colour the tree by this city'>"
                       f"{_e(city_code(c))}</button></th>" for c in cities)
-            + f"<th style='padding-left:12px'>Evidence · {_e(city_name(sel))}</th></tr>")
+            + f"<th style='padding-left:12px'>Evidence · {_e(city_name(sel))}"
+            + (f" <span style='font-weight:400;text-transform:none;letter-spacing:0'>· data until "
+               f"{_e(data_until[sel])}</span>" if sel in data_until else "")
+            + "</th></tr>")
     body = []
     sname = city_name(sel)
     for r in rows:
