@@ -928,8 +928,10 @@ def _one_day_after(c: dict, sampling: List[str],
       not_seen     later samples covered its positions and it was gone —
                    likely a one-sample artefact
 
-    Returns {state, day, later, covered, seen, last}; `covered` is None when
-    the result has no per-position coverage (older completeness results)."""
+    Returns {state, day, later, covered, seen, last, timeline}; `covered` is
+    None when the result has no per-position coverage (older completeness
+    results). timeline: [[date, mark], …] from its day to the last sample,
+    mark = day | seen | gone | uncovered | unknown — drawn as a tiny calendar."""
     days = sorted(str(d)[:10] for d in c.get("counted_days", []) or [])
     day = days[-1] if days else ""
     later = [d for d in sampling if d > day]
@@ -942,11 +944,20 @@ def _one_day_after(c: dict, sampling: List[str],
     if not pos:             # combinations only: their mutations' positions
         pos = sorted({_mut_pos(m) for b in c.get("member_blocks", []) or []
                       for m in b.get("discriminating", [])})
+    def _cov_ok(d):
+        return max((int((coverage.get(d) or {}).get(str(p), 0)) for p in pos),
+                   default=0) >= MIN_COVERAGE
     if coverage is not None:
-        out["covered"] = sum(
-            1 for d in later
-            if max((int((coverage.get(d) or {}).get(str(p), 0)) for p in pos), default=0)
-            >= MIN_COVERAGE)
+        out["covered"] = sum(1 for d in later if _cov_ok(d))
+    tl = [[day, "day"]] if day else []
+    for d in later:
+        if ev.get(d, 0) > 0:
+            tl.append([d, "seen"])
+        elif coverage is None:
+            tl.append([d, "unknown"])
+        else:
+            tl.append([d, "gone" if _cov_ok(d) else "uncovered"])
+    out["timeline"] = tl
     if not later:
         out["state"] = "latest"
     elif seen:

@@ -23,6 +23,7 @@ def test_latest_sample():
 def test_not_seen_since_when_later_samples_covered_it():
     a = _one_day_after(_finding("2026-08-12"), DATES, _cov(5000))
     assert a["state"] == "not_seen" and a["later"] == 3 and a["covered"] == 3
+    assert [m for _d, m in a["timeline"]] == ["day", "gone", "gone", "gone"]
 
 
 def test_not_covered_since():
@@ -34,6 +35,7 @@ def test_seen_again_below_the_day_rule():
     f = _finding("2026-08-12", {"2026-08-12": 5000, "2026-08-20": 8})
     a = _one_day_after(f, DATES, _cov(5000))
     assert a["state"] == "seen_again" and a["seen"] == 1
+    assert [m for _d, m in a["timeline"]] == ["day", "gone", "seen", "gone"]
 
 
 def test_without_coverage_data_falls_back_to_not_seen():

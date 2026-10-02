@@ -94,6 +94,9 @@ CSS = """
 .vt tr.hid { display:none; }
 .vt tr.note td { height:auto; padding:6px 8px; color:#6b7280; font-size:13.5px; white-space:normal; }
 .vt .mono { font-family:ui-monospace,Menlo,monospace; font-size:13px; }
+.vt .cal { display:inline-flex; gap:3px; vertical-align:-1px; margin-left:6px; }
+.vt .cal i, .lg .cal i { display:inline-block; width:11px; height:11px; border-radius:2px; box-sizing:border-box; }
+.vt .calw { font-size:12.5px; margin-left:5px; color:#6b7280; }
 .lg { font-size:13.5px; color:#4b5563; margin:12px 0 2px; line-height:1.9; }
 .lg .lgt { cursor:pointer; font-weight:600; color:#31333f; }
 .lg .hid { display:none; }
@@ -379,6 +382,32 @@ def _after_text(a, html=True):
     return t
 
 
+_CAL = {  # one-day finding, per sample from its day on: square style, meaning
+    "day": (f"background:{RED};", "the day it was seen"),
+    "seen": ("background:#fca5a5;", "back, but too weak to count as a day"),
+    "gone": ("background:#9ca3af;", "covered (≥ 100 reads), not there"),
+    "uncovered": ("background:#fff;border:1.5px dashed #9ca3af;", "too few reads at its positions"),
+    "unknown": ("background:#e5e7eb;", "no coverage data (re-run)"),
+}
+_CAL_WORD = {"latest": "latest sample · watch", "seen_again": "back, weak",
+             "not_covered": "not covered since", "not_seen": "gone since"}
+
+
+def _after_cal(a):
+    """A one-day finding as a tiny calendar: one square per sample from its
+    day to the last sample, plus one or two words."""
+    tl = (a or {}).get("timeline") or []
+    if not tl:
+        return ""
+    sq = "".join(f"<i style='{_CAL.get(m, _CAL['unknown'])[0]}' "
+                 f"data-tip='{_e(_short_date(d) + ': ' + _CAL.get(m, _CAL['unknown'])[1])}'></i>"
+                 for d, m in tl)
+    w = _CAL_WORD.get(a.get("state"), "")
+    wst = " style='color:#b91c1c;font-weight:600'" if a.get("state") in ("latest", "seen_again") else ""
+    return (f"<span class='cal' data-tip='{_e(_after_text(a, html=False))}'>{sq}</span>"
+            f"<span class='calw'{wst}>{_e(w)}</span>")
+
+
 def _short_date(d):
     """'2026-08-22' -> '22 Aug'."""
     try:
@@ -412,7 +441,7 @@ def _finding_evidence(f, sel):
            + f" · <span data-tip='{_e(_REGION_TIP)}'>{len(regs)} genome "
            f"{_pl(len(regs), 'region')}</span>")
     if n == 1 and d.get("after"):
-        txt += " — " + _after_text(d["after"])
+        txt += _after_cal(d["after"]) or (" — " + _after_text(d["after"]))
     weak = []
     if not stars:
         weak.append("no ★ marker")
@@ -699,7 +728,10 @@ _LEGEND_ROWS = (
     + _li(S_NODATA, "?", "too few reads")
     + "</div><div class='row'><span class='t'>Found</span>"
     + _li(S_FOUND, "5", "not in panel · days with evidence")
-    + _li(S_ONEDAY, "1", "1 day only")
+    + _li(S_ONEDAY, "1", "1 day only, then per sample:")
+    + "<span class='i'><span class='cal'>" + "".join(
+        f"<i style='{st}'></i>" for st, _t in (_CAL["day"], _CAL["seen"], _CAL["gone"], _CAL["uncovered"]))
+    + "</span> seen · back, weak · gone · too few reads</span>"
     + _li(S_NAMED, "0", "named only (shared mutations)")
     + _li(S_NOVEL, "3", "novel · days")
     + _li(S_BROAD, "2", "too broad to name · days")
