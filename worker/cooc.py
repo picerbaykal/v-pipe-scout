@@ -186,6 +186,37 @@ def add_panel_positions(amp_dict: Dict[int, list], variant_signatures: Dict[str,
     return added
 
 
+def data_positions(location: str, start_date: datetime, end_date: datetime,
+                   min_share: float, min_cov: int) -> Dict[int, set]:
+    """Positions where the DATA shows a substitution: every mutation with >=
+    min_share of >= min_cov covering reads in this city and window (LAPIS
+    nucleotideMutations, pooled over the window). {position: {new bases}}.
+
+    Used by the deep scan (2026-10-02): today's positions come from lists
+    (cowwid names + panel), so a lineage's newest mutations — its best markers —
+    and undesignated mutations were never fetched. The thresholds are the check's
+    own (absent_freq, min_cov): a position is added when its mutation is "not
+    absent" on enough reads. Deletions are left out, as everywhere."""
+    try:
+        from api.wiseloculus import MutationType
+    except ImportError:
+        from api.signatures import MutationType
+    client = WiseLoculusLapis(get_wiseloculus_url())
+    df = asyncio.run(client.sample_mutations(MutationType.NUCLEOTIDE, (start_date, end_date),
+                                             locationName=location, min_proportion=min_share))
+    if df is None or df.empty:
+        return {}
+    if len(df) >= 10000:
+        logger.warning(f"[cooc][{location}] nucleotideMutations hit its 10,000-row limit — "
+                       "some positions may be missing")
+    out: Dict[int, set] = {}
+    for _, r in df.iterrows():
+        alt = str(r.get("mutationTo", ""))
+        if alt in ("A", "C", "G", "T") and int(r.get("coverage", 0) or 0) >= min_cov:
+            out.setdefault(int(r["position"]), set()).add(alt)
+    return out
+
+
 def coverage_from_rows(rows: List[dict], positions) -> Dict[str, int]:
     """{position: reads covering it} for one LAPIS co-occurrence answer (one
     date, one batch). A read covers a position when its base there is not N
@@ -209,6 +240,7 @@ def run_cooc_panel_completeness(
     variants: List[str],
     bed_path: Optional[str] = None,
     progress_callback: Optional[Callable[[int, str], None]] = None,
+    extra_positions: Optional[Dict[int, set]] = None,
 ) -> dict:
     """
     Compute per-date panel completeness for one location.
@@ -219,6 +251,8 @@ def run_cooc_panel_completeness(
         variants: Panel variant names.
         bed_path: Path to amplicon BED. Defaults to /app_shared/data/ArticV542inserts.bed.
         progress_callback: Optional callback(step, message) for progress reporting.
+        extra_positions: {position: {bases}} added to the completeness positions
+            (the deep scan's positions from the data, see data_positions).
 
     Returns:
         Dict with keys: location, dates, matched_counts, unexplained_counts, completeness,
@@ -303,6 +337,18 @@ def run_cooc_panel_completeness(
         f"[cooc][{location}] panel signatures: +{_added_muts} mutations, "
         f"+{len(amp_dict) - _n_before} positions in completeness"
     )
+
+    if extra_positions:
+        _n_before = len(amp_dict)
+        _n_mut = 0
+        for _p, _alts in extra_positions.items():
+            _cur = amp_dict.setdefault(int(_p), [])
+            for _a in _alts:
+                if _a not in _cur:
+                    _cur.add(_a) if isinstance(_cur, set) else _cur.append(_a)
+                    _n_mut += 1
+        logger.info(f"[cooc][{location}] data positions: +{_n_mut} mutations, "
+                    f"+{len(amp_dict) - _n_before} positions")
 
     if get_cooc_setting("scope.discriminating_positions_only", default=False):
         sig_list = [s for s in variant_signatures.values() if s]

@@ -94,8 +94,24 @@ def compute_completeness_composition(cooc_result: dict,
     ups = cooc_result.get("unexplained_patterns", [])
     scanner_result = scanner_result or {}
 
-    resolved_groups = _resolved_groups(scanner_result)
-    novel_pats = _novel_patterns(scanner_result)
+    # The scanner may have read more positions than this graph (the deep scan
+    # adds positions where the data shows a mutation). Compare only on positions
+    # this graph's reads could show: a finding's group restricted to them.
+    seen = set()
+    for p in ups:
+        seen.update(p.get("confirmed_present", []) or [])
+        seen.update(p.get("confirmed_absent", []) or [])
+
+    def _here(groups):
+        out = []
+        for g in groups:
+            h = g & seen if seen else g
+            if len(h) >= 2:
+                out.append(h)
+        return out
+
+    resolved_groups = _here(_resolved_groups(scanner_result))
+    novel_pats = _here(_novel_patterns(scanner_result))
 
     def gap_category(pat: Set[str]) -> str:
         for g in resolved_groups:

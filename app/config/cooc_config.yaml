@@ -9,6 +9,13 @@ scope:
   # scanner able to detect OT variants missing from the panel.
   use_tracked_variants: true
 
+  # Deep scan (phase 2 of a run): also read the positions where the DATA shows a
+  # substitution (>= check.absent_freq of >= check.min_cov reads in the city and
+  # window, from LAPIS nucleotideMutations), so the scanner can see a lineage's
+  # newest mutations and undesignated ones. The completeness graph stays on the
+  # listed positions. false = scanner on the listed positions only (as before).
+  data_positions: true
+
 # ── ★ markers — shared by the co-occurrence check and the scanner ──────────
 # A mutation is a ★ (specific) marker for a variant/finding when few lineages
 # OUTSIDE its own family carry it (its own sublineages never count against it).

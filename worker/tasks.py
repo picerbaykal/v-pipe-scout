@@ -343,6 +343,74 @@ def run_cooc_completeness_lapis(self, location: str, start_date: str, end_date: 
         raise
 
 
+def _scan_and_name(location, variants, unexplained_patterns, day_totals, position_coverage):
+    """The scanner on unexplained patterns, plus designation dates for the UI."""
+    import pandas as pd
+    from process.scanner import scan_unexplained_patterns
+    from cooc import get_all_lineage_signatures, get_panel_parent_map
+    patterns_df = (pd.DataFrame(unexplained_patterns) if unexplained_patterns
+                   else pd.DataFrame(columns=["date", "count", "confirmed_present"]))
+    result = scan_unexplained_patterns(
+        unexplained_patterns=patterns_df, panel_variants=variants,
+        all_lineage_signatures=get_all_lineage_signatures(),
+        panel_parent_map=get_panel_parent_map(), min_read_count=500,
+        day_totals=day_totals, position_coverage=position_coverage)
+    try:
+        from api.pango_loader import PangoLoader, get_pango_summary_path as _gp
+        _raw = PangoLoader(_gp()).get_raw_data()
+        for _c in result.get("resolved_clade", []):
+            _c["designation"] = _raw.get(_c["node"], {}).get("designationDate", "")
+    except Exception:
+        pass
+    return result
+
+
+@app.task(bind=True)
+def run_cooc_deep_scan_lapis(self, location: str, start_date: str, end_date: str,
+                             variants: list):
+    """Phase 2 of a run (2026-10-02): read-level scan at today's positions PLUS
+    the positions where the data shows a mutation (cooc.data_positions), then
+    the scanner on what the panel doesn't explain. Replaces the scanner task fed
+    with phase-1 patterns: those only contained listed positions, so a lineage's
+    newest mutations and undesignated ones were never seen. The completeness
+    graph stays on phase 1. scope.data_positions: false -> today's positions only.
+    """
+    import sys
+    from datetime import datetime
+    sys.path.insert(0, "/app_shared")
+    from cooc import run_cooc_panel_completeness, data_positions
+    from utils.config import get_cooc_setting
+    from process.cooc import _check_cfg
+
+    task_id = self.request.id
+    progress_key = f"task_progress:{task_id}"
+
+    def _p(step, msg, total=4):
+        redis_client.set(progress_key, json.dumps({"current": step, "total": total,
+                                                   "status": msg}), ex=3600)
+    try:
+        d0, d1 = datetime.fromisoformat(start_date), datetime.fromisoformat(end_date)
+        extra = {}
+        if get_cooc_setting("scope.data_positions", default=True):
+            _p(1, f"Finding positions with signal in {location}...")
+            c = _check_cfg()
+            extra = data_positions(location, d0, d1, float(c["absent_freq"]), int(c["min_cov"]))
+        _p(2, f"Reading co-occurrence at {len(extra)} extra positions...")
+        res = run_cooc_panel_completeness(location=location, start_date=d0, end_date=d1,
+                                          variants=variants, extra_positions=extra)
+        _p(3, "Classifying unexplained patterns...")
+        day_totals = {str(d)[:10]: int(m) + int(u) for d, m, u in zip(
+            res.get("dates", []), res.get("matched_counts", []), res.get("unexplained_counts", []))}
+        result = _scan_and_name(location, variants, res.get("unexplained_patterns", []),
+                                day_totals, res.get("position_coverage"))
+        result["deep"] = {"data_positions": len(extra)}
+        _p(4, "Deep scan complete.")
+        return result
+    except Exception as e:
+        _p(0, f"Error: {str(e)}")
+        raise
+
+
 @app.task(bind=True)
 def run_cooc_scanner_lapis(self, location: str, start_date: str, end_date: str,
                            variants: list, unexplained_patterns: list,

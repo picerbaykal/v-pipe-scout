@@ -19,7 +19,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 from api.wiseloculus import WiseLoculusLapis
-from utils.config import get_wiseloculus_url
+from utils.config import get_wiseloculus_url, get_cooc_setting
 
 from components.abundance_cooc_tree import render_panel_tree, recombinant_parents, tree_rows
 from components.jaccard_heatmap import render_jaccard_heatmap
@@ -657,29 +657,20 @@ def app():
                         except Exception as _e:
                             _fail("completeness", _loc, _e)
                         _new_collected = True
-                # auto-submit scanner when completeness is ready and scanner not yet run
+                # phase 2 — the deep scan — once this city's completeness (phase 1)
+                # is ready: the worker reads today's positions plus those where
+                # the data shows a mutation and runs the scanner on them
+                # (scope.data_positions; the graph stays on phase 1)
                 if (_loc in _cooc_res
-                        and _cooc_res[_loc].get("unexplained_patterns")
                         and _loc not in _scanner_tasks
                         and _loc not in scanner_results):
                     _stask = celery_app.send_task(
-                        "tasks.run_cooc_scanner_lapis",
+                        "tasks.run_cooc_deep_scan_lapis",
                         kwargs={
                             "location": _loc,
                             "start_date": start_date.isoformat(),
                             "end_date": end_date.isoformat(),
                             "variants": all_selected_variants,
-                            "unexplained_patterns": _cooc_res[_loc]["unexplained_patterns"],
-                            # informative reads per day: denominator of the
-                            # scanner's per-day evidence share
-                            "day_totals": {
-                                str(_d)[:10]: int(_m) + int(_u) for _d, _m, _u in zip(
-                                    _cooc_res[_loc].get("dates", []),
-                                    _cooc_res[_loc].get("matched_counts", []),
-                                    _cooc_res[_loc].get("unexplained_counts", []))},
-                            # reads per position per date: did later samples
-                            # cover a one-day finding?
-                            "position_coverage": _cooc_res[_loc].get("position_coverage"),
                         }
                     )
                     _scanner_tasks[_loc] = _stask.id
@@ -705,7 +696,7 @@ def app():
                     _outstanding = True
                     break
                 # completeness done but scanner not yet done → running
-                if (_cr_now.get(_ln, {}).get("unexplained_patterns")
+                if (_ln in _cr_now
                         and _ln not in _sr_now and _ln not in _failed.get("scanner", {})):
                     _outstanding = True
                     break
@@ -722,7 +713,7 @@ def app():
                          _ss.get("location_results", {})),
                         ("completeness", _ss.get("acooc_cooc_tasks", {}),
                          _ss.get("acooc_cooc_results", {})),
-                        ("scanner", _ss.get("acooc_scanner_tasks", {}),
+                        ("deep scan", _ss.get("acooc_scanner_tasks", {}),
                          _ss.get("acooc_scanner_results", {})),
                     ]
                     _parts, _ready = [], False
@@ -848,7 +839,9 @@ def app():
 
             _agg_bar("Deconvolution", _n_deconv, "#185FA5")
             _agg_bar("Completeness", _n_cooc, "#16a34a")
-            _agg_bar("Scanner", _n_scan, "#EF9F27")
+            _agg_bar("Deep scan — panel + positions with a mutation in the data"
+                     if get_cooc_setting("scope.data_positions", default=True)
+                     else "Scanner — panel positions only", _n_scan, "#EF9F27")
             _fl_all = st.session_state.get("acooc_failed", {})
             if any(_fl_all.values()):
                 st.error("Failed: " + " · ".join(
@@ -1017,7 +1010,10 @@ def app():
                       return f"{_x.day} {_x.strftime('%b')}"
                   except Exception:
                       return d
-              if _ready_locs:
+              # the graph needs only phase 1 (completeness); the deep scan colours
+              # its red / blue bands in when it arrives
+              _graph_locs = [l for l in location_names if _cr_all.get(l) is not None]
+              if _graph_locs:
                   st.markdown("#### Panel completeness")
                   if _until_short:
                       st.caption("📅 Data until " + " · ".join(
@@ -1066,10 +1062,13 @@ def app():
                   def _one_city(_lc):
                       _du = (f" <span style='font-weight:400;color:#6b7280;'>· data until "
                              f"{_dshort(_until_short[_lc])}</span>" if _lc in _until_short else "")
+                      if _cr_all.get(_lc) is not None and _sr_all.get(_lc) is None:
+                          _du += (" <span style='font-weight:400;color:#2563eb;'>· deep scan "
+                                  "running — red / blue appear when it ends</span>")
                       st.markdown(f"<div style='font-size:12px;font-weight:600;'>"
                                   f"{_lc}{_du}</div>", unsafe_allow_html=True)
-                      if _cr_all.get(_lc) is not None and _sr_all.get(_lc) is not None:
-                          _render_composition(_cr_all[_lc], _sr_all[_lc], key=_lc,
+                      if _cr_all.get(_lc) is not None:
+                          _render_composition(_cr_all[_lc], _sr_all.get(_lc) or {}, key=_lc,
                                               show_legend=False, show_caption=False,
                                               panel_union=_panel_union)
                       else:
