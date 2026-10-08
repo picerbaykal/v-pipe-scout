@@ -8,7 +8,10 @@ direct LAPIS fetch — our tallymut already has pos/base natively, so no
 subprocess preprocessing is needed before calling lollipop deconvolute.
 
 Pipeline:
-    WiseLoculusLapis.get_tallymut()
+    WiseLoculusLapis.get_tallymut()   count + coverage of every panel mutation
+                                      on every sampling date, count 0 included
+                                      (/component/nucleotideMutationsOverTime,
+                                      2026-10-08)
     → build binary variant-membership columns from PangoLoader signatures
     → write tallymut.tsv + variants_config.yaml + deconv_config.yaml
     → subprocess lollipop deconvolute (no --namefield flag needed)
@@ -159,16 +162,10 @@ def run_deconv_lapis(
     # Load cowwid signatures as fallback for reconstructed centroid nodes
     cowwid_variants = _COWWID_VARIANTS
 
-    # Collect all positions from all cowwid variants as reference set
-    # This ensures undetermined signal captures non-selected circulating variants
-    all_cowwid_positions: set = set()
-    for sig in cowwid_variants.values():
-        for mut in sig:
-            m = re.match(r"^(\d+)", mut)
-            if m:
-                all_cowwid_positions.add(int(m.group(1)))
-    logger.info(f"Reference positions from all cowwid variants: {len(all_cowwid_positions)}")
-
+    # The panel's own mutations are fetched by name (get_tallymut). The 29
+    # cowwid positions are no longer sent: a mutation no panel variant
+    # carries gets 0 in every membership column and LolliPop drops the row,
+    # and panel mutations outside those positions were never fetched.
     try:
         df_tally = asyncio.run(
             client.get_tallymut(
@@ -177,7 +174,6 @@ def run_deconv_lapis(
                 variants=variants,
                 pango_loader=pango_loader,
                 cowwid_variants=cowwid_variants,
-                reference_positions=all_cowwid_positions,
             )
         )
     except Exception as e:

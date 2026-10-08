@@ -30,4 +30,3 @@ def test_detail_flags_a_near_miss():
     pd = {"2026-08-01": {"150G": [500, 22, 22, 22]}}       # 4.4 %: present needs 5 %
     d = check_in_data(["150G"], pd, ["2026-08-01"])["detail"][0]
     assert d["why"].startswith("between") and "present needs" in d["near"]
-    
