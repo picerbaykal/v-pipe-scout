@@ -1,7 +1,7 @@
 """components/variant_explorer_ui.py
 
 'Investigate a variant': pick any lineage, see whether co-occurrence can tell
-it apart (★ markers, the same rule as the panel check) and how it relates to
+it apart (★ markers, the same rule as the ★ check of panel variants) and how it relates to
 others, then "Check in data": the worker reads its ★ markers in the run's
 cities and window, one line per city (2026-10-02). The heatmaps live in their
 own section, "Signal over time" (components/signal_over_time_ui.py).
@@ -180,7 +180,7 @@ def _check_section(variant, panel, cities, start_date, end_date, celery_app, key
                         f"<span>{right}</span></div>")
         st.markdown("<div style='font-size:12.5px;margin-top:6px;'>" + "".join(rows)
                     + "</div><div style='font-size:11px;color:#6b7280;margin-top:2px;'>"
-                    "Pooled over the run's window · present / absent by the panel check "
+                    "Pooled over the run's window · present / absent by the ★ check "
                     f"(★ marker ≥ {cfg['present_freq'] * 100:g} % / "
                     f"< {cfg['absent_freq'] * 100:g} % of ≥ {cfg['min_cov']} reads) · its "
                     "signal per week: <b>Signal over time</b></div>", unsafe_allow_html=True)

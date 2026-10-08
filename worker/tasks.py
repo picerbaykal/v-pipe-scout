@@ -459,9 +459,14 @@ def run_cooc_deep_scan_lapis(self, location: str, start_date: str, end_date: str
                           "hotspots": len(hot) if hot is not None else None}
         # the lineages it found get the panel's own check (★ markers present /
         # measurable per day), so their table cells mean the same as the panel's
-        nodes = list(dict.fromkeys(
+        nodes_all = list(dict.fromkeys(
             c["node"] for k in ("resolved_clade", "one_day") for c in (result.get(k) or [])
-            if c.get("node")))[:40]
+            if c.get("node")))
+        _nmax = int(get_cooc_setting("lists.findings_check_max", default=40))
+        nodes = nodes_all[:_nmax]
+        if len(nodes_all) > _nmax:
+            logger.warning(f"[deep scan] {location}: checking {_nmax} of {len(nodes_all)} "
+                           "found lineages (lists.findings_check_max)")
         if nodes:
             from cooc import lineages_check
             _p(4, f"Checking ★ markers of {len(nodes)} found lineages...")

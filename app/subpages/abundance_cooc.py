@@ -249,6 +249,13 @@ def app():
     st.session_state.setdefault("acooc_cooc_results", {})
     st.session_state.setdefault("acooc_scanner_results", {})
     st.session_state.setdefault("acooc_scanner_panels", {})
+    # the four kinds of task a run can start: (stage, tasks key, results key).
+    # Stage names are the keys of acooc_failed; "stopped" there = Stop pressed.
+    _RUN_STAGES = [("completeness", "acooc_cooc_tasks", "acooc_cooc_results"),
+                   ("deconvolution", "acooc_location_tasks", "location_results"),
+                   ("scanner", "acooc_scanner_tasks", "acooc_scanner_results"),
+                   ("cross-check", "acooc_xcheck_tasks", "acooc_xcheck_results")]
+    _STOPPED = "stopped"
 
     # ── Header ───────────────────────────────────────────────────────────────
     st.title("Abundance & Co-occurrence")
@@ -259,7 +266,7 @@ def app():
     )
     st.caption(
         "Build a custom variant panel and run on-demand deconvolution across one or "
-        "more sampling locations. The panel-completeness check and scanner guide you "
+        "more sampling locations. The panel check and the deep scan guide you "
         "to a complete panel iteratively — follow the numbered steps."
     )
     st.markdown("---")
@@ -272,7 +279,9 @@ def app():
         st.session_state.get("acooc_panel", [])
         + st.session_state.get("acooc_scanner_added", [])))) >= 2
     has_locations = len(st.session_state.get("acooc_location_multiselect", [])) >= 1
-    has_run = bool(st.session_state.get("acooc_location_tasks"))
+    # a run = the completeness tasks of ▶ Run (2026-10-08: deconvolution and
+    # the deep scan have their own buttons)
+    has_run = bool(st.session_state.get("acooc_cooc_tasks"))
     has_completeness = bool(st.session_state.get("acooc_cooc_results"))
     has_scanner = bool(st.session_state.get("acooc_scanner_results"))
 
@@ -333,7 +342,7 @@ def app():
         # ── Step 2: Variant tree ──────────────────────────────────────────────
         _step_label(2, "Variant tree", done=has_variants)
         st.caption("Your panel (structural). Per-city results are coloured on the "
-                   "tree in Co-occurrence results.")
+                   "tree in the Lineages tab.")
         # structural tree only — always black, updates live with the selection
         # (no verdicts here, so it never flickers and needs no run).
         render_panel_tree(
@@ -448,18 +457,14 @@ def app():
         # PENDING forever, so we cross-check against the results dicts to avoid
         # a stale PENDING keeping the button disabled after everything finished.
         def _any_running():
-            _lr = st.session_state.get("location_results", {})
-            _cr = st.session_state.get("acooc_cooc_results", {})
-            _sr = st.session_state.get("acooc_scanner_results", {})
-            _checks = [
-                (st.session_state.get("acooc_location_tasks", {}), _lr),
-                (st.session_state.get("acooc_cooc_tasks", {}), _cr),
-                (st.session_state.get("acooc_scanner_tasks", {}), _sr),
-            ]
-            for _tasks, _results in _checks:
+            _ss = st.session_state
+            _fl = _ss.get("acooc_failed", {})
+            _checks = [(_stg, _ss.get(_tk, {}), _ss.get(_rk, {}))
+                       for _stg, _tk, _rk in _RUN_STAGES]
+            for _stg, _tasks, _results in _checks:
                 for _loc, _t in _tasks.items():
-                    if _loc in _results:
-                        continue  # result already collected — not running
+                    if _loc in _results or _loc in _fl.get(_stg, {}):
+                        continue  # collected, failed or stopped — not running
                     if not _t:
                         continue
                     _state = celery_app.AsyncResult(_t).state
@@ -490,8 +495,9 @@ def app():
             _positions = 2141
             _per_date  = 0.30 + 0.00022 * _positions      # s / date / location
             _cooc_s    = _per_date * _n_dates * _n_locs * 1.2   # safety factor
-            _deconv_s  = 90 * _n_locs                       # ~1.5 min/loc deconv
-            _total_s   = _cooc_s + _deconv_s
+            # ▶ Run = completeness only (deconvolution has its own button;
+            # it took ~1.5 min per location)
+            _total_s   = _cooc_s
             _total_min = _total_s / 60
 
             if _total_s <= 45:
@@ -524,32 +530,24 @@ def app():
             disabled=not can_run,
             key="acooc_run_button",
             use_container_width=True,
-            help="Runs deconvolution, completeness, and scanner for all locations."
-                 if not _busy else "Wait for the current analysis to finish.",
+            help="Runs the panel check for all locations. Deconvolution and "
+                 "the deep scan have their own buttons above the results."
+                 if not _busy else "Wait for the current analysis to finish, or stop it.",
         ):
             st.session_state["acooc_trigger_run"] = True
-        st.caption("runs all cities with base panel" if not _busy else "⟳ analysis in progress…")
+        st.caption("panel check for all locations" if not _busy
+                   else "⟳ analysis in progress… (Stop is above the results)")
     # ── Right column: all outputs ─────────────────────────────────────────────
     with col_results:
 
         # task submission
         if st.session_state.get("acooc_trigger_run"):
             st.session_state["acooc_trigger_run"] = False
-            location_tasks = {}
+            # ▶ Run = completeness only (2026-10-08). Deconvolution, the deep
+            # scan (+ cross-check) and CovvFit start from their buttons, with
+            # the cities, panel and dates saved here (acooc_ran_*).
             cooc_tasks = {}
             for loc in selected_locations:
-                task = celery_app.send_task(
-                    "tasks.run_deconvolve_lapis",
-                    kwargs={
-                        "location": loc,
-                        "start_date": start_date.isoformat(),
-                        "end_date": end_date.isoformat(),
-                        "variants": all_selected_variants,
-                        "bootstraps": bootstraps,
-                        "bandwidth": bandwidth,
-                    }
-                )
-                location_tasks[loc] = task.id
                 cooc_task = celery_app.send_task(
                     "tasks.run_cooc_completeness_lapis",
                     kwargs={
@@ -562,7 +560,11 @@ def app():
                 cooc_tasks[loc] = cooc_task.id
                 logger.info(f"Submitted task {cooc_task.id} for {loc}")
 
-            st.session_state["acooc_location_tasks"] = location_tasks
+            st.session_state["acooc_location_tasks"] = {}
+            st.session_state["acooc_deconv_settings"] = None
+            st.session_state["acooc_want_scan"] = False
+            st.session_state["acooc_stopped"] = False
+            st.session_state["acooc_section"] = "Panel check"
             st.session_state["acooc_ran_panel"] = sorted(all_selected_variants)
             st.session_state["acooc_ran_locations"] = sorted(selected_locations)
             st.session_state["acooc_ran_dates"] = (start_date.isoformat(), end_date.isoformat())
@@ -577,7 +579,7 @@ def app():
             st.session_state["acooc_xcheck_tasks"] = {}
             st.session_state["acooc_xcheck_results"] = {}
             # start times of the two progress phases (for "time left")
-            st.session_state["acooc_phase_t0"] = {0: time.time()}
+            st.session_state["acooc_phase_t0"] = {"completeness": time.time()}
             # reset bucket expand flags so scanner starts collapsed on a new run
             st.session_state["acooc_exp_missing"] = False
             st.session_state["acooc_exp_sub"] = False
@@ -589,7 +591,7 @@ def app():
 
         location_tasks = st.session_state.get("acooc_location_tasks", {})
 
-        if not location_tasks:
+        if not st.session_state.get("acooc_cooc_tasks"):
             st.info("Complete steps 1–5 on the left to see results here.")
             # quick look-up works without a run: ★ markers and relatives come
             # from the pango tree; "Check in data" needs a run's cities
@@ -618,7 +620,8 @@ def app():
                 _reasons.append(f"new location(s) added ({', '.join(_added_cities)})")
             if _reasons:
                 st.warning("⚠ Re-run needed — " + "; ".join(_reasons)
-                           + ". Results below reflect the previous run.")
+                           + ". Results below, and the buttons in the tabs, "
+                           "use the previous run.")
             # collect completed results — track if anything new arrives this cycle
             _new_collected = False
             # failed tasks: {stage: {city: message}}. A failed task is "ready" but
@@ -630,6 +633,107 @@ def app():
             def _fail(stage, loc, err):
                 _failed.setdefault(stage, {})[loc] = str(err)[:300]
                 logger.error(f"{stage} task failed for {loc}: {err}")
+
+            # ── the run's saved settings: every button below uses them, never
+            #    the sidebar as it is now (2026-10-08). Before, the deep scan
+            #    and cross-check read the sidebar when they started, so a panel
+            #    or date change during a run gave a city a scan for other
+            #    settings than its graph. ──────────────────────────────────────
+            location_names = list(st.session_state.get("acooc_cooc_tasks", {}).keys())
+            _run_panel = list(st.session_state.get("acooc_ran_panel") or all_selected_variants)
+            _run_d0, _run_d1 = (st.session_state.get("acooc_ran_dates")
+                                or (start_date.isoformat(), end_date.isoformat()))
+
+            def _stage_open(stage, tkey, rkey):
+                """Cities whose task of this stage was started and is not yet
+                collected, failed or stopped."""
+                _t = st.session_state.get(tkey, {}) or {}
+                _r = st.session_state.get(rkey, {}) or {}
+                _f = _failed.get(stage, {})
+                return [l for l, tid in _t.items() if tid and l not in _r and l not in _f]
+
+            # ── Buttons (2026-10-08): each sits in the tab where its result
+            #    appears (Deconvolution, CovvFit: Deconvolution tab; deep scan:
+            #    Lineages tab); ■ Stop in the progress box. ─────────────────────
+            def _btn_deconv():
+                _open = _stage_open(*_RUN_STAGES[1])
+                _label = "Run deconvolution" if not location_tasks else "Re-run deconvolution"
+                if st.button(_label, key="acooc_btn_deconv", use_container_width=True,
+                             disabled=bool(_open),
+                             help=("Running…" if _open else
+                                   f"LolliPop per location with the settings of step 4 "
+                                   f"({bootstraps} bootstraps, bandwidth {bandwidth}).")):
+                    _new = {}
+                    for _l in location_names:
+                        _new[_l] = celery_app.send_task(
+                            "tasks.run_deconvolve_lapis",
+                            kwargs={"location": _l, "start_date": _run_d0,
+                                    "end_date": _run_d1, "variants": _run_panel,
+                                    "bootstraps": bootstraps, "bandwidth": bandwidth}).id
+                    st.session_state["acooc_location_tasks"] = _new
+                    st.session_state["location_results"] = {}
+                    st.session_state["acooc_deconv_settings"] = (bootstraps, bandwidth)
+                    _failed.pop("deconvolution", None)
+                    st.session_state.setdefault("acooc_phase_t0", {})["deconvolution"] = time.time()
+                    logger.info(f"Deconvolution submitted for {len(_new)} location(s)")
+                    st.rerun()
+
+            def _btn_covvfit():
+                st.button("Run CovvFit", key="acooc_btn_covvfit", use_container_width=True,
+                          disabled=True,
+                          help="Coming in the next update; it uses the deconvolution.")
+
+            def _btn_scan():
+                _scan_req = (bool(st.session_state.get("acooc_want_scan"))
+                             or bool(st.session_state.get("acooc_scanner_tasks")))
+                _scan_stopped = [l for l, m in _failed.get("scanner", {}).items()
+                                 if m == _STOPPED]
+                _xc_stopped = any(m == _STOPPED for m in _failed.get("cross-check", {}).values())
+                _resume = bool(_scan_stopped) or _xc_stopped
+                _wait_graph = _cooc_outstanding and not _scan_req
+                _done = (bool(st.session_state.get("acooc_xcheck_tasks"))
+                         and not _stage_open(*_RUN_STAGES[2])
+                         and not _stage_open(*_RUN_STAGES[3]))
+                if st.button("Resume deep scan" if _resume else "Run deep scan",
+                             key="acooc_btn_scan", use_container_width=True,
+                             disabled=_wait_graph or (_scan_req and not _resume),
+                             help=("Waits for the panel check of every location."
+                                   if _wait_graph else
+                                   ("Done for these results; press ▶ Run for new ones."
+                                    if _done else "Running: every location, then the cross-check.")
+                                   if _scan_req and not _resume else
+                                   "Looks for variants outside your panel in every location; "
+                                   "the cross-check follows.")):
+                    # after a Stop: the stopped locations scan again; the
+                    # cross-check (it needs every scan) starts over
+                    _st = st.session_state.get("acooc_scanner_tasks", {})
+                    for _l in _scan_stopped:
+                        _st.pop(_l, None)
+                        _failed.get("scanner", {}).pop(_l, None)
+                    _failed.pop("cross-check", None)
+                    st.session_state["acooc_xcheck_tasks"] = {}
+                    st.session_state["acooc_xcheck_results"] = {}
+                    st.session_state["acooc_want_scan"] = True
+                    st.session_state["acooc_stopped"] = False
+                    st.rerun()
+
+            def _btn_stop():
+                if st.button("■ Stop", key="acooc_btn_stop", use_container_width=True,
+                             help="Cancels every task of this run that hasn't finished. "
+                                  "Results already in stay."):
+                    _ids = []
+                    for _stg, _tk, _rk in _RUN_STAGES:
+                        for _l in _stage_open(_stg, _tk, _rk):
+                            _ids.append(st.session_state[_tk][_l])
+                            _failed.setdefault(_stg, {})[_l] = _STOPPED
+                    if _ids:
+                        # terminate=True also ends tasks already running
+                        # (the worker runs Celery's default prefork pool)
+                        celery_app.control.revoke(_ids, terminate=True)
+                    st.session_state["acooc_want_scan"] = False
+                    st.session_state["acooc_stopped"] = True
+                    logger.info(f"Stop: revoked {len(_ids)} task(s)")
+                    st.rerun()
 
             # deconvolution results
             _loc_res = st.session_state.get("location_results", {})
@@ -664,7 +768,7 @@ def app():
             try:
                 _ref_locs = [str(x) for x in (cached_fetch_locations() or [])]
             except Exception:
-                _ref_locs = list(location_tasks)
+                _ref_locs = list(location_names)
             for _loc, _tid in list(st.session_state.get("acooc_cooc_tasks", {}).items()):
                 if _loc not in _cooc_res and _loc not in _failed.get("completeness", {}):
                     _t = celery_app.AsyncResult(_tid)
@@ -675,32 +779,36 @@ def app():
                         except Exception as _e:
                             _fail("completeness", _loc, _e)
                         _new_collected = True
-                # phase 2 — the deep scan — once this city's completeness (phase 1)
-                # is ready: the worker reads today's positions plus those where
-                # the data shows a mutation and runs the scanner on them
-                # (scope.data_positions; the graph stays on phase 1)
-                if (_loc in _cooc_res
-                        and _loc not in _scanner_tasks
-                        and _loc not in scanner_results):
-                    _stask = celery_app.send_task(
-                        "tasks.run_cooc_deep_scan_lapis",
-                        kwargs={
-                            "location": _loc,
-                            "start_date": start_date.isoformat(),
-                            "end_date": end_date.isoformat(),
-                            "variants": all_selected_variants,
-                            # error hotspots come from every available
-                            # location, not only the run's cities
-                            "reference_locations": _ref_locs,
-                        }
-                    )
-                    _scanner_tasks[_loc] = _stask.id
-                    scanner_panels[_loc] = list(all_selected_variants)
-                    logger.info(f"Auto-submitted scanner for {_loc}")
+            # phase 2 — the deep scan: the worker reads today's positions plus
+            # those where the data shows a mutation and runs the scanner on them
+            # (scope.data_positions; the graph stays on phase 1). Only after
+            # "Run deep scan" was pressed, which is possible once completeness
+            # is in for every location (2026-10-08: was per location as soon as
+            # its own completeness was in). All locations start together, with
+            # the run's saved settings. The task doesn't use the completeness
+            # result; the wait is for the workflow (look at the graph, then decide).
+            if st.session_state.get("acooc_want_scan"):
+                for _loc in location_names:
+                    if (_loc in _cooc_res
+                            and _loc not in _scanner_tasks
+                            and _loc not in scanner_results):
+                        _stask = celery_app.send_task(
+                            "tasks.run_cooc_deep_scan_lapis",
+                            kwargs={
+                                "location": _loc,
+                                "start_date": _run_d0,
+                                "end_date": _run_d1,
+                                "variants": _run_panel,
+                                # error hotspots come from every available
+                                # location, not only the run's cities
+                                "reference_locations": _ref_locs,
+                            }
+                        )
+                        _scanner_tasks[_loc] = _stask.id
+                        scanner_panels[_loc] = list(_run_panel)
+                        logger.info(f"Submitted deep scan for {_loc}")
             st.session_state["acooc_scanner_tasks"] = _scanner_tasks
             st.session_state["acooc_scanner_panels"] = scanner_panels
-
-            location_names = list(location_tasks.keys())
 
             # ── phase 3: cross-check (2026-10-02) ─────────────────────────────
             # A lineage the deep scan named in SOME city is checked by its ★
@@ -723,14 +831,15 @@ def app():
             _scan_all = st.session_state.get("acooc_scanner_results", {})
             _scans_done = all(_l in _scan_all or _l in _failed.get("scanner", {})
                               for _l in location_names)
-            if _scans_done and not _xt and _scan_all:
+            if (st.session_state.get("acooc_want_scan")
+                    and _scans_done and not _xt and _scan_all):
                 _found_in = {}
                 for _l, _r in _scan_all.items():
                     for _k in ("resolved_clade", "one_day"):
                         for _c in (_r.get(_k) or []):
                             if _c.get("node"):
                                 _found_in.setdefault(_c["node"], set()).add(_l)
-                _ran_pan = set(st.session_state.get("acooc_ran_panel") or all_selected_variants)
+                _ran_pan = set(_run_panel)
                 _xmax = int(get_cooc_setting("lists.cross_check_max", default=40))
                 for _l in location_names:
                     _miss_all = sorted(n for n, cs in _found_in.items()
@@ -744,8 +853,8 @@ def app():
                         _xt[_l] = ""
                         continue
                     _xtask = celery_app.send_task("tasks.run_cooc_lineages_check_lapis", kwargs={
-                        "location": _l, "start_date": start_date.isoformat(),
-                        "end_date": end_date.isoformat(), "variants": _miss,
+                        "location": _l, "start_date": _run_d0,
+                        "end_date": _run_d1, "variants": _miss,
                         "panel": sorted(_ran_pan)})
                     _xt[_l] = _xtask.id
                 st.session_state["acooc_xcheck_found_in"] = {n: sorted(cs) for n, cs in _found_in.items()}
@@ -755,28 +864,36 @@ def app():
             # Base it on "is there outstanding work?" rather than raw task state,
             # so newly-submitted scanner tasks keep the refresh alive and the bars
             # update to green without needing a manual click.
-            _lr_now = st.session_state.get("location_results", {})
+            # Three kinds of outstanding work (2026-10-08), so a long
+            # deconvolution doesn't hold back the scan's results and the reverse:
+            #   completeness — the graph; deconvolution — the LolliPop plots;
+            #   scan — deep scan + cross-check, once "Deep scan" was pressed.
             _cr_now = st.session_state.get("acooc_cooc_results", {})
             _sr_now = st.session_state.get("acooc_scanner_results", {})
-            _outstanding = False
-            for _ln in location_names:
-                # deconv or completeness not yet collected → running
-                if ((_ln not in _lr_now and _ln not in _failed.get("deconvolution", {}))
-                        or (_ln not in _cr_now and _ln not in _failed.get("completeness", {}))):
-                    _outstanding = True
-                    break
-                # completeness done but scanner not yet done → running
-                if (_ln in _cr_now
-                        and _ln not in _sr_now and _ln not in _failed.get("scanner", {})):
-                    _outstanding = True
-                    break
-            # phase 3 (cross-check) not yet in → running
-            if not _outstanding and _sr_now:
-                _xt_now = st.session_state.get("acooc_xcheck_tasks", {})
-                _xr_now = st.session_state.get("acooc_xcheck_results", {})
-                if not _xt_now or any(_l not in _xr_now and _l not in _failed.get("cross-check", {})
-                                      for _l in location_names):
-                    _outstanding = True
+            _want_scan = bool(st.session_state.get("acooc_want_scan"))
+            _cooc_outstanding = any(
+                _ln not in _cr_now and _ln not in _failed.get("completeness", {})
+                for _ln in location_names)
+            _deconv_outstanding = bool(_stage_open(
+                "deconvolution", "acooc_location_tasks", "location_results"))
+            _scan_outstanding = False
+            if _want_scan:
+                for _ln in location_names:
+                    # requested (completeness is in everywhere) but the scan
+                    # not yet done → running
+                    if _ln in _failed.get("completeness", {}):
+                        continue
+                    if _ln not in _sr_now and _ln not in _failed.get("scanner", {}):
+                        _scan_outstanding = True
+                        break
+                # phase 3 (cross-check) not yet in → running
+                if not _scan_outstanding and _sr_now:
+                    _xt_now = st.session_state.get("acooc_xcheck_tasks", {})
+                    _xr_now = st.session_state.get("acooc_xcheck_results", {})
+                    if not _xt_now or any(_l not in _xr_now and _l not in _failed.get("cross-check", {})
+                                          for _l in location_names):
+                        _scan_outstanding = True
+            _outstanding = _cooc_outstanding or _deconv_outstanding or _scan_outstanding
             if not _outstanding and _new_collected:
                 # final result(s) just arrived and nothing is left running —
                 # force one full-page rerun so the left column (Run button) and
@@ -821,70 +938,67 @@ def app():
             _n_scan = sum(1 for l in location_names if l in _scan_res2)
             _n_tot = len(location_names)
 
-            with st.container():
-                _ph1, _ph2 = st.columns([3, 1])
-                with _ph1:
-                    st.markdown("<div style='font-size:13px;font-weight:500;'>Analysis progress</div>",
-                                unsafe_allow_html=True)
-                with _ph2:
-                    _completed_locs = [loc for loc in location_names if loc in _lr]
-                    if _completed_locs:
-                        # build the deconvolution zip inline so the button
-                        # downloads directly (no intermediate report view)
-                        import io as _io, csv as _csv, zipfile as _zip
-                        _zbuf = _io.BytesIO(); _n_dl = 0
-                        with _zip.ZipFile(_zbuf, "w", _zip.ZIP_DEFLATED) as _zf:
-                            for _loc in _completed_locs:
-                                _res = st.session_state.location_results[_loc]
-                                # deconv result is wrapped by location name; unwrap
-                                if isinstance(_res, dict) and _loc in _res and isinstance(_res[_loc], dict):
-                                    _res = _res[_loc]
-                                _rows = []
-                                for _variant, _data in _res.items():
-                                    if _variant == "undetermined":
-                                        continue
-                                    for _e in (_data.get("timeseriesSummary", []) or []):
-                                        _rows.append({
-                                            "location": _loc, "variant": _variant,
-                                            "date": _e.get("date", ""),
-                                            "proportion": _e.get("proportion", ""),
-                                            "proportion_lower": _e.get("proportionLower", _e.get("ci_lower", "")),
-                                            "proportion_upper": _e.get("proportionUpper", _e.get("ci_upper", "")),
-                                        })
-                                if not _rows:
+            def _deconv_download():
+                """Zip of the deconvolution CSVs (were in the progress header)."""
+                _completed_locs = [loc for loc in location_names if loc in _lr]
+                if _completed_locs:
+                    # build the deconvolution zip inline so the button
+                    # downloads directly (no intermediate report view)
+                    import io as _io, csv as _csv, zipfile as _zip
+                    _zbuf = _io.BytesIO(); _n_dl = 0
+                    with _zip.ZipFile(_zbuf, "w", _zip.ZIP_DEFLATED) as _zf:
+                        for _loc in _completed_locs:
+                            _res = st.session_state.location_results[_loc]
+                            # deconv result is wrapped by location name; unwrap
+                            if isinstance(_res, dict) and _loc in _res and isinstance(_res[_loc], dict):
+                                _res = _res[_loc]
+                            _rows = []
+                            for _variant, _data in _res.items():
+                                if _variant == "undetermined":
                                     continue
-                                _sio = _io.StringIO()
-                                _w = _csv.DictWriter(_sio, fieldnames=["location","variant","date","proportion","proportion_lower","proportion_upper"])
-                                _w.writeheader(); _w.writerows(_rows)
-                                _safe = _loc.split("(")[0].strip().replace(" ", "_")
-                                _zf.writestr(f"deconvolution_{_safe}.csv", _sio.getvalue())
-                                _n_dl += 1
-                        if _n_dl:
-                            st.download_button(
-                                "⬇ Download deconvolution (CSV)",
-                                data=_zbuf.getvalue(),
-                                file_name="vpipe_scout_deconvolution.zip",
-                                mime="application/zip",
-                                key="acooc_download_zip",
-                                use_container_width=True)
+                                for _e in (_data.get("timeseriesSummary", []) or []):
+                                    _rows.append({
+                                        "location": _loc, "variant": _variant,
+                                        "date": _e.get("date", ""),
+                                        "proportion": _e.get("proportion", ""),
+                                        "proportion_lower": _e.get("proportionLower", _e.get("ci_lower", "")),
+                                        "proportion_upper": _e.get("proportionUpper", _e.get("ci_upper", "")),
+                                    })
+                            if not _rows:
+                                continue
+                            _sio = _io.StringIO()
+                            _w = _csv.DictWriter(_sio, fieldnames=["location","variant","date","proportion","proportion_lower","proportion_upper"])
+                            _w.writeheader(); _w.writerows(_rows)
+                            _safe = _loc.split("(")[0].strip().replace(" ", "_")
+                            _zf.writestr(f"deconvolution_{_safe}.csv", _sio.getvalue())
+                            _n_dl += 1
+                    if _n_dl:
+                        st.download_button(
+                            "⬇ Download deconvolution (CSV)",
+                            data=_zbuf.getvalue(),
+                            file_name="vpipe_scout_deconvolution.zip",
+                            mime="application/zip",
+                            key="acooc_download_zip",
+                            use_container_width=True)
 
-            # Two phases (2026-10-02). Phase 1 = deconvolution + completeness:
-            # the graph and abundances. Phase 2 = the deep scan: Variants table
-            # and the red band. Each bar: % of the work (from the
-            # worker's own progress, per city) and the time left at the pace so
-            # far. Drawn inside a fragment that reruns every 3 s while work is
+            # Progress box (2026-10-08): one summary line for every kind of task
+            # that was started, a bar only for what is running now (% of the
+            # work from the worker's own progress, time left at the pace so
+            # far). Drawn inside a fragment that reruns every 3 s while work is
             # outstanding, so the bars move without redrawing the charts; the
             # whole page reruns only when a task has finished.
             _deep_on = get_cooc_setting("scope.data_positions", default=True)
+            _ws = bool(st.session_state.get("acooc_want_scan"))
+            # (key, short name, bar title, [(stage, tasks key, results key)]).
+            # The deep scan and its cross-check are ONE bar (2026-10-08): the
+            # tree updates only when both are done, so "done" must mean both.
             _PHASES = [
-                ("1 · Abundance and completeness graph",
-                 [("deconvolution", "acooc_location_tasks", "location_results"),
-                  ("completeness", "acooc_cooc_tasks", "acooc_cooc_results")], "#475569"),
-                ("2 · " + ("Deep scan — panel + positions with a mutation in the data"
-                           if _deep_on else "Scanner — panel positions only"),
-                 [("scanner", "acooc_scanner_tasks", "acooc_scanner_results")], "#475569"),
-                ("3 · Cross-check — lineages found in any city, checked in every city",
-                 [("cross-check", "acooc_xcheck_tasks", "acooc_xcheck_results")], "#475569"),
+                ("completeness", "Panel check", "Panel check", [_RUN_STAGES[0]]),
+                ("deconvolution", "Deconvolution", "Deconvolution", [_RUN_STAGES[1]]),
+                ("scanner", "Deep scan",
+                 "Deep scan — then the cross-check of what it found"
+                 + ("" if _deep_on else " (panel positions only)"),
+                 [_RUN_STAGES[2], _RUN_STAGES[3]]),
             ]
 
             def _task_frac(tid):
@@ -907,124 +1021,199 @@ def app():
                 return f"~{int(round(sec / 60))} min left"
 
             def _phase_bars(live):
+                """The progress box: a summary line, then one bar per kind of
+                task that is running, split in one segment per location (each
+                with its name and state under it). For the deep scan a
+                location's segment is half its scan, half its cross-check."""
                 import time as _time
                 _ss = st.session_state
                 _fl = _ss.get("acooc_failed", {})
                 _t0s = _ss.setdefault("acooc_phase_t0", {})
-                _ready = False
-                _html = ""
-                for _pi, (_title, _stages, _col) in enumerate(_PHASES):
-                    _fs, _now_txt, _n_bad = [], "", 0
-                    for _stg, _tk, _rk in _stages:
-                        _tasks, _done = _ss.get(_tk, {}), _ss.get(_rk, {})
-                        _bad = _fl.get(_stg, {})
-                        _n_bad += len(_bad)
-                        for _l in location_names:
-                            if _l in _done or _l in _bad:
-                                _fs.append(1.0)
-                            elif _l in _tasks:
-                                if live and celery_app.AsyncResult(_tasks[_l]).ready():
-                                    _ready = True
-                                _f, _msg = _task_frac(_tasks[_l]) if live else (0.0, "")
-                                _fs.append(_f)
-                                if _msg and not _now_txt:
-                                    _now_txt = f"{_l.split('(')[0].strip()}: {_msg}"
-                            else:
-                                _fs.append(0.0)
-                    _frac = sum(_fs) / len(_fs) if _fs else 0.0
-                    _started = any(f > 0 for f in _fs) or any(
-                        _ss.get(_tk) for _, _tk, _ in _stages)
-                    if _started and _pi not in _t0s:
-                        _t0s[_pi] = _time.time()
-                    _right = f"{_frac * 100:.0f}%"
+                _ready = [False]
+                _summary, _bars = [], ""
+
+                def _one(stage, tk, rk, l):
+                    """(fraction 0-1, state, status message) of one location's task:
+                    state = done / failed / stopped / running / none."""
+                    _tasks, _done = _ss.get(tk, {}), _ss.get(rk, {})
+                    _bad = _fl.get(stage, {})
+                    if l in _bad:
+                        return 1.0, ("stopped" if _bad[l] == _STOPPED else "failed"), ""
+                    if l in _done:
+                        return 1.0, "done", ""
+                    if _tasks.get(l):
+                        if live and celery_app.AsyncResult(_tasks[l]).ready():
+                            _ready[0] = True
+                        _f, _msg = _task_frac(_tasks[l]) if live else (0.0, "")
+                        return _f, "running", _msg
+                    return 0.0, "none", ""
+
+                _MARKS = {"done": "✓", "stopped": "■", "failed": "✗"}
+                for _pk, _short, _title, _stages in _PHASES:
+                    _has_tasks = any(_ss.get(_tk) for _, _tk, _ in _stages)
+                    if not (_has_tasks or (_pk == "scanner" and _ws)):
+                        continue
+                    _segs, _now_txt = [], ""
+                    for _l in location_names:
+                        _nm = _l.split("(")[0].strip()
+                        _f, _st, _msg = _one(*_stages[0], _l)
+                        if len(_stages) == 2 and _st == "done":
+                            # deep scan done here → its cross-check
+                            _f2, _st2, _msg2 = _one(*_stages[1], _l)
+                            _f = 0.5 + 0.5 * _f2
+                            _st, _msg = _st2, _msg2
+                            _lab = (_MARKS.get(_st2) if _st2 in _MARKS else
+                                    "cross-check" if _st2 == "running" else "scanned")
+                        elif len(_stages) == 2:
+                            _f = 1.0 if _st in ("failed", "stopped") else 0.5 * _f
+                            _lab = (_MARKS.get(_st) if _st in _MARKS else
+                                    f"{_f * 200:.0f} %" if _st == "running" else "starting")
+                        else:
+                            _lab = (_MARKS.get(_st) if _st in _MARKS else
+                                    f"{_f * 100:.0f} %" if _st == "running" else "waiting")
+                        if _msg and not _now_txt:
+                            _now_txt = f"{_nm}: {_msg}"
+                        _segs.append((_nm, _f, _st, _lab))
+                    _frac = sum(x[1] for x in _segs) / len(_segs) if _segs else 0.0
+                    _n_bad = sum(1 for x in _segs if x[2] == "failed")
+                    _n_stop = sum(1 for x in _segs if x[2] == "stopped")
+                    _extra = ((f" · {_n_bad} failed" if _n_bad else "")
+                              + (f" · {_n_stop} stopped" if _n_stop else ""))
                     if _frac >= 0.999:
-                        _right = "done"
-                    elif live and _started and _frac > 0.03 and _pi in _t0s:
-                        _el = _time.time() - _t0s[_pi]
+                        _summary.append(f"{_short} {'done' if not (_n_bad or _n_stop) else 'ended'}{_extra}")
+                        continue
+                    _summary.append(f"{_short} running{_extra}")
+                    if _pk not in _t0s:
+                        _t0s[_pk] = _time.time()
+                    _right = f"{_frac * 100:.0f}%"
+                    if live and _frac > 0.03:
+                        _el = _time.time() - _t0s[_pk]
                         _right += " · " + _left(_el * (1 - _frac) / _frac)
-                    elif not _started:
-                        _right = ("waiting for phase 1", "waiting for the deep scan")[_pi - 1] if _pi else "—"
-                    if _n_bad:
-                        _right += f" · {_n_bad} failed"
-                    _sub = (f"<div style='font-size:10.5px;color:#898781;margin-top:2px;"
+                    # one segment per location; at < 110 px each (many
+                    # locations) they wrap onto a second row
+                    _track = "".join(
+                        f"<div style='flex:1 1 0;min-width:110px;'>"
+                        f"<div style='height:8px;background:#D3D1C7;border-radius:4px;overflow:hidden;'>"
+                        f"<div style='height:100%;width:{f * 100:.0f}%;background:#475569;"
+                        f"border-radius:4px;'></div></div>"
+                        f"<div style='font-size:12px;color:#5F5E5A;margin-top:3px;white-space:nowrap;"
+                        f"overflow:hidden;text-overflow:ellipsis;'>{nm} {lab}</div></div>"
+                        for nm, f, _, lab in _segs)
+                    _sub = (f"<div style='font-size:12px;color:#898781;margin-top:2px;"
                             f"white-space:nowrap;overflow:hidden;text-overflow:ellipsis;'>"
-                            f"{_now_txt}</div>" if (live and _now_txt and _frac < 0.999) else "")
-                    _html += (
-                        f"<div style='margin-bottom:8px;'>"
-                        f"<div style='display:flex;justify-content:space-between;font-size:11px;"
-                        f"margin-bottom:3px;'><span style='font-weight:500;'>{_title}</span>"
-                        f"<span style='color:#898781;'>{_right}</span></div>"
-                        f"<div style='height:8px;background:#F1EFE8;border-radius:4px;overflow:hidden;'>"
-                        f"<div style='height:100%;border-radius:4px;width:{_frac*100:.0f}%;"
-                        f"background:{_col};'></div></div>{_sub}</div>")
-                st.markdown(_html, unsafe_allow_html=True)
-                return _ready
+                            f"{_now_txt}</div>" if (live and _now_txt) else "")
+                    _bars += (
+                        f"<div style='margin-top:10px;'>"
+                        f"<div style='display:flex;justify-content:space-between;font-size:13px;"
+                        f"margin-bottom:4px;'><span style='font-weight:500;'>{_title}</span>"
+                        f"<span style='color:#898781;font-size:12px;'>{_right}</span></div>"
+                        f"<div style='display:flex;flex-wrap:wrap;gap:6px 4px;'>{_track}</div>{_sub}</div>")
+                st.markdown(f"<div style='font-size:13px;color:#5F5E5A;'>{' · '.join(_summary)}</div>"
+                            + _bars, unsafe_allow_html=True)
+                return _ready[0]
 
-            if _outstanding:
-                @st.fragment(run_every=3)
-                def _poll_tasks():
-                    if _phase_bars(live=True):
-                        st.rerun(scope="app")
-                _poll_tasks()
-            else:
-                _phase_bars(live=False)
-            _fl_all = st.session_state.get("acooc_failed", {})
-            if any(_fl_all.values()):
-                st.error("Failed: " + " · ".join(
-                    f"{_stg} in {', '.join(c.split('(')[0].strip() for c in _cs)}"
-                    for _stg, _cs in _fl_all.items() if _cs)
-                    + " — the worker may have restarted or run out of memory; re-run to retry.")
+            _pbox = st.container(border=True)
+            with _pbox:
+                _pb1, _pb2 = st.columns([5, 1])
+                with _pb1:
+                    if _outstanding:
+                        @st.fragment(run_every=3)
+                        def _poll_tasks():
+                            if _phase_bars(live=True):
+                                st.rerun(scope="app")
+                        _poll_tasks()
+                    else:
+                        _phase_bars(live=False)
+                with _pb2:
+                    if _outstanding:
+                        _btn_stop()
+            with _pbox:
+              _fl_all = st.session_state.get("acooc_failed", {})
+              _err = {_stg: [c for c, m in _cs.items() if m != _STOPPED]
+                      for _stg, _cs in _fl_all.items()}
+              _stp = {_stg: [c for c, m in _cs.items() if m == _STOPPED]
+                      for _stg, _cs in _fl_all.items()}
 
-            # per-city checklist
-            _chk_html = "<div style='display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;padding-top:8px;border-top:0.5px solid rgba(0,0,0,.06);'>"
-            for _loc in location_names:
-                _pct, _n_miss, _sd, _sr, _dd, _cd, _dr, _cr = _city_status(_loc)
-                # a city is "done" only when ALL stages are done — deconv AND
-                # completeness AND scanner. Showing green on deconv alone is
-                # misleading: the scanner findings / addable band aren't ready yet.
-                if _dd and _cd and _sd:
-                    _icon, _ic = "✓", "#3B6D11"
-                elif _dr or _cr or _sr or _dd or _cd:
-                    # any stage running, or an earlier stage done but later ones
-                    # still pending → in progress
-                    _icon, _ic = "⟳", "#93C5FD"
-                else:
-                    _icon, _ic = "○", "#898781"
-                _chk_html += (
-                    f"<span style='display:flex;align-items:center;gap:5px;font-size:11px;"
-                    f"padding:3px 9px;border-radius:20px;background:#faf9f5;"
-                    f"border:0.5px solid rgba(0,0,0,.08);'>"
-                    f"<span style='width:14px;height:14px;border-radius:50%;background:{_ic};"
-                    f"color:#fff;display:flex;align-items:center;justify-content:center;"
-                    f"font-size:9px;flex:none;'>{_icon}</span>"
-                    f"{_loc.split('(')[0].strip()}</span>"
-                )
-            _chk_html += "</div>"
-            st.markdown(_chk_html, unsafe_allow_html=True)
+              _SHOWN = {"completeness": "panel check", "scanner": "deep scan"}
+
+              def _by_stage(d):
+                  return " · ".join(f"{_SHOWN.get(_stg, _stg)} in "
+                                    f"{', '.join(c.split('(')[0].strip() for c in _cs)}"
+                                    for _stg, _cs in d.items() if _cs)
+              if any(_err.values()):
+                  st.error("Failed: " + _by_stage(_err)
+                           + " — the worker may have restarted or run out of memory; re-run to retry.")
+              if any(_stp.values()):
+                  st.info("Stopped: " + _by_stage(_stp)
+                          + ". Results already in are kept; press a button again to restart that part.")
 
             st.markdown("<hr style='margin:10px 0 8px;opacity:.15;'>", unsafe_allow_html=True)
 
             # ── Section switcher (top-level tabs) ─────────────────────────────
             # Buttons persist selection across autorefresh (st.tabs ghosted +
-            # reset to the first tab on each rerun). Styled as underline tabs (via
-            # CSS on their container) so they read as navigation, not as another
-            # row of city buttons.
-            st.session_state.setdefault("acooc_section", "Deconvolution results")
-            _sections = ["Deconvolution results", "Co-occurrence results", "Signal over time",
-                         "Investigate a variant"]
-            _scols = st.columns(len(_sections))
-            for _si, _snm in enumerate(_sections):
-                with _scols[_si]:
-                    _active = st.session_state["acooc_section"] == _snm
-                    if st.button(_snm, key=f"acooc_sec_{_si}",
-                                 use_container_width=True,
-                                 type="primary" if _active else "secondary"):
-                        st.session_state["acooc_section"] = _snm
-                        st.rerun()
+            # reset to the first tab on each rerun). Grouped (2026-10-08) in the
+            # order results arrive: panel and abundance (is the panel good
+            # enough for a deconvolution? then the deconvolution), the deep scan
+            # (lineages, signal over time), and the look-up. A mark on the label
+            # tells the state of the tab's task: ✓ done, ⟳ running, ■ stopped,
+            # ○ not started.
+            _GROUPS = [("Panel and abundance", ["Panel check", "Deconvolution"]),
+                       ("Deep scan", ["Lineages", "Signal over time"]),
+                       ("Look-up", ["Investigate a variant"])]
+            _all_secs = [_x for _, _xs in _GROUPS for _x in _xs]
+            if st.session_state.get("acooc_section") not in _all_secs:
+                st.session_state["acooc_section"] = "Panel check"
+
+            def _mark(running, stages):
+                if running:
+                    return " ⟳"
+                if any(m == _STOPPED for _sg in stages for m in _failed.get(_sg[0], {}).values()):
+                    return " ■"
+                if any(st.session_state.get(_sg[1]) for _sg in stages):
+                    return " ✓"
+                return " ○"
+            _MARK = {"Panel check": _mark(_cooc_outstanding, _RUN_STAGES[0:1]),
+                     "Deconvolution": _mark(_deconv_outstanding, _RUN_STAGES[1:2]),
+                     "Lineages": _mark(_scan_outstanding, _RUN_STAGES[2:4])}
+            _spec = []
+            for _gi, (_, _xs) in enumerate(_GROUPS):
+                if _gi:
+                    _spec.append(0.06)                 # separator
+                _spec += [1.15 if _x == "Investigate a variant" else 1 for _x in _xs]
+            _SEP = ("<div style='border-left:1px solid rgba(0,0,0,.18);height:{h}px;"
+                    "width:0;margin:0 auto;'></div>")
+            _lab_cols, _btn_cols = st.columns(_spec), st.columns(_spec)
+            _ci = 0
+            for _gi, (_gname, _xs) in enumerate(_GROUPS):
+                if _gi:
+                    _lab_cols[_ci].markdown(_SEP.format(h=16), unsafe_allow_html=True)
+                    _btn_cols[_ci].markdown(_SEP.format(h=38), unsafe_allow_html=True)
+                    _ci += 1
+                _lab_cols[_ci].markdown(f"<div style='font-size:11px;color:#898781;'>{_gname}</div>",
+                                        unsafe_allow_html=True)
+                for _snm in _xs:
+                    with _btn_cols[_ci]:
+                        _active = st.session_state["acooc_section"] == _snm
+                        if st.button(_snm + _MARK.get(_snm, ""), key=f"acooc_sec_{_snm}",
+                                     use_container_width=True,
+                                     type="primary" if _active else "secondary"):
+                            st.session_state["acooc_section"] = _snm
+                            st.rerun()
+                    _ci += 1
             _active_section = st.session_state["acooc_section"]
             st.markdown("<hr style='margin:2px 0 10px;opacity:.12;'>", unsafe_allow_html=True)
 
-            if _active_section == "Deconvolution results":
+            if _active_section == "Deconvolution":
+              st.markdown("#### Deconvolution")
+              st.caption("Variant shares over time per location, with LolliPop and the "
+                         "settings of step 4.")
+              _dc1, _dc2, _dc3 = st.columns(3)
+              with _dc1:
+                  _btn_deconv()
+              with _dc2:
+                  _btn_covvfit()
+              with _dc3:
+                  _deconv_download()
               # ── City selector (radio — lighter than the section tabs above) ───
               _city_options = [f"📍 {loc}" for loc in location_names]
               if ("acooc_selected_city" not in st.session_state or
@@ -1086,9 +1275,16 @@ def app():
                              "tell them apart. (Same for every city.)")
                   with st.expander("Show similarity heatmap", expanded=False):
                       render_jaccard_heatmap(
-                          variants=all_selected_variants,
+                          variants=_run_panel,
                           pango_loader=cached_get_pango_loader(),
                       )
+              # deconvolution has its own button (2026-10-08)
+              _dset = st.session_state.get("acooc_deconv_settings")
+              if not location_tasks:
+                  st.info("Deconvolution hasn't run for these results yet: press "
+                          "Run deconvolution.")
+              elif _dset:
+                  st.caption(f"LolliPop: {_dset[0]} bootstraps, bandwidth {_dset[1]}.")
               # ── per-city TABS: each tab is one city's full-size deconvolution
               #    plot (with confidence bands). ──
               _dtabs = st.tabs([loc for loc in location_names])
@@ -1101,7 +1297,7 @@ def app():
                           st.caption("Not started.")
 
 
-            if _active_section == "Co-occurrence results":
+            if _active_section in ("Panel check", "Lineages"):
               # panel-changed warning: scanner findings reflect the panel that was
               # run, so flag when the current selection differs.
               _ran_sc = st.session_state.get("acooc_ran_panel")
@@ -1141,8 +1337,11 @@ def app():
               # the graph needs only phase 1 (completeness); the deep scan colours
               # its red band in when it arrives
               _graph_locs = [l for l in location_names if _cr_all.get(l) is not None]
-              if _graph_locs:
-                  st.markdown("#### Panel completeness")
+              if _graph_locs and _active_section == "Panel check":
+                  st.markdown("#### Is your panel good enough for deconvolution?")
+                  st.caption("Share of each location's reads your panel variants explain. "
+                             "Mostly green = the deconvolution can split the signal "
+                             "between them.")
                   if _until_short:
                       st.caption("📅 Data until " + " · ".join(
                           f"{l.split('(')[0].strip()} {_dshort(d)}"
@@ -1189,7 +1388,8 @@ def app():
                   def _one_city(_lc):
                       _du = (f" <span style='font-weight:400;color:#6b7280;'>· data until "
                              f"{_dshort(_until_short[_lc])}</span>" if _lc in _until_short else "")
-                      if _cr_all.get(_lc) is not None and _sr_all.get(_lc) is None:
+                      if (_cr_all.get(_lc) is not None and _sr_all.get(_lc) is None
+                              and st.session_state.get("acooc_want_scan")):
                           _du += (" <span style='font-weight:400;color:#6b7280;'>· deep scan "
                                   "running — red appears when it ends</span>")
                       st.markdown(f"<div style='font-size:12px;font-weight:600;'>"
@@ -1208,370 +1408,403 @@ def app():
                           for _j, _lc in enumerate(_grid_locs[_i:_i+2]):
                               with _cols[_j]:
                                   _one_city(_lc)
-                  st.markdown("---")
+                  st.caption("Grey = reads your panel doesn't explain. Red appears after "
+                             "the deep scan (Lineages tab).")
+                  _n1, _n2, _n3 = st.columns(3)
+                  with _n1:
+                      if st.button("Go to deconvolution →", key="acooc_go_deconv",
+                                   use_container_width=True):
+                          st.session_state["acooc_section"] = "Deconvolution"
+                          st.rerun()
+                  with _n2:
+                      if st.button("Find what's missing (deep scan) →", key="acooc_go_scan",
+                                   use_container_width=True):
+                          st.session_state["acooc_section"] = "Lineages"
+                          st.rerun()
+                  with _n3:
+                      st.button("Suggest a panel · release 2", key="acooc_suggest_panel",
+                                use_container_width=True, disabled=True,
+                                help="Coming in release 2: a panel proposed from the data.")
 
-              # ── Variants: one city selector; the tree (left) and one table for
-              #    everything co-occurrence says (right); then the chosen city's
-              #    signal over time. Uses the panel that was RUN, so the colours
-              #    always match the results. (2026-09-30) ─────────────────────
-              _run_panel = st.session_state.get("acooc_ran_panel") or all_selected_variants
-              _verdicts_by_city = {
-                  _l: _panel_verdicts(_cr_all[_l], _run_panel)
-                  for _l in location_names if _cr_all.get(_l) is not None}
-              # scanner findings only when NOTHING is still running
-              # (_outstanding drives the autorefresh), so partial results
-              # never leak into the table
-              _scan_running = _outstanding
-              _scan_res_all = ({} if _scan_running
-                               else st.session_state.get("acooc_scanner_results", {}) or {})
-              _agg_new, _agg_sub, _agg_unres, _agg_mnh, _agg_one = {}, {}, {}, {}, {}
-              _novel_total, _novel_pats = 0, 0
+              if _active_section == "Lineages":
+                st.markdown("#### Lineages")
+                st.caption("Which lineages are really there. Your panel rows have their ★ "
+                           "check now; the deep scan adds what's outside your panel, then the "
+                           "cross-check checks them in every location.")
+                _ls1, _ls2 = st.columns([1, 2])
+                with _ls1:
+                    _btn_scan()
+                if _cooc_outstanding and not st.session_state.get("acooc_want_scan"):
+                    with _ls2:
+                        st.caption("Available once the panel check is in for "
+                                   "every location.")
+                elif _scan_outstanding:
+                    with _ls2:
+                        st.caption("Deep scan running: the lineages it finds appear "
+                                   "when the cross-check ends (progress above).")
+                # ── Variants: one city selector; the tree (left) and one table for
+                #    everything co-occurrence says (right); then the chosen city's
+                #    signal over time. Uses the panel that was RUN, so the colours
+                #    always match the results. (2026-09-30) ─────────────────────
+                _run_panel = st.session_state.get("acooc_ran_panel") or all_selected_variants
+                _verdicts_by_city = {
+                    _l: _panel_verdicts(_cr_all[_l], _run_panel)
+                    for _l in location_names if _cr_all.get(_l) is not None}
+                # scanner findings only when NOTHING is still running
+                # (_outstanding drives the autorefresh), so partial results
+                # never leak into the table
+                # (2026-10-08: only the scan's own work counts — a deconvolution
+                # still running doesn't hide the findings)
+                _scan_running = _scan_outstanding
+                _scan_res_all = ({} if _scan_running
+                                 else st.session_state.get("acooc_scanner_results", {}) or {})
+                _agg_new, _agg_sub, _agg_unres, _agg_mnh, _agg_one = {}, {}, {}, {}, {}
+                _novel_total, _novel_pats = 0, 0
 
-              def _human_reads(_n):
-                  if _n >= 1_000_000:
-                      return f"{_n/1_000_000:.1f}M".replace(".0M", "M")
-                  if _n >= 1_000:
-                      return f"{_n/1_000:.0f}K"
-                  return str(_n)
+                def _human_reads(_n):
+                    if _n >= 1_000_000:
+                        return f"{_n/1_000_000:.1f}M".replace(".0M", "M")
+                    if _n >= 1_000:
+                        return f"{_n/1_000:.0f}K"
+                    return str(_n)
 
-              if _scan_res_all:
-                  # ══ Option C scanner rendering ══════════════════════════════
-                  # signatures for heatmap classification (lazy, cached in session)
-                  _all_sigs = st.session_state.get("acooc_all_sigs_cache")
-                  if _all_sigs is None:
-                      try:
-                          from api.pango_loader import PangoLoader, get_pango_summary_path
-                          _pl = PangoLoader(get_pango_summary_path())
-                          _all_sigs = {lin: _pl.get_signature(lin) for lin in _pl.raw_data}
-                          st.session_state["acooc_all_sigs_cache"] = _all_sigs
-                      except Exception:
-                          _all_sigs = {}
-                  # Aggregate the new clade-based scanner output across cities.
-                  # Categories: not-in-panel clades, sublineage clades,
-                  # unresolved, novel. Honest clade labels, member counts.
-                  # collect clade findings across cities, keyed by node
-                  _agg_new = {}      # node -> {reads, cities, member_count, members, designation, muts}
-                  _agg_sub = {}
-                  _agg_unres = {}    # frozenset(fp) -> {reads, cand, anc}
-                  _agg_mnh = {}      # node -> matched-but-no-haplotype
-                  _agg_one = {}      # node -> ★ evidence on 1 day only, in every city
-                  _novel_total = 0
-                  _novel_pats = 0
+                if _scan_res_all:
+                    # ══ Option C scanner rendering ══════════════════════════════
+                    # signatures for heatmap classification (lazy, cached in session)
+                    _all_sigs = st.session_state.get("acooc_all_sigs_cache")
+                    if _all_sigs is None:
+                        try:
+                            from api.pango_loader import PangoLoader, get_pango_summary_path
+                            _pl = PangoLoader(get_pango_summary_path())
+                            _all_sigs = {lin: _pl.get_signature(lin) for lin in _pl.raw_data}
+                            st.session_state["acooc_all_sigs_cache"] = _all_sigs
+                        except Exception:
+                            _all_sigs = {}
+                    # Aggregate the new clade-based scanner output across cities.
+                    # Categories: not-in-panel clades, sublineage clades,
+                    # unresolved, novel. Honest clade labels, member counts.
+                    # collect clade findings across cities, keyed by node
+                    _agg_new = {}      # node -> {reads, cities, member_count, members, designation, muts}
+                    _agg_sub = {}
+                    _agg_unres = {}    # frozenset(fp) -> {reads, cand, anc}
+                    _agg_mnh = {}      # node -> matched-but-no-haplotype
+                    _agg_one = {}      # node -> ★ evidence on 1 day only, in every city
+                    _novel_total = 0
+                    _novel_pats = 0
 
-                  from process.variant_explorer import check_in_data as _cid
+                    from process.variant_explorer import check_in_data as _cid
 
-                  def _fcheck(_loc, _node):
-                      """The panel check for a found lineage in one city (the deep
-                      scan's findings_check): same measure as the panel cells."""
-                      _fc = (_scan_res_all.get(_loc) or {}).get("findings_check") or {}
-                      _pv = (_fc.get("per_variant") or {}).get(_node)
-                      if not _pv:
-                          return None
-                      return _cid(_pv.get("markers") or [], _pv.get("per_date") or {},
-                                  _fc.get("dates") or [],
-                                  recent=int(get_cooc_setting("check.recent_samples", default=5)))
+                    def _fcheck(_loc, _node):
+                        """The ★ check for a found lineage in one city (the deep
+                        scan's findings_check): same measure as the panel cells."""
+                        _fc = (_scan_res_all.get(_loc) or {}).get("findings_check") or {}
+                        _pv = (_fc.get("per_variant") or {}).get(_node)
+                        if not _pv:
+                            return None
+                        return _cid(_pv.get("markers") or [], _pv.get("per_date") or {},
+                                    _fc.get("dates") or [],
+                                    recent=int(get_cooc_setting("check.recent_samples", default=5)))
 
-                  def _xcheck(_loc, _node):
-                      """Phase 3: the ★ marker check of a lineage named in another
-                      city, for this city (None when it wasn't checked here)."""
-                      _x = (st.session_state.get("acooc_xcheck_results", {}) or {}).get(_loc) or {}
-                      _pv = (_x.get("per_variant") or {}).get(_node)
-                      if not _pv or not _pv.get("markers"):
-                          return None
-                      return _cid(_pv.get("markers") or [], _pv.get("per_date") or {},
-                                  _x.get("dates") or [],
-                                  recent=int(get_cooc_setting("check.recent_samples", default=5)))
+                    def _xcheck(_loc, _node):
+                        """Phase 3: the ★ marker check of a lineage named in another
+                        city, for this city (None when it wasn't checked here)."""
+                        _x = (st.session_state.get("acooc_xcheck_results", {}) or {}).get(_loc) or {}
+                        _pv = (_x.get("per_variant") or {}).get(_node)
+                        if not _pv or not _pv.get("markers"):
+                            return None
+                        return _cid(_pv.get("markers") or [], _pv.get("per_date") or {},
+                                    _x.get("dates") or [],
+                                    recent=int(get_cooc_setting("check.recent_samples", default=5)))
 
-                  def _ingest_clade(_c, _loc, _bucket=None):
-                      # Route one finding (top-level OR a promoted sub-finding) into
-                      # the new/sub bucket and aggregate its reads across cities.
-                      if _bucket is None:
-                          _bucket = _agg_new if _c.get("relationship") == "new_lineage" else _agg_sub
-                      _node = _c["node"]
-                      _slot = _bucket.setdefault(_node, {
-                          "node": _node, "reads": 0, "signal_reads": 0,
-                          "cities": [],
-                          "member_count": _c.get("member_count", 1),
-                          "members": _c.get("members", []),
-                          "designation": _c.get("designation", ""),
-                          "panel_ancestor": _c.get("panel_ancestor", ""),
-                          "muts": _c.get("observed_mutations", []),
-                          "member_blocks": _c.get("member_blocks", []),
-                          "shared_mutations": _c.get("shared_mutations", []),
-                          "associated": _c.get("associated_members", []),
-                          "confidence": _c.get("confidence", "weak"),
-                          "verdict": _c.get("verdict", ""),
-                          "trend": _c.get("trend", "flat"),
-                          "trend_series": list(_c.get("trend_series", [])),
-                          "peak_date": _c.get("peak_date", ""),
-                          "trend_by_city": {},
-                          "per_city": {},
-                      })
-                      _slot["reads"] += int(_c.get("total_reads", 0))
-                      # signal_reads is the strongest discriminating region's
-                      # reads; across cities take the MAX (summing would
-                      # double-count the same discriminating reads and can
-                      # exceed the total). Capped at total as a safety net.
-                      _slot["signal_reads"] = max(
-                          _slot.get("signal_reads", 0),
-                          int(_c.get("signal_reads", 0)))
-                      if _loc not in _slot["cities"]:
-                          _slot["cities"].append(_loc)
-                      # keep each city's own series so trend can be shown
-                      # per-city or aggregated (summed element-wise)
-                      _slot["trend_by_city"][_loc] = list(_c.get("trend_series", []))
-                      # per-city ★ mutations (the scanner's mut_star). Kept per
-                      # city so the card shows which city has which. Regex-free
-                      # leading-digit position sort.
-                      def _pcpos(_m):
-                          _d = ""
-                          for _ch in _m:
-                              if _ch.isdigit():
-                                  _d += _ch
-                              else:
-                                  break
-                          return int(_d) if _d else 0
-                      _pc_car, _pc_flag, _pc_out = {}, {}, {}
-                      for _blk in _c.get("member_blocks", []):
-                          _pc_car.update(_blk.get("mut_carriers", {}))
-                          _pc_flag.update(_blk.get("mut_star", {}) or {})
-                          _pc_out.update(_blk.get("mut_outside", {}) or {})
-                      # ★ = rare outside the finding's own family, decided by the
-                      # scanner (mut_star)
-                      _pc_star = sorted(
-                          {_m for _blk in _c.get("member_blocks", [])
-                           for _m in _blk.get("discriminating", [])
-                           if _pc_flag.get(_m, False)},
-                          key=_pcpos)
-                      _slot["per_city"][_loc] = {
-                          "star": _pc_star,
-                          "car": {_m: _pc_out.get(_m, _pc_car.get(_m)) for _m in _pc_star},
-                          # days with ★ evidence in this city (shown on the chip)
-                          "days": len(_c.get("counted_days", []) or []),
-                          # facts for the table (scanner _add_notes)
-                          "evidence_days": dict(_c.get("evidence_days", {}) or {}),
-                          "regions": list(_c.get("evidence_regions", []) or []),
-                          # one-day findings: what happened after that day
-                          "after": _c.get("one_day_after"),
-                          # the panel check on its ★ markers (2026-10-02)
-                          "check": _fcheck(_loc, _node),
-                          # this city's own blocks, for this city's heatmap
-                          "blocks": _c.get("member_blocks", []) or [],
-                      }
-                      _slot.setdefault("descendants", set()).update(
-                          _c.get("confirmed_descendants", []) or [])
+                    def _ingest_clade(_c, _loc, _bucket=None):
+                        # Route one finding (top-level OR a promoted sub-finding) into
+                        # the new/sub bucket and aggregate its reads across cities.
+                        if _bucket is None:
+                            _bucket = _agg_new if _c.get("relationship") == "new_lineage" else _agg_sub
+                        _node = _c["node"]
+                        _slot = _bucket.setdefault(_node, {
+                            "node": _node, "reads": 0, "signal_reads": 0,
+                            "cities": [],
+                            "member_count": _c.get("member_count", 1),
+                            "members": _c.get("members", []),
+                            "designation": _c.get("designation", ""),
+                            "panel_ancestor": _c.get("panel_ancestor", ""),
+                            "muts": _c.get("observed_mutations", []),
+                            "member_blocks": _c.get("member_blocks", []),
+                            "shared_mutations": _c.get("shared_mutations", []),
+                            "associated": _c.get("associated_members", []),
+                            "confidence": _c.get("confidence", "weak"),
+                            "verdict": _c.get("verdict", ""),
+                            "trend": _c.get("trend", "flat"),
+                            "trend_series": list(_c.get("trend_series", [])),
+                            "peak_date": _c.get("peak_date", ""),
+                            "trend_by_city": {},
+                            "per_city": {},
+                        })
+                        _slot["reads"] += int(_c.get("total_reads", 0))
+                        # signal_reads is the strongest discriminating region's
+                        # reads; across cities take the MAX (summing would
+                        # double-count the same discriminating reads and can
+                        # exceed the total). Capped at total as a safety net.
+                        _slot["signal_reads"] = max(
+                            _slot.get("signal_reads", 0),
+                            int(_c.get("signal_reads", 0)))
+                        if _loc not in _slot["cities"]:
+                            _slot["cities"].append(_loc)
+                        # keep each city's own series so trend can be shown
+                        # per-city or aggregated (summed element-wise)
+                        _slot["trend_by_city"][_loc] = list(_c.get("trend_series", []))
+                        # per-city ★ mutations (the scanner's mut_star). Kept per
+                        # city so the card shows which city has which. Regex-free
+                        # leading-digit position sort.
+                        def _pcpos(_m):
+                            _d = ""
+                            for _ch in _m:
+                                if _ch.isdigit():
+                                    _d += _ch
+                                else:
+                                    break
+                            return int(_d) if _d else 0
+                        _pc_car, _pc_flag, _pc_out = {}, {}, {}
+                        for _blk in _c.get("member_blocks", []):
+                            _pc_car.update(_blk.get("mut_carriers", {}))
+                            _pc_flag.update(_blk.get("mut_star", {}) or {})
+                            _pc_out.update(_blk.get("mut_outside", {}) or {})
+                        # ★ = rare outside the finding's own family, decided by the
+                        # scanner (mut_star)
+                        _pc_star = sorted(
+                            {_m for _blk in _c.get("member_blocks", [])
+                             for _m in _blk.get("discriminating", [])
+                             if _pc_flag.get(_m, False)},
+                            key=_pcpos)
+                        _slot["per_city"][_loc] = {
+                            "star": _pc_star,
+                            "car": {_m: _pc_out.get(_m, _pc_car.get(_m)) for _m in _pc_star},
+                            # days with ★ evidence in this city (shown on the chip)
+                            "days": len(_c.get("counted_days", []) or []),
+                            # facts for the table (scanner _add_notes)
+                            "evidence_days": dict(_c.get("evidence_days", {}) or {}),
+                            "regions": list(_c.get("evidence_regions", []) or []),
+                            # one-day findings: what happened after that day
+                            "after": _c.get("one_day_after"),
+                            # the ★ check on its markers (2026-10-02)
+                            "check": _fcheck(_loc, _node),
+                            # this city's own blocks, for this city's heatmap
+                            "blocks": _c.get("member_blocks", []) or [],
+                        }
+                        _slot.setdefault("descendants", set()).update(
+                            _c.get("confirmed_descendants", []) or [])
 
-                  for _loc, _res in _scan_res_all.items():
-                      for _c in _res.get("resolved_clade", []):
-                          _ingest_clade(_c, _loc)
-                          # A confirmed sub-finding (e.g. LF.7 nested under JN.1) is
-                          # its own real finding — surface it as a card too, else a
-                          # tiny parent (e.g. a 4k-read JN.1) hides a huge descendant
-                          # (a 460k-read LF.7). Only promote sub-findings that are
-                          # actually confirmed (have discriminating blocks); their
-                          # reads are disjoint from the parent's, so no double count.
-                          for _sf in _c.get("sub_findings", []) or []:
-                              if _sf.get("member_blocks"):
-                                  _ingest_clade(_sf, _loc)
-                      for _u in _res.get("unresolved", []):
-                          _k = tuple(_u["fingerprint"])
-                          _s = _agg_unres.setdefault(_k, {
-                              "fp": _u["fingerprint"], "reads": 0,
-                              "cand": _u.get("candidate_count", 0),
-                              "anc": _u.get("common_ancestor", ""),
-                          })
-                          _s["reads"] += int(_u.get("total_reads", 0))
-                          _s.setdefault("days", {})[_loc] = len(_u.get("days", []) or [])
-                      for _mnh in _res.get("matched_no_haplotype", []):
-                          _k = _mnh["node"]
-                          _s = _agg_mnh.setdefault(_k, {
-                              "node": _mnh["node"], "reads": 0,
-                              "member_count": _mnh.get("member_count", 1),
-                              "muts": _mnh.get("observed_mutations", []),
-                              "relationship": _mnh.get("relationship", ""),
-                              "cities": [],
-                          })
-                          _s["reads"] += int(_mnh.get("total_reads", 0))
-                          if _loc not in _s["cities"]:
-                              _s["cities"].append(_loc)
-                      _nv = _res.get("novel", {})
-                      _novel_total += int(_nv.get("total_reads", 0))
-                      _novel_pats += int(_nv.get("pattern_count", 0))
-                  # ★ evidence on 1 day only: a node confirmed in another city
-                  # shows this city as a "1 day" chip on its card; otherwise it
-                  # goes to "Seen on 1 day only" (a possible jackpot — watch it)
-                  for _loc, _res in _scan_res_all.items():
-                      for _c in _res.get("one_day", []) or []:
-                          _b = (_agg_new if _c["node"] in _agg_new
-                                else _agg_sub if _c["node"] in _agg_sub else _agg_one)
-                          _ingest_clade(_c, _loc, _b)
+                    for _loc, _res in _scan_res_all.items():
+                        for _c in _res.get("resolved_clade", []):
+                            _ingest_clade(_c, _loc)
+                            # A confirmed sub-finding (e.g. LF.7 nested under JN.1) is
+                            # its own real finding — surface it as a card too, else a
+                            # tiny parent (e.g. a 4k-read JN.1) hides a huge descendant
+                            # (a 460k-read LF.7). Only promote sub-findings that are
+                            # actually confirmed (have discriminating blocks); their
+                            # reads are disjoint from the parent's, so no double count.
+                            for _sf in _c.get("sub_findings", []) or []:
+                                if _sf.get("member_blocks"):
+                                    _ingest_clade(_sf, _loc)
+                        for _u in _res.get("unresolved", []):
+                            _k = tuple(_u["fingerprint"])
+                            _s = _agg_unres.setdefault(_k, {
+                                "fp": _u["fingerprint"], "reads": 0,
+                                "cand": _u.get("candidate_count", 0),
+                                "anc": _u.get("common_ancestor", ""),
+                            })
+                            _s["reads"] += int(_u.get("total_reads", 0))
+                            _s.setdefault("days", {})[_loc] = len(_u.get("days", []) or [])
+                        for _mnh in _res.get("matched_no_haplotype", []):
+                            _k = _mnh["node"]
+                            _s = _agg_mnh.setdefault(_k, {
+                                "node": _mnh["node"], "reads": 0,
+                                "member_count": _mnh.get("member_count", 1),
+                                "muts": _mnh.get("observed_mutations", []),
+                                "relationship": _mnh.get("relationship", ""),
+                                "cities": [],
+                            })
+                            _s["reads"] += int(_mnh.get("total_reads", 0))
+                            if _loc not in _s["cities"]:
+                                _s["cities"].append(_loc)
+                        _nv = _res.get("novel", {})
+                        _novel_total += int(_nv.get("total_reads", 0))
+                        _novel_pats += int(_nv.get("pattern_count", 0))
+                    # ★ evidence on 1 day only: a node confirmed in another city
+                    # shows this city as a "1 day" chip on its card; otherwise it
+                    # goes to "Seen on 1 day only" (a possible jackpot — watch it)
+                    for _loc, _res in _scan_res_all.items():
+                        for _c in _res.get("one_day", []) or []:
+                            _b = (_agg_new if _c["node"] in _agg_new
+                                  else _agg_sub if _c["node"] in _agg_sub else _agg_one)
+                            _ingest_clade(_c, _loc, _b)
 
-              if _ready_locs:
-                  from components import variants_table as _vt
-                  st.markdown("---")
-                  st.markdown("### Variants")
-                  st.caption("Evidence from reads only, one column per city. The tree is "
-                             "coloured by the city you click in the header (shaded). Hover "
-                             "anything for details; + Add puts a finding in your panel — "
-                             "re-run to apply.")
-                  # the chosen city (click a city code in the table header)
-                  if st.session_state.get("acooc_tree_city") not in _ready_locs:
-                      st.session_state["acooc_tree_city"] = _ready_locs[0]
-                  _tcity = st.session_state["acooc_tree_city"]
-                  _cities_all = [l for l in location_names
-                                 if l in _verdicts_by_city or l in _scan_res_all]
+                if _ready_locs:
+                    from components import variants_table as _vt
+                    st.markdown("---")
+                    st.markdown("### Variants")
+                    st.caption("Evidence from reads only, one column per city. The tree is "
+                               "coloured by the city you click in the header (shaded). Hover "
+                               "anything for details; + Add puts a finding in your panel — "
+                               "re-run to apply.")
+                    # the chosen city (click a city code in the table header)
+                    if st.session_state.get("acooc_tree_city") not in _ready_locs:
+                        st.session_state["acooc_tree_city"] = _ready_locs[0]
+                    _tcity = st.session_state["acooc_tree_city"]
+                    _cities_all = [l for l in location_names
+                                   if l in _verdicts_by_city or l in _scan_res_all]
 
-                  # ---- findings not in the panel ----
-                  _conf = sorted(list(_agg_new.values()) + list(_agg_sub.values()),
-                                 key=lambda x: -x["reads"])
-                  _broader = [x for x in _conf if x.get("descendants")]
-                  _conf = [x for x in _conf if not x.get("descendants")]
-                  _ED = int(get_cooc_setting("evidence.min_days", default=2))
-                  _conf_ok = [x for x in _conf if any(
-                      (p.get("days") or 0) >= _ED for p in x["per_city"].values())]
-                  _one = ([x for x in _conf if x not in _conf_ok]
-                          + sorted(_agg_one.values(), key=lambda x: -x["reads"]))
-                  _shown = {x["node"] for x in _conf + _broader + _one}
-                  # a node confirmed in one city but only named in another is
-                  # one row (its city cells say which)
-                  _named_all = [x for x in sorted(_agg_mnh.values(), key=lambda x: -x["reads"])
-                                if x["node"] not in _shown]
-                  _named = _named_all[:int(get_cooc_setting("lists.named_only_max", default=25))]
+                    # ---- findings not in the panel ----
+                    _conf = sorted(list(_agg_new.values()) + list(_agg_sub.values()),
+                                   key=lambda x: -x["reads"])
+                    _broader = [x for x in _conf if x.get("descendants")]
+                    _conf = [x for x in _conf if not x.get("descendants")]
+                    _ED = int(get_cooc_setting("evidence.min_days", default=2))
+                    _conf_ok = [x for x in _conf if any(
+                        (p.get("days") or 0) >= _ED for p in x["per_city"].values())]
+                    _one = ([x for x in _conf if x not in _conf_ok]
+                            + sorted(_agg_one.values(), key=lambda x: -x["reads"]))
+                    _shown = {x["node"] for x in _conf + _broader + _one}
+                    # a node confirmed in one city but only named in another is
+                    # one row (its city cells say which)
+                    _named_all = [x for x in sorted(_agg_mnh.values(), key=lambda x: -x["reads"])
+                                  if x["node"] not in _shown]
+                    _named = _named_all[:int(get_cooc_setting("lists.named_only_max", default=25))]
 
-                  # findings as the view wants them: node -> {status, per_city, addable}
-                  def _f(_slot, _status):
-                      if _status == "named":
-                          _pc = {c: {"days": 0} for c in _slot.get("cities", [])}
-                      else:
-                          _pc = {c: {"days": p.get("days", 0), "stars": p.get("star", []),
-                                     "regions": p.get("regions", []), "after": p.get("after"),
-                                     "check": p.get("check")}
-                                 for c, p in (_slot.get("per_city") or {}).items()}
-                          # phase 3: the other cities, by the cross-check
-                          _fin = (st.session_state.get("acooc_xcheck_found_in") or {}).get(
-                              _slot.get("node"), sorted(_pc))
-                          for _xc in location_names:
-                              if _xc in _pc:
-                                  continue
-                              _chk = _xcheck(_xc, _slot.get("node"))
-                              if _chk is not None:
-                                  _pc[_xc] = {"days": 0, "check": _chk, "xcheck": True,
-                                              "found_in": [c for c in _fin if c != _xc]}
-                      _ok = any((d.get("days") or 0) >= _ED for d in _pc.values())
-                      # + Add (2026-10-02): the panel check would confirm it in at
-                      # least one city, and it is more than one sample (>= min_days
-                      # days in a city, or 1 day in >= 2 cities)
-                      _present = any((d.get("check") or {}).get("state") == "present"
-                                     for d in _pc.values())
-                      _samples = _ok or sum(1 for d in _pc.values()
-                                            if (d.get("days") or 0) >= 1) >= 2
-                      return {"status": _status if _status != "confirmed" or _ok else "1 day",
-                              "per_city": _pc,
-                              "addable": _status != "named" and _present and _samples}
+                    # findings as the view wants them: node -> {status, per_city, addable}
+                    def _f(_slot, _status):
+                        if _status == "named":
+                            _pc = {c: {"days": 0} for c in _slot.get("cities", [])}
+                        else:
+                            _pc = {c: {"days": p.get("days", 0), "stars": p.get("star", []),
+                                       "regions": p.get("regions", []), "after": p.get("after"),
+                                       "check": p.get("check")}
+                                   for c, p in (_slot.get("per_city") or {}).items()}
+                            # phase 3: the other cities, by the cross-check
+                            _fin = (st.session_state.get("acooc_xcheck_found_in") or {}).get(
+                                _slot.get("node"), sorted(_pc))
+                            for _xc in location_names:
+                                if _xc in _pc:
+                                    continue
+                                _chk = _xcheck(_xc, _slot.get("node"))
+                                if _chk is not None:
+                                    _pc[_xc] = {"days": 0, "check": _chk, "xcheck": True,
+                                                "found_in": [c for c in _fin if c != _xc]}
+                        _ok = any((d.get("days") or 0) >= _ED for d in _pc.values())
+                        # + Add (2026-10-02): the ★ check would confirm it in at
+                        # least one city, and it is more than one sample (>= min_days
+                        # days in a city, or 1 day in >= 2 cities)
+                        _present = any((d.get("check") or {}).get("state") == "present"
+                                       for d in _pc.values())
+                        _samples = _ok or sum(1 for d in _pc.values()
+                                              if (d.get("days") or 0) >= 1) >= 2
+                        return {"status": _status if _status != "confirmed" or _ok else "1 day",
+                                "per_city": _pc,
+                                "addable": _status != "named" and _present and _samples}
 
-                  _findings = {}
-                  if not _scan_running:
-                      for x in _named:
-                          _findings[x["node"]] = _f(x, "named")
-                      for x in _one:
-                          _findings[x["node"]] = _f(x, "1 day")
-                      for x in _conf_ok + _broader:
-                          _findings[x["node"]] = _f(x, "confirmed")
+                    _findings = {}
+                    if not _scan_running:
+                        for x in _named:
+                            _findings[x["node"]] = _f(x, "named")
+                        for x in _one:
+                            _findings[x["node"]] = _f(x, "1 day")
+                        for x in _conf_ok + _broader:
+                            _findings[x["node"]] = _f(x, "confirmed")
 
-                  # ---- unnamed signal: novel patterns grouped by mutations ----
-                  _nov = {}   # mutations -> {city: days}
-                  _nov_info = {}   # mutations -> {city: {timeline, clue}}
-                  # error-hotspot patterns the scanner left out (_drop_hotspots)
-                  _hot_p = sum(int(((_r.get("novel") or {}).get("hotspot") or {}).get("patterns", 0))
-                               for _r in _scan_res_all.values())
-                  _hot_r = sum(int(((_r.get("novel") or {}).get("hotspot") or {}).get("reads", 0))
-                               for _r in _scan_res_all.values())
-                  for _loc, _res in _scan_res_all.items():
-                      for _g in (_res.get("novel", {}) or {}).get("groups", []) or []:
-                          if _g.get("likely_error"):      # results from before 2026-10-02
-                              continue
-                          _k = tuple(_g["mutations"])
-                          _nov.setdefault(_k, {})[_loc] = len(_g.get("days", []))
-                          _nov_info.setdefault(_k, {})[_loc] = {
-                              "timeline": _g.get("timeline"), "clue": _g.get("clue")}
-                  _nov_order = lambda kv: (-max(kv[1].values(), default=0),
-                                           -sum(kv[1].values()), kv[0])
-                  _nov_list = sorted([(list(k), v) for k, v in _nov.items()], key=_nov_order)
-                  _nov_listed = sum(
-                      _g.get("reads", 0) for _res in _scan_res_all.values()
-                      for _g in (_res.get("novel", {}) or {}).get("groups", []) or [])
-                  _nov_rest = max(0, _novel_total - _nov_listed)
-                  _broad = [(u["fp"], u.get("days", {}), u["cand"], u["anc"])
-                            for u in sorted(_agg_unres.values(), key=lambda x: -x["reads"])[
-                                :int(get_cooc_setting("lists.broad_max", default=25))]]
+                    # ---- unnamed signal: novel patterns grouped by mutations ----
+                    _nov = {}   # mutations -> {city: days}
+                    _nov_info = {}   # mutations -> {city: {timeline, clue}}
+                    # error-hotspot patterns the scanner left out (_drop_hotspots)
+                    _hot_p = sum(int(((_r.get("novel") or {}).get("hotspot") or {}).get("patterns", 0))
+                                 for _r in _scan_res_all.values())
+                    _hot_r = sum(int(((_r.get("novel") or {}).get("hotspot") or {}).get("reads", 0))
+                                 for _r in _scan_res_all.values())
+                    for _loc, _res in _scan_res_all.items():
+                        for _g in (_res.get("novel", {}) or {}).get("groups", []) or []:
+                            if _g.get("likely_error"):      # results from before 2026-10-02
+                                continue
+                            _k = tuple(_g["mutations"])
+                            _nov.setdefault(_k, {})[_loc] = len(_g.get("days", []))
+                            _nov_info.setdefault(_k, {})[_loc] = {
+                                "timeline": _g.get("timeline"), "clue": _g.get("clue")}
+                    _nov_order = lambda kv: (-max(kv[1].values(), default=0),
+                                             -sum(kv[1].values()), kv[0])
+                    _nov_list = sorted([(list(k), v) for k, v in _nov.items()], key=_nov_order)
+                    _nov_listed = sum(
+                        _g.get("reads", 0) for _res in _scan_res_all.values()
+                        for _g in (_res.get("novel", {}) or {}).get("groups", []) or [])
+                    _nov_rest = max(0, _novel_total - _nov_listed)
+                    _broad = [(u["fp"], u.get("days", {}), u["cand"], u["anc"])
+                              for u in sorted(_agg_unres.values(), key=lambda x: -x["reads"])[
+                                  :int(get_cooc_setting("lists.broad_max", default=25))]]
 
-                  if _scan_running:
-                      st.markdown(
-                          "<style>@keyframes acoocspin{to{transform:rotate(360deg)}}"
-                          "@keyframes acoocpulse{50%{box-shadow:0 0 0 4px rgba(71,85,105,.15)}}</style>"
-                          "<div style='display:flex;align-items:center;gap:10px;padding:9px 14px;"
-                          "margin:4px 0 10px;border-radius:8px;background:#f8fafc;"
-                          "border:1px solid #cbd5e1;border-left:4px solid #475569;"
-                          "animation:acoocpulse 2s ease-in-out infinite;'>"
-                          "<span style='width:14px;height:14px;border-radius:50%;flex:none;"
-                          "border:2px solid #cbd5e1;border-top-color:#475569;"
-                          "animation:acoocspin .9s linear infinite;'></span>"
-                          "<span style='font-size:13px;color:#1f2937;'><b>Deep scan running</b> — "
-                          "lineages not in your panel and novel patterns appear here when it ends."
-                          "</span></div>", unsafe_allow_html=True)
-                  if "acooc_recomb_parents" not in st.session_state:
-                      st.session_state["acooc_recomb_parents"] = recombinant_parents()
-                  _rows = tree_rows(_run_panel, curated_variants, cached_get_pango_loader(),
-                                    findings=list(_findings),
-                                    recomb_parents=st.session_state["acooc_recomb_parents"])
-                  # ── panel variant ± 1 change (the amber band, per change) ──
-                  from process.near_changes import near_changes, where_in_tree
-                  from process.scanner import (EVIDENCE_MIN_DAYS, EVIDENCE_MIN_READS,
-                                               EVIDENCE_MIN_SHARE)
-                  _near = near_changes({c: _cr_all[c] for c in _cities_all if _cr_all.get(c)},
-                                       _run_panel, EVIDENCE_MIN_READS, EVIDENCE_MIN_SHARE)
-                  if _near:
-                      _pl_raw = cached_get_pango_loader().get_raw_data()
-                      if "acooc_pango_children" not in st.session_state:
-                          _kids = {}
-                          for _l, _e in _pl_raw.items():
-                              if _e.get("parent"):
-                                  _kids.setdefault(_e["parent"], []).append(_l)
-                          st.session_state["acooc_pango_children"] = _kids
-                      _sigs_n = st.session_state.get("acooc_all_sigs_cache")
-                      if _sigs_n is None:
-                          _ld = cached_get_pango_loader()
-                          _sigs_n = {l: _ld.get_signature(l) for l in _pl_raw}
-                          st.session_state["acooc_all_sigs_cache"] = _sigs_n
-                      for _v, _chs in _near.items():
-                          for _ch in _chs:
-                              _ch["where"] = where_in_tree(
-                                  _v, _ch["sign"], _ch["mut"], _sigs_n,
-                                  st.session_state["acooc_pango_children"])
-                  _view = _vt.build(_cities_all, _tcity, _rows, _verdicts_by_city, _findings,
-                                    current_panel=set(all_selected_variants),
-                                    ot=curated_variants, novel=_nov_list, broad=_broad,
-                                    novel_hotspot=((_hot_p, _human_reads(_hot_r))
-                                                   if _hot_p else None),
-                                    novel_info=_nov_info,
-                                    novel_rest=_human_reads(_nov_rest) if _nov_rest else None,
-                                    broad_total=len(_agg_unres),
-                                    named_hidden=(0 if _scan_running
-                                                  else len(_named_all) - len(_named)),
-                                    near=_near, near_min_days=EVIDENCE_MIN_DAYS,
-                                    data_until={l: _dshort(d) for l, d in _until_short.items()})
-                  _click = _vt.render(_view, key="acooc_variants_view")
-                  if _click and _click.get("t") != st.session_state.get("acooc_vv_last_click"):
-                      st.session_state["acooc_vv_last_click"] = _click.get("t")
-                      if _click.get("add"):
-                          st.session_state[f"acooc_add_variant_pending_{_click['add']}"] = _click["add"]
-                      elif _click.get("city") in _ready_locs:
-                          st.session_state["acooc_tree_city"] = _click["city"]
-                      st.rerun()
+                    if _scan_running:
+                        st.markdown(
+                            "<style>@keyframes acoocspin{to{transform:rotate(360deg)}}"
+                            "@keyframes acoocpulse{50%{box-shadow:0 0 0 4px rgba(71,85,105,.15)}}</style>"
+                            "<div style='display:flex;align-items:center;gap:10px;padding:9px 14px;"
+                            "margin:4px 0 10px;border-radius:8px;background:#f8fafc;"
+                            "border:1px solid #cbd5e1;border-left:4px solid #475569;"
+                            "animation:acoocpulse 2s ease-in-out infinite;'>"
+                            "<span style='width:14px;height:14px;border-radius:50%;flex:none;"
+                            "border:2px solid #cbd5e1;border-top-color:#475569;"
+                            "animation:acoocspin .9s linear infinite;'></span>"
+                            "<span style='font-size:13px;color:#1f2937;'><b>Deep scan running</b> — "
+                            "lineages not in your panel and novel patterns appear here when it ends."
+                            "</span></div>", unsafe_allow_html=True)
+                    if "acooc_recomb_parents" not in st.session_state:
+                        st.session_state["acooc_recomb_parents"] = recombinant_parents()
+                    _rows = tree_rows(_run_panel, curated_variants, cached_get_pango_loader(),
+                                      findings=list(_findings),
+                                      recomb_parents=st.session_state["acooc_recomb_parents"])
+                    # ── panel variant ± 1 change (the amber band, per change) ──
+                    from process.near_changes import near_changes, where_in_tree
+                    from process.scanner import (EVIDENCE_MIN_DAYS, EVIDENCE_MIN_READS,
+                                                 EVIDENCE_MIN_SHARE)
+                    _near = near_changes({c: _cr_all[c] for c in _cities_all if _cr_all.get(c)},
+                                         _run_panel, EVIDENCE_MIN_READS, EVIDENCE_MIN_SHARE)
+                    if _near:
+                        _pl_raw = cached_get_pango_loader().get_raw_data()
+                        if "acooc_pango_children" not in st.session_state:
+                            _kids = {}
+                            for _l, _e in _pl_raw.items():
+                                if _e.get("parent"):
+                                    _kids.setdefault(_e["parent"], []).append(_l)
+                            st.session_state["acooc_pango_children"] = _kids
+                        _sigs_n = st.session_state.get("acooc_all_sigs_cache")
+                        if _sigs_n is None:
+                            _ld = cached_get_pango_loader()
+                            _sigs_n = {l: _ld.get_signature(l) for l in _pl_raw}
+                            st.session_state["acooc_all_sigs_cache"] = _sigs_n
+                        for _v, _chs in _near.items():
+                            for _ch in _chs:
+                                _ch["where"] = where_in_tree(
+                                    _v, _ch["sign"], _ch["mut"], _sigs_n,
+                                    st.session_state["acooc_pango_children"])
+                    _view = _vt.build(_cities_all, _tcity, _rows, _verdicts_by_city, _findings,
+                                      current_panel=set(all_selected_variants),
+                                      ot=curated_variants, novel=_nov_list, broad=_broad,
+                                      novel_hotspot=((_hot_p, _human_reads(_hot_r))
+                                                     if _hot_p else None),
+                                      novel_info=_nov_info,
+                                      novel_rest=_human_reads(_nov_rest) if _nov_rest else None,
+                                      broad_total=len(_agg_unres),
+                                      named_hidden=(0 if _scan_running
+                                                    else len(_named_all) - len(_named)),
+                                      near=_near, near_min_days=EVIDENCE_MIN_DAYS,
+                                      data_until={l: _dshort(d) for l, d in _until_short.items()})
+                    _click = _vt.render(_view, key="acooc_variants_view")
+                    if _click and _click.get("t") != st.session_state.get("acooc_vv_last_click"):
+                        st.session_state["acooc_vv_last_click"] = _click.get("t")
+                        if _click.get("add"):
+                            st.session_state[f"acooc_add_variant_pending_{_click['add']}"] = _click["add"]
+                        elif _click.get("city") in _ready_locs:
+                            st.session_state["acooc_tree_city"] = _click["city"]
+                        st.rerun()
 
-                  st.caption("📈 Per-week heatmaps of any lineage or novel pattern: "
-                             "**Signal over time**.")
-
+                    st.caption("📈 Per-week heatmaps of any lineage or novel pattern: "
+                               "**Signal over time**.")
 
             if _active_section == "Investigate a variant":
               # ── Investigate a variant (on-demand explorer) ─────────────────────
@@ -1584,7 +1817,7 @@ def app():
                   pango_loader=cached_get_pango_loader(),
                   panel=st.session_state.get("acooc_ran_panel") or all_selected_variants,
                   # the look-up always works; "Check in data" waits for the run
-                  cities=None if _outstanding else list(location_names), start_date=_rd[0], end_date=_rd[1],
+                  cities=None if (_cooc_outstanding or _scan_outstanding) else list(location_names), start_date=_rd[0], end_date=_rd[1],
                   celery_app=celery_app,
               )
 
@@ -1601,10 +1834,10 @@ def app():
                   panel=st.session_state.get("acooc_ran_panel") or all_selected_variants,
                   # the scan's groups and evidence days once it is done; before
                   # that, every lineage uses its ★ marker groups
-                  scanner_results=({} if _outstanding else
+                  scanner_results=({} if _scan_outstanding else
                                    st.session_state.get("acooc_scanner_results", {}) or {}),
                   default_city=st.session_state.get("acooc_tree_city"),
-                  scanning=_outstanding,
+                  scanning=_scan_outstanding,
               )
 
 

@@ -76,8 +76,11 @@ graph:
 # ── List lengths on the page ──────────────────────────────────────────────
 # Longer lists are cut; the page says "showing N of M". cross_check_max is
 # how many lineages found elsewhere are checked per city (phase 3).
+# findings_check_max is how many lineages a city's own deep scan found get
+# their ★ check in that city (worker setting: needs a worker restart).
 lists:
   cross_check_max: 40
+  findings_check_max: 40
   named_only_max: 25
   broad_max: 25
   near_changes_max: 8
