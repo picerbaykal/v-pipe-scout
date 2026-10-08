@@ -84,8 +84,9 @@ def cached_fetch_locations() -> list:
 def _render_composition(cooc_result: dict, scanner_result: dict, key: str = "",
                         show_legend: bool = True, show_caption: bool = True,
                         panel_union=None) -> None:
-    """Normalized (0-100%) per-date composition: explained / addable / novel /
-    noise. Green height = completeness; other bands = what the gap is made of.
+    """Normalized (0-100%) per-date composition: explained / + 1 change /
+    addable / not attributed (2026-10-06: no novel band — see
+    process.completeness_composition). Green height = completeness; other bands = what the gap is made of.
     Empty/low-read dates dropped. Built from existing outputs — scanner untouched."""
     try:
         from process.completeness_composition import compute_completeness_composition
@@ -101,9 +102,8 @@ def _render_composition(cooc_result: dict, scanner_result: dict, key: str = "",
     layers = [
         ("explained by panel", "explained_pct", "#0F6E56", "rgba(15,110,86,0.85)"),
         ("panel variant + 1 change", "near_pct", "#4ade80", "rgba(134,239,172,0.85)"),
-        ("addable (not in panel)", "addable_pct", "#dc2626", "rgba(220,38,38,0.55)"),
-        ("novel (investigate)", "novel_pct", "#2563eb", "rgba(37,99,235,0.45)"),
-        ("unresolved / noise", "noise_pct", "#9ca3af", "rgba(156,163,175,0.40)"),
+        ("found, not in panel", "addable_pct", "#dc2626", "rgba(220,38,38,0.55)"),
+        ("unexplained, not attributed", "noise_pct", "#9ca3af", "rgba(156,163,175,0.40)"),
     ]
     fig = go.Figure()
     _near_txt = ["<br>".join(f"{_l} ({_n:,} reads)" for _l, _n in r.get("near_top", []))
@@ -132,9 +132,9 @@ def _render_composition(cooc_result: dict, scanner_result: dict, key: str = "",
         st.caption(
             "Green = explained by your panel (its height = completeness) · "
             "light green = a panel variant with one change (hover to see which; a growing "
-            "band = a sublineage spreading) · red = addable (scanner found it) · "
-            "blue = novel · grey = unresolved (beyond-panel signal the scanner "
-            "can't name).")
+            "band = a sublineage spreading) · red = a lineage the deep scan named · "
+            "grey = unexplained, not attributed (too broad, novel combinations, errors — "
+            "novel patterns are listed in the Variants table).")
 
 
 def _step_label(n: int, label: str, done: bool = False, active: bool = False) -> None:
@@ -872,7 +872,7 @@ def app():
 
             # Two phases (2026-10-02). Phase 1 = deconvolution + completeness:
             # the graph and abundances. Phase 2 = the deep scan: Variants table
-            # and the red / blue bands. Each bar: % of the work (from the
+            # and the red band. Each bar: % of the work (from the
             # worker's own progress, per city) and the time left at the pace so
             # far. Drawn inside a fragment that reruns every 3 s while work is
             # outstanding, so the bars move without redrawing the charts; the
@@ -881,12 +881,12 @@ def app():
             _PHASES = [
                 ("1 · Abundance and completeness graph",
                  [("deconvolution", "acooc_location_tasks", "location_results"),
-                  ("completeness", "acooc_cooc_tasks", "acooc_cooc_results")], "#185FA5"),
+                  ("completeness", "acooc_cooc_tasks", "acooc_cooc_results")], "#475569"),
                 ("2 · " + ("Deep scan — panel + positions with a mutation in the data"
                            if _deep_on else "Scanner — panel positions only"),
-                 [("scanner", "acooc_scanner_tasks", "acooc_scanner_results")], "#EF9F27"),
+                 [("scanner", "acooc_scanner_tasks", "acooc_scanner_results")], "#475569"),
                 ("3 · Cross-check — lineages found in any city, checked in every city",
-                 [("cross-check", "acooc_xcheck_tasks", "acooc_xcheck_results")], "#dc2626"),
+                 [("cross-check", "acooc_xcheck_tasks", "acooc_xcheck_results")], "#475569"),
             ]
 
             def _task_frac(tid):
@@ -945,7 +945,7 @@ def app():
                         _el = _time.time() - _t0s[_pi]
                         _right += " · " + _left(_el * (1 - _frac) / _frac)
                     elif not _started:
-                        _right = "waiting for phase 1" if _pi else "—"
+                        _right = ("waiting for phase 1", "waiting for the deep scan")[_pi - 1] if _pi else "—"
                     if _n_bad:
                         _right += f" · {_n_bad} failed"
                     _sub = (f"<div style='font-size:10.5px;color:#898781;margin-top:2px;"
@@ -1141,7 +1141,7 @@ def app():
                   except Exception:
                       return d
               # the graph needs only phase 1 (completeness); the deep scan colours
-              # its red / blue bands in when it arrives
+              # its red band in when it arrives
               _graph_locs = [l for l in location_names if _cr_all.get(l) is not None]
               if _graph_locs:
                   st.markdown("#### Panel completeness")
@@ -1152,9 +1152,9 @@ def app():
                           + f" — the window runs to {_dshort(_win_end)}; later dates have "
                           "no samples yet.")
                   st.caption("How much of each city's co-occurrence signal your panel "
-                             "explains (green) vs the rest. Green = explained · light green = a "
-                             "panel variant with one change (hover for which) · red = "
-                             "addable (scanner found it) · blue = novel · grey = noise.")
+                             "explains (green) vs the rest. Light green = a panel variant with one "
+                             "change (hover for which) · red = a lineage the deep scan named · "
+                             "grey = unexplained, not attributed (novel patterns: Variants table).")
                   # One shared legend ABOVE the grid; every plot has
                   # show_legend=False and the same fixed height, so all plot areas
                   # are identical. (Previously the legend went on the first plot
@@ -1162,9 +1162,8 @@ def app():
                   _comp_leg = [
                       ("#0F6E56", "explained by panel"),
                       ("#4ade80", "panel variant + 1 change"),
-                      ("#dc2626", "addable (not in panel)"),
-                      ("#2563eb", "novel (investigate)"),
-                      ("#9ca3af", "unresolved / noise"),
+                      ("#dc2626", "found, not in panel"),
+                      ("#9ca3af", "unexplained, not attributed"),
                   ]
                   # panel union (city-independent) for the near-panel split —
                   # a read that is a panel variant + <2 stray mutations counts
@@ -1193,8 +1192,8 @@ def app():
                       _du = (f" <span style='font-weight:400;color:#6b7280;'>· data until "
                              f"{_dshort(_until_short[_lc])}</span>" if _lc in _until_short else "")
                       if _cr_all.get(_lc) is not None and _sr_all.get(_lc) is None:
-                          _du += (" <span style='font-weight:400;color:#2563eb;'>· deep scan "
-                                  "running — red / blue appear when it ends</span>")
+                          _du += (" <span style='font-weight:400;color:#6b7280;'>· deep scan "
+                                  "running — red appears when it ends</span>")
                       st.markdown(f"<div style='font-size:12px;font-weight:600;'>"
                                   f"{_lc}{_du}</div>", unsafe_allow_html=True)
                       if _cr_all.get(_lc) is not None:
@@ -1511,15 +1510,15 @@ def app():
                   if _scan_running:
                       st.markdown(
                           "<style>@keyframes acoocspin{to{transform:rotate(360deg)}}"
-                          "@keyframes acoocpulse{50%{box-shadow:0 0 0 4px rgba(37,99,235,.15)}}</style>"
+                          "@keyframes acoocpulse{50%{box-shadow:0 0 0 4px rgba(71,85,105,.15)}}</style>"
                           "<div style='display:flex;align-items:center;gap:10px;padding:9px 14px;"
-                          "margin:4px 0 10px;border-radius:8px;background:#eff6ff;"
-                          "border:1px solid #93c5fd;border-left:4px solid #2563eb;"
+                          "margin:4px 0 10px;border-radius:8px;background:#f8fafc;"
+                          "border:1px solid #cbd5e1;border-left:4px solid #475569;"
                           "animation:acoocpulse 2s ease-in-out infinite;'>"
                           "<span style='width:14px;height:14px;border-radius:50%;flex:none;"
-                          "border:2px solid #bfdbfe;border-top-color:#2563eb;"
+                          "border:2px solid #cbd5e1;border-top-color:#475569;"
                           "animation:acoocspin .9s linear infinite;'></span>"
-                          "<span style='font-size:13px;color:#1e3a8a;'><b>Deep scan running</b> — "
+                          "<span style='font-size:13px;color:#1f2937;'><b>Deep scan running</b> — "
                           "lineages not in your panel and novel patterns appear here when it ends."
                           "</span></div>", unsafe_allow_html=True)
                   if "acooc_recomb_parents" not in st.session_state:

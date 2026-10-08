@@ -33,7 +33,8 @@ GREY = "#9ca3af"           # no ★ marker / no data
 RED = "#dc2626"            # found, not in panel
 BLUE = "#2563eb"           # novel
 SLATE = "#64748b"          # too broad to name
-TRACKED = "#185FA5"
+TRACKED = "#1f2430"        # officially tracked, not selected: hollow ring in the
+                           #   panel ink (filled = in your panel); blue means novel
 
 _PANEL = {  # check state -> (fill, text-on-fill, symbol, label, name colour)
     "confirmed": (GREEN, "#fff", "✓", "present", GREEN),

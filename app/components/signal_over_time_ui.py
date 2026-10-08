@@ -53,12 +53,13 @@ def render_signal_over_time(pango_loader, client, cities, start_date, end_date,
         st.info("Available once the run has cities and dates.")
         return
     if scanning:
-        # wait for the deep scan: before it ends there are no found lineages,
+        # wait for the deep scan (neutral banner: amber means 'not found' on this
+        # page): before it ends there are no found lineages,
         # no scanner groups and no evidence marks, and reads are still being read
         st.markdown(
             "<div style='display:flex;align-items:center;gap:10px;padding:9px 14px;"
-            "margin:4px 0 10px;border-radius:8px;background:#fffbeb;border:1px solid #fcd34d;"
-            "border-left:4px solid #f59e0b;font-size:13px;color:#78350f;'>"
+            "margin:4px 0 10px;border-radius:8px;background:#f8fafc;border:1px solid #cbd5e1;"
+            "border-left:4px solid #475569;font-size:13px;color:#1f2937;'>"
             "<span style='font-size:18px'>⏳</span><span><b>Waiting for the deep scan to "
             "finish</b> — the lineages it finds come first in the list, with their own "
             "regions and ● evidence marks. Available when the run is done.</span></div>",

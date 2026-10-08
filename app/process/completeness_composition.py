@@ -10,8 +10,13 @@ categories, with empty/low-read dates dropped.
                band is noise; a growing one is a sublineage of a panel
                variant spreading (e.g. "XFG + 22896C").
   addable    : gap reads the scanner resolved to a clade            → red (add these)
-  novel      : gap reads matching a novel pattern                   → blue (investigate)
-  noise      : the rest of the gap                                  → grey
+  noise      : the rest of the gap — too broad to name, novel
+               combinations, errors ("unexplained, not attributed")  → grey
+
+2026-10-06: no "novel" band any more. Since the deep scan (2026-10-02) novel
+patterns sit almost always at positions found in the data, which this graph's
+reads (phase 1, listed positions) never cover, so the band stayed empty while
+the legend promised it. Novel patterns are listed in the Variants table.
 
 `panel_union` is {variant: signature} for the panel ("{pos}{alt}" substitutions);
 a read's beyond-panel mutations are those its BEST-MATCHING panel variant lacks
@@ -19,7 +24,7 @@ a read's beyond-panel mutations are those its BEST-MATCHING panel variant lacks
 extinct control in the panel can't hide a real variant). A plain set is still
 accepted and treated as the old pooled union. A pattern with fewer than 2
 beyond-panel mutations is not seen by the scanner; if its one outside mutation is a scanner-finding marker it is a
-partial read of that finding (addable / novel), otherwise its near-panel reads
+partial read of that finding (addable), otherwise its near-panel reads
 (near_count) are teal and the rest is noise.
 
 Legacy results without `near_count` (scans from before 2026-09-25) keep the old
@@ -40,7 +45,7 @@ except Exception:                                   # pragma: no cover
             return present - max(panel_sigs.values(), key=lambda s: len(present & s))
         return present - set(panel_sigs or ())
 
-_NOVEL_MATCH_FRACTION = 0.8
+_MATCH_FRACTION = 0.8      # share of a finding's group a read must carry
 _NEAR_TOP = 3
 
 
@@ -70,11 +75,6 @@ def _star_markers(scanner_result: dict) -> Set[str]:
     return out
 
 
-def _novel_patterns(scanner_result: dict) -> List[Set[str]]:
-    return [set(p.get("mutations", []))
-            for p in scanner_result.get("novel", {}).get("top_patterns", [])]
-
-
 def compute_completeness_composition(cooc_result: dict,
                                      scanner_result: dict = None,
                                      min_reads: int = 1000,
@@ -83,8 +83,8 @@ def compute_completeness_composition(cooc_result: dict,
     """Per-date normalized composition rows.
 
     Returns list of dicts (empty/low-read dates dropped):
-      {date, explained, near, addable, novel, noise, total,
-       explained_pct, near_pct, addable_pct, novel_pct, noise_pct,
+      {date, explained, near, addable, noise, total,
+       explained_pct, near_pct, addable_pct, noise_pct,
        near_top: [(label, reads), ...]  — largest "variant + 1 change" groups}
     Percentages are of that date's total and sum to 1.0.
     """
@@ -111,28 +111,20 @@ def compute_completeness_composition(cooc_result: dict,
         return out
 
     resolved_groups = _here(_resolved_groups(scanner_result))
-    novel_pats = _here(_novel_patterns(scanner_result))
 
     def gap_category(pat: Set[str]) -> str:
         for g in resolved_groups:
-            if len(pat & g) / len(g) >= _NOVEL_MATCH_FRACTION:
+            if len(pat & g) / len(g) >= _MATCH_FRACTION:
                 return "addable"
-        for np_ in novel_pats:
-            if np_ and len(pat & np_) / len(np_) >= _NOVEL_MATCH_FRACTION:
-                return "novel"
         return "noise"
 
     # A lone beyond-panel mutation counts for a finding only if it is one of that
     # finding's ★ markers (a partial read of a real variant). A SHARED mutation
-    # that merely appears in a finding's group, or in a small novel pattern (e.g.
-    # XFG's 21653C inside a 2-mutation novel pattern), would otherwise repaint
-    # every read of the variant that carries it. Novel is about a combination,
-    # so a lone mutation is never attributed to it.
+    # that merely appears in a finding's group would otherwise repaint every
+    # read of the variant that carries it.
     addable_muts: Set[str] = _star_markers(scanner_result)
-    novel_muts: Set[str] = set()
 
     add_d = {d: 0 for d in dates}
-    nov_d = {d: 0 for d in dates}
     near_d = {d: 0 for d in dates}
     near_lab = {d: defaultdict(int) for d in dates}
     for p in ups:
@@ -148,19 +140,15 @@ def compute_completeness_composition(cooc_result: dict,
             if len(fp) < 2:
                 if fp & addable_muts:
                     add_d[d] += cnt
-                elif fp & novel_muts:
-                    nov_d[d] += cnt
                 elif "near_count" in p:
                     ncnt = int(p.get("near_count", 0) or 0)
                     lab = p.get("near_label") or ""
                     # the ONE change vs the best-matching panel variant; if it is
                     # a scanner-finding marker the read is a partial read of that
-                    # finding -> red/blue, independent of who else is in the panel
+                    # finding -> red, independent of who else is in the panel
                     chg = lab.split(" + ", 1)[1] if " + " in lab else ""
                     if ncnt and chg and chg in addable_muts:
                         add_d[d] += ncnt
-                    elif ncnt and chg and chg in novel_muts:
-                        nov_d[d] += ncnt
                     else:
                         near_d[d] += ncnt
                         if ncnt and lab:
@@ -169,11 +157,8 @@ def compute_completeness_composition(cooc_result: dict,
                 else:
                     near_d[d] += cnt          # legacy result: old rule
                 continue
-        cat = gap_category(pat)
-        if cat == "addable":
+        if gap_category(pat) == "addable":
             add_d[d] += cnt
-        elif cat == "novel":
-            nov_d[d] += cnt
 
     rows: List[Dict] = []
     for i, d in enumerate(dates):
@@ -184,17 +169,15 @@ def compute_completeness_composition(cooc_result: dict,
             continue  # drop empty / low-read dates
         near = near_d[d]
         add = add_d[d]
-        nov = nov_d[d]
-        noi = max(0, u - near - add - nov)
+        noi = max(0, u - near - add)
         top = sorted(near_lab[d].items(), key=lambda kv: -kv[1])[:_NEAR_TOP]
         rows.append({
             "date": d,
-            "explained": m, "near": near, "addable": add, "novel": nov,
+            "explained": m, "near": near, "addable": add,
             "noise": noi, "total": total,
             "explained_pct": m / total,
             "near_pct": near / total,
             "addable_pct": add / total,
-            "novel_pct": nov / total,
             "noise_pct": noi / total,
             "near_top": top,
         })
