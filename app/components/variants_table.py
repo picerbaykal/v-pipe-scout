@@ -7,7 +7,8 @@ the per-city evidence in ONE table (2026-09-30).
   Variant   the tree, coloured by the evidence in the chosen city; the
             recombinant families (XEC, XFG, XDV → NB.1.8.1 …) under their
             own root, not under B; "+ Add" next to a confirmed finding
-  cities    one cell per city — click a city code to colour the tree by it
+  cities    one cell per city — click a city code, or any cell of its column,
+            to colour the tree by it
   Evidence  for the chosen city: what was counted (markers voted, days,
             ★ markers, genome regions) and, in words, when a fact is weak
 
@@ -47,7 +48,9 @@ CSS = """
 .vt th.cc button:hover { background:#eef0f3; color:#31333f; }
 .vt th.cc.sel button { background:#31333f; color:#fff; }
 .vt td { padding:0 8px; height:34px; border-bottom:1px solid #eef0f2; white-space:nowrap; vertical-align:middle; }
-.vt td.cc { padding:0 2px; width:34px; text-align:center; }
+.vt td.cc { padding:0 2px; width:34px; text-align:center; cursor:pointer; }
+.vt td.cc .c { cursor:pointer; }
+.vt td.cc:not(.sel):hover { background:rgba(49,51,63,.04); }
 .vt td.cc.sel { background:rgba(49,51,63,.07); }
 .vt tr.sp td { height:24px; border-bottom:none; }
 .vt td.tr { position:relative; padding-right:12px; }
@@ -967,7 +970,7 @@ _LEGEND_ROWS = (
     + _ld(f"border:2px solid {TRACKED}", "tracked, not selected")
     + "<span class='i'>panel dots = the cell colours</span>"
     + "<span class='i'>weak = no ★ marker or one genome region only · hover anything for details · "
-      "click a city code to colour the tree</span></div>")
+      "click a city's code or any of its cells to colour the tree</span></div>")
 
 LEGEND = ("<div class='lg'><div class='row'><span class='lgt' data-grp='legend'>"
           "<span class='arr'>▸</span> How to read the colours</span>"
@@ -1065,6 +1068,19 @@ window.vtClick = function (e, send, sendHeight) {
   if (c) {
     send("streamlit:setComponentValue",
          {value: {city: c.getAttribute("data-city"), t: Date.now()}, dataType: "json"});
+    return;
+  }
+  // any cell of a city column picks that city, so there's no need to
+  // scroll back to the header codes (2026-10-08)
+  var td = e.target.closest("td.cc");
+  if (td && td.parentNode) {
+    var own = Array.prototype.slice.call(td.parentNode.querySelectorAll("td.cc"));
+    var heads = document.querySelectorAll("th.cc [data-city]");
+    var i = own.indexOf(td);
+    if (own.length === heads.length && i >= 0 && !td.classList.contains("sel")) {
+      send("streamlit:setComponentValue",
+           {value: {city: heads[i].getAttribute("data-city"), t: Date.now()}, dataType: "json"});
+    }
     return;
   }
   var g = e.target.closest("[data-grp]");
