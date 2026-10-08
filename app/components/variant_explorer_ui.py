@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-from process.variant_explorer import check_in_data, investigate_variant
+from process.variant_explorer import check_in_data, investigate_variant, marker_funnel
 _STATE = {
     "present":     ("#dcfce7", "#166534", "present"),
     "absent":      ("#f3f4f6", "#4b5563", "absent"),
@@ -24,6 +24,95 @@ def _pill(bg, fg, txt, border=None):
     b = f"border:1px solid {border};" if border else ""
     return (f"<span style='background:{bg};color:{fg};{b}font-size:11px;font-weight:600;"
             f"padding:1px 8px;border-radius:10px;'>{txt}</span>")
+
+
+def _mono(muts, n=None):
+    ms = list(muts)[:n] if n else list(muts)
+    more = f" … +{len(muts) - len(ms)}" if n and len(muts) > len(ms) else ""
+    return ("<span style='font-family:ui-monospace,Menlo,monospace;font-size:12px'>"
+            + " ".join(ms) + "</span>" + more)
+
+
+def _funnel(variant, pango_loader, panel):
+    """'How the ★ markers were chosen': the rule step by step, with what each
+    step removed and the near misses (marker_funnel)."""
+    f = marker_funnel(variant, pango_loader, panel)
+    lim = f["settings"]["out_other_max"]
+    n1 = len(f["signature"])
+    n2 = len(f["rows"])
+    n3 = len(f["markers"])
+    with st.expander(f"How the ★ markers were chosen · {n1} → {n2} → {n3}", expanded=False):
+        box = "border-left:3px solid #e5e7eb;padding:2px 10px;margin:6px 0;font-size:12.5px;line-height:1.7"
+        st.markdown(
+            f"<div style='{box}'><b>1 · Signature</b> — every substitution of {variant} "
+            f"(deletions left out): <b>{n1}</b><br>{_mono(f['signature'], 40)}</div>",
+            unsafe_allow_html=True)
+        by_who = {}
+        for m, who in f["by_panel"].items():
+            by_who.setdefault(", ".join(who), []).append(m)
+        drop2 = "".join(f"<br>✗ also in <b>{w}</b> ({len(ms)}): {_mono(ms, 20)}"
+                        for w, ms in sorted(by_who.items(), key=lambda kv: -len(kv[1])))
+        st.markdown(
+            f"<div style='{box}'><b>2 · Not in another panel variant</b> — a mutation another "
+            f"variant of your panel carries can't point to {variant} (its own descendants "
+            f"excepted): <b>{n1} → {n2}</b>{drop2 or '<br>nothing dropped'}</div>",
+            unsafe_allow_html=True)
+        rows = f["rows"]
+        kept = [r for r in rows if r["outside"] <= lim]
+        bad = [r for r in rows if r["outside"] > lim]
+        forg = [r for r in rows if r["forgiven"]]
+
+        def _r(r, mark):
+            t = f"{mark} {_mono([r['mutation']])} · {r['outside']} outside"
+            if r["forgiven"]:
+                t += f" (+{len(r['forgiven'])} forgiven: {', '.join(r['forgiven'][:3])})"
+            if r["outside"] and mark != "★":
+                t += f" · e.g. {', '.join(r['examples'][:3])}"
+            return t
+        # kept markers on one line ("150G·0 200C·1" = outsiders), the forgiven
+        # and the near misses spelled out
+        lines = []
+        if kept:
+            lines.append(f"★ {len(kept)} kept: " + _mono(
+                [f"{r['mutation']}·{r['outside']}" for r in kept], 30)
+                + " <span style='color:#6b7280'>(·n = outsiders)</span>")
+        lines += [_r(r, "★") + " — kept thanks to forgiven recombinants"
+                  for r in kept if r["forgiven"]][:5]
+        lines += [_r(r, "⚠") for r in f["near"]]
+        n_other_bad = len(bad) - len(f["near"])
+        if n_other_bad:
+            lines.append(f"✗ {n_other_bad} more with more than {lim + 5} outsiders")
+        st.markdown(
+            f"<div style='{box}'><b>3 · Few carriers outside the family</b> — lineages outside "
+            f"{variant} + its descendants that carry it; a recombinant <i>made from</i> "
+            f"{variant} that inherited it is forgiven (option C); kept if ≤ <b>{lim}</b>: "
+            f"<b>{n2} → {n3}</b><br>" + "<br>".join(lines or ["nothing left to test"])
+            + (f"<br><span style='color:#b45309'>⚠ near miss = rejected by 1–5 outsiders "
+               f"over the limit</span>" if f["near"] else "")
+            + "</div>", unsafe_allow_html=True)
+        st.markdown(
+            f"<div style='font-size:11.5px;color:#6b7280;margin-top:4px'>Settings: "
+            f"<code>markers.out_other_max = {lim}</code> · panel: "
+            f"{', '.join(f['settings']['panel']) or '—'} · {len(forg)} mutation(s) kept "
+            f"thanks to forgiven recombinants</div>", unsafe_allow_html=True)
+
+
+def _detail_table(r):
+    """Per-marker numbers behind one city's verdict."""
+    rows = []
+    for x in r.get("detail") or []:
+        f = x["freq"]
+        num = (f"{f * 100:.1f} % of {x['cov']:,}" if f is not None and x["cov"]
+               else f"{x['cov']:,} reads")
+        link = (f"link {x['link'] * 100:.0f} % of {x['link_n']:,}" if x["link"] is not None
+                else "")
+        flag = (f" <span style='color:#b45309'>⚠ {x['near']}</span>" if x["near"] else "")
+        ok = "✓" if x["why"] == "present" else "·"
+        rows.append(f"<tr><td style='padding-right:12px;font-family:ui-monospace,Menlo,monospace'>"
+                    f"{ok} {x['marker']}</td><td style='padding-right:12px'>{num}</td>"
+                    f"<td style='padding-right:12px;color:#6b7280'>{link}</td>"
+                    f"<td>{x['why']}{flag}</td></tr>")
+    return "<table style='font-size:12px;margin:2px 0 8px 12px'>" + "".join(rows) + "</table>"
 
 
 def _check_section(variant, panel, cities, start_date, end_date, celery_app, key_prefix):
@@ -104,6 +193,24 @@ def _check_section(variant, panel, cities, start_date, end_date, celery_app, key
         _poll()
     else:
         _draw()
+        if cur.get("res"):
+            from process.cooc import _check_cfg
+            c = _check_cfg()
+            with st.expander("Reads at the markers, per city", expanded=False):
+                st.markdown(
+                    f"<div style='font-size:11.5px;color:#6b7280'>The same ★ markers everywhere; "
+                    f"what differs per city is the reads at them. Pooled over the run's window · "
+                    f"present ≥ {c['present_freq'] * 100:g} % · absent &lt; "
+                    f"{c['absent_freq'] * 100:g} % · ≥ {c['min_cov']} reads · link ≥ "
+                    f"{c['link_min'] * 100:g} % of ≥ {c['min_link']} reads · verdict: present "
+                    f"if ≥ {c['confirm_share'] * 100:g} % of measurable markers are present, "
+                    f"absent if ≤ {c['notfound_share'] * 100:g} % · ⚠ = just missed a rule"
+                    f"</div>", unsafe_allow_html=True)
+                for city in cities:
+                    if city in cur["res"]:
+                        st.markdown(f"<div style='font-size:12.5px;font-weight:600;"
+                                    f"margin-top:6px'>{city.split('(')[0].strip()}</div>"
+                                    + _detail_table(cur["res"][city]), unsafe_allow_html=True)
         if st.button("Check again", key=f"{key_prefix}_again"):
             st.session_state.pop(k, None)
             st.rerun()
@@ -170,6 +277,10 @@ def render_variant_explorer(pango_loader, panel=None, options=None,
     st.markdown("<div style='border:0.5px solid #e5e7eb;border-radius:8px;padding:8px 12px;"
                 "font-size:12.5px;line-height:1.9;margin-top:4px;'>" + "<br>".join(lines)
                 + "</div>", unsafe_allow_html=True)
+    try:
+        _funnel(variant, pango_loader, panel)
+    except Exception as e:                          # never break the look-up
+        st.caption(f"(marker steps unavailable: {e})")
 
     if r["detectable"]:
         _check_section(variant, panel, cities, start_date, end_date, celery_app, key_prefix)
