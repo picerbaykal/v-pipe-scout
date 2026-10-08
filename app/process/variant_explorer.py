@@ -241,8 +241,7 @@ def check_in_data(markers: List[str], per_date: Dict[str, Dict[str, list]],
     pd_ = ({d: (per_date or {}).get(d, {}) for d in recent_dates} if recent
            else (per_date or {}))
     res = check_verdicts(markers, pd_)
-    state = {"confirmed": "present", "not_found": "absent",
-             "inconsistent": "mixed"}.get(res["verdict"], "not_covered")
+    state = res["verdict"]          # present / absent / mixed / not_covered
     return {"state": state, "n_present": res["n_present"], "n_measured": res["n_measured"],
             "n_markers": res["n_markers"], "timeline": tl, "recent_dates": recent_dates,
             "detail": _marker_detail(markers, pd_, res, c)}

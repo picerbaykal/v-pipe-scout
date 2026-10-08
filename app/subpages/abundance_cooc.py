@@ -82,8 +82,7 @@ def cached_fetch_locations() -> list:
 
 
 def _render_composition(cooc_result: dict, scanner_result: dict, key: str = "",
-                        show_legend: bool = True, show_caption: bool = True,
-                        panel_union=None) -> None:
+                        show_legend: bool = True, panel_union=None) -> None:
     """Normalized (0-100%) per-date composition: explained / + 1 change /
     addable / not attributed (2026-10-06: no novel band — see
     process.completeness_composition). Green height = completeness; other bands = what the gap is made of.
@@ -128,13 +127,6 @@ def _render_composition(cooc_result: dict, scanner_result: dict, key: str = "",
         tickmode="array", tickvals=[0, 0.25, 0.5, 0.75, 1.0],
         ticktext=["0%", "25%", "50%", "75%", "100%"], title="share")
     st.plotly_chart(fig, use_container_width=True, key=f"comp_stack_{key}")
-    if show_caption:
-        st.caption(
-            "Green = explained by your panel (its height = completeness) · "
-            "light green = a panel variant with one change (hover to see which; a growing "
-            "band = a sublineage spreading) · red = a lineage the deep scan named · "
-            "grey = unexplained, not attributed (too broad, novel combinations, errors — "
-            "novel patterns are listed in the Variants table).")
 
 
 def _step_label(n: int, label: str, done: bool = False, active: bool = False) -> None:
@@ -167,7 +159,7 @@ def _panel_verdicts(cooc_res: dict, variants: list) -> dict:
     """Per panel variant in ONE city: {variant: {"state", "reason"}} from the
     worker's panel_check (reads only, never the abundance).
 
-    state: confirmed / not_found / inconsistent (the marker vote of
+    state: present / absent / mixed (the marker vote of
     process.cooc.check_verdicts), no_marker (nothing specific to test),
     no_data (no check data, or no marker measurable)."""
     from process.cooc import check_verdicts
@@ -199,8 +191,7 @@ def _panel_verdicts(cooc_res: dict, variants: list) -> dict:
         elif nm == 0:
             state, reason = "no_data", f"too few reads on its markers — {mtxt}"
         else:
-            state = {"confirmed": "confirmed", "not_found": "not_found",
-                     "inconsistent": "inconsistent"}.get(res["verdict"], "no_data")
+            state = res["verdict"] if res["verdict"] in ("present", "absent", "mixed") else "no_data"
             reason = f"{np_} of {nm} measurable markers present — {mtxt}"
         out[v] = {"state": state, "reason": reason,
                   "n_present": np_, "n_measured": nm, "n_markers": nd,
@@ -298,7 +289,8 @@ def app():
         with col_add_ot:
             if st.button("+ Add surveillance panel",
                          key="acooc_add_all_ot", use_container_width=True,
-                         help="Add the officially-tracked surveillance panel (7 variants)"):
+                         help="Add the officially-tracked surveillance panel "
+                              f"({len(curated_variants)} variants)"):
                 _cur = st.session_state.get("acooc_panel", [])
                 st.session_state["acooc_panel"] = list(dict.fromkeys(_cur + curated_variants))
                 st.rerun()
@@ -432,12 +424,14 @@ def app():
             bootstrap_options = {"Rapid": 50, "Standard": 100, "Reliable": 300}
             selected_bootstrap = st.radio(
                 "Bootstrap iterations", options=list(bootstrap_options.keys()),
+                format_func=lambda k: f"{k} · {bootstrap_options[k]} bootstraps",
                 index=1, key="acooc_bootstrap",
             )
             bootstraps = bootstrap_options[selected_bootstrap]
             bandwidth_options = {"Narrow": 10, "Medium": 20, "Wide": 30}
             selected_bandwidth = st.radio(
                 "Bandwidth", options=list(bandwidth_options.keys()),
+                format_func=lambda k: f"{k} · bandwidth {bandwidth_options[k]}",
                 index=0, key="acooc_bandwidth",
             )
             bandwidth = bandwidth_options[selected_bandwidth]
@@ -591,7 +585,6 @@ def app():
         from components.multi_location_results import (
             render_single_location_result,
             render_location_progress,
-            render_location_grid,
         )
 
         location_tasks = st.session_state.get("acooc_location_tasks", {})
@@ -738,9 +731,14 @@ def app():
                             if _c.get("node"):
                                 _found_in.setdefault(_c["node"], set()).add(_l)
                 _ran_pan = set(st.session_state.get("acooc_ran_panel") or all_selected_variants)
+                _xmax = int(get_cooc_setting("lists.cross_check_max", default=40))
                 for _l in location_names:
-                    _miss = sorted(n for n, cs in _found_in.items()
-                                   if _l not in cs and n not in _ran_pan)[:40]
+                    _miss_all = sorted(n for n, cs in _found_in.items()
+                                       if _l not in cs and n not in _ran_pan)
+                    _miss = _miss_all[:_xmax]
+                    if len(_miss_all) > _xmax:
+                        logger.warning(f"Cross-check {_l}: checking {_xmax} of "
+                                       f"{len(_miss_all)} lineages (lists.cross_check_max)")
                     if not _miss or _l in _failed.get("scanner", {}):
                         _xr[_l] = {"dates": [], "per_variant": {}, "found_in": {}}
                         _xt[_l] = ""
@@ -1198,7 +1196,7 @@ def app():
                                   f"{_lc}{_du}</div>", unsafe_allow_html=True)
                       if _cr_all.get(_lc) is not None:
                           _render_composition(_cr_all[_lc], _sr_all.get(_lc) or {}, key=_lc,
-                                              show_legend=False, show_caption=False,
+                                              show_legend=False,
                                               panel_union=_panel_union)
                       else:
                           st.caption("\u23f3 computing\u2026")
@@ -1322,11 +1320,9 @@ def app():
                       # keep each city's own series so trend can be shown
                       # per-city or aggregated (summed element-wise)
                       _slot["trend_by_city"][_loc] = list(_c.get("trend_series", []))
-                      # per-city discriminating (star) mutations: a mutation is
-                      # discriminating if <= _STAR_MAX lineages carry it. Kept per
+                      # per-city ★ mutations (the scanner's mut_star). Kept per
                       # city so the card shows which city has which. Regex-free
                       # leading-digit position sort.
-                      _STAR_MAX = 30
                       def _pcpos(_m):
                           _d = ""
                           for _ch in _m:
@@ -1341,12 +1337,11 @@ def app():
                           _pc_flag.update(_blk.get("mut_star", {}) or {})
                           _pc_out.update(_blk.get("mut_outside", {}) or {})
                       # ★ = rare outside the finding's own family, decided by the
-                      # scanner (mut_star); legacy results fall back to <= 30
+                      # scanner (mut_star)
                       _pc_star = sorted(
                           {_m for _blk in _c.get("member_blocks", [])
                            for _m in _blk.get("discriminating", [])
-                           if (_pc_flag[_m] if _m in _pc_flag
-                               else _pc_car.get(_m, 999) <= _STAR_MAX)},
+                           if _pc_flag.get(_m, False)},
                           key=_pcpos)
                       _slot["per_city"][_loc] = {
                           "star": _pc_star,
@@ -1431,15 +1426,17 @@ def app():
                                  key=lambda x: -x["reads"])
                   _broader = [x for x in _conf if x.get("descendants")]
                   _conf = [x for x in _conf if not x.get("descendants")]
+                  _ED = int(get_cooc_setting("evidence.min_days", default=2))
                   _conf_ok = [x for x in _conf if any(
-                      (p.get("days") or 0) >= 2 for p in x["per_city"].values())]
+                      (p.get("days") or 0) >= _ED for p in x["per_city"].values())]
                   _one = ([x for x in _conf if x not in _conf_ok]
                           + sorted(_agg_one.values(), key=lambda x: -x["reads"]))
                   _shown = {x["node"] for x in _conf + _broader + _one}
                   # a node confirmed in one city but only named in another is
                   # one row (its city cells say which)
-                  _named = [x for x in sorted(_agg_mnh.values(), key=lambda x: -x["reads"])
-                            if x["node"] not in _shown][:25]
+                  _named_all = [x for x in sorted(_agg_mnh.values(), key=lambda x: -x["reads"])
+                                if x["node"] not in _shown]
+                  _named = _named_all[:int(get_cooc_setting("lists.named_only_max", default=25))]
 
                   # findings as the view wants them: node -> {status, per_city, addable}
                   def _f(_slot, _status):
@@ -1460,10 +1457,10 @@ def app():
                               if _chk is not None:
                                   _pc[_xc] = {"days": 0, "check": _chk, "xcheck": True,
                                               "found_in": [c for c in _fin if c != _xc]}
-                      _ok = any((d.get("days") or 0) >= 2 for d in _pc.values())
+                      _ok = any((d.get("days") or 0) >= _ED for d in _pc.values())
                       # + Add (2026-10-02): the panel check would confirm it in at
-                      # least one city, and it is more than one sample (>= 2 days
-                      # in a city, or 1 day in >= 2 cities)
+                      # least one city, and it is more than one sample (>= min_days
+                      # days in a city, or 1 day in >= 2 cities)
                       _present = any((d.get("check") or {}).get("state") == "present"
                                      for d in _pc.values())
                       _samples = _ok or sum(1 for d in _pc.values()
@@ -1505,7 +1502,8 @@ def app():
                       for _g in (_res.get("novel", {}) or {}).get("groups", []) or [])
                   _nov_rest = max(0, _novel_total - _nov_listed)
                   _broad = [(u["fp"], u.get("days", {}), u["cand"], u["anc"])
-                            for u in sorted(_agg_unres.values(), key=lambda x: -x["reads"])[:25]]
+                            for u in sorted(_agg_unres.values(), key=lambda x: -x["reads"])[
+                                :int(get_cooc_setting("lists.broad_max", default=25))]]
 
                   if _scan_running:
                       st.markdown(
@@ -1557,6 +1555,9 @@ def app():
                                                    if _hot_p else None),
                                     novel_info=_nov_info,
                                     novel_rest=_human_reads(_nov_rest) if _nov_rest else None,
+                                    broad_total=len(_agg_unres),
+                                    named_hidden=(0 if _scan_running
+                                                  else len(_named_all) - len(_named)),
                                     near=_near, near_min_days=EVIDENCE_MIN_DAYS,
                                     data_until={l: _dshort(d) for l, d in _until_short.items()})
                   _click = _vt.render(_view, key="acooc_variants_view")

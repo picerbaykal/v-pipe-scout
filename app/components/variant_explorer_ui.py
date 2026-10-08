@@ -156,6 +156,8 @@ def _check_section(variant, panel, cities, start_date, end_date, celery_app, key
         return [c for c in cur.get("tasks", {}) if c not in cur["res"] and c not in cur["err"]]
 
     def _draw():
+        from process.cooc import _check_cfg
+        cfg = _check_cfg()
         rows = []
         for c in cities:
             name = c.split("(")[0].strip()
@@ -179,8 +181,9 @@ def _check_section(variant, panel, cities, start_date, end_date, celery_app, key
         st.markdown("<div style='font-size:12.5px;margin-top:6px;'>" + "".join(rows)
                     + "</div><div style='font-size:11px;color:#6b7280;margin-top:2px;'>"
                     "Pooled over the run's window · present / absent by the panel check "
-                    "(★ marker ≥ 5 % / < 1 % of ≥ 100 reads) · its signal per week: "
-                    "<b>Signal over time</b></div>", unsafe_allow_html=True)
+                    f"(★ marker ≥ {cfg['present_freq'] * 100:g} % / "
+                    f"< {cfg['absent_freq'] * 100:g} % of ≥ {cfg['min_cov']} reads) · its "
+                    "signal per week: <b>Signal over time</b></div>", unsafe_allow_html=True)
 
     if _collect():
         # poll only while something is still running; the whole page reruns
@@ -217,7 +220,7 @@ def _check_section(variant, panel, cities, start_date, end_date, celery_app, key
 
 
 def render_variant_explorer(pango_loader, panel=None, options=None,
-                            disabled=False, key_prefix="acooc_explorer",
+                            key_prefix="acooc_explorer",
                             cities=None, start_date=None, end_date=None,
                             celery_app=None):
     """Render 'Investigate a variant'.
@@ -226,7 +229,6 @@ def render_variant_explorer(pango_loader, panel=None, options=None,
         pango_loader: provides get_raw_data() / get_signature().
         panel: the run's panel (★ markers are computed as if the variant were added).
         options: selectable lineage names (defaults to all known).
-        disabled: True while a run is still going (avoids rerun races).
         cities, start_date, end_date, celery_app: enable "Check in data" for
             these cities and window.
     """
@@ -234,10 +236,6 @@ def render_variant_explorer(pango_loader, panel=None, options=None,
     st.caption("Quick look-up of any lineage, in the panel or not: can reads tell it "
                "apart (★ markers), how it relates to others — and, after a run, is it "
                "in your cities' data.")
-
-    if disabled:
-        st.info("Available once the run completes.")
-        return
 
     if options is None:
         options = sorted(pango_loader.get_raw_data().keys())

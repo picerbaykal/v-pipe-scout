@@ -27,16 +27,17 @@ markers:
   out_other_max: 5      # carriers outside the family that didn't inherit it
 
 # ── Co-occurrence check: a vote among each panel variant's ★ markers ────────
-# Per city, pooled over the selected window. Reads only — never the
-# deconvolution abundance. Applied in the UI: a streamlit restart is enough.
+# Per city, pooled over the last recent_samples covered samples. Reads only —
+# never the deconvolution abundance. Applied in the UI: a streamlit restart is
+# enough. Verdict words (code and UI): present / absent / mixed / not covered.
 check:
   min_cov: 100          # reads covering a marker to measure it
   present_freq: 0.05    # present: >= 5% of covering reads carry it ...
   link_min: 0.8         # ... and >= 80% of those match the variant at neighbouring
   min_link: 20          #     positions (needs >= 20 such reads)
   absent_freq: 0.01     # absent: < 1% carry it
-  confirm_share: 0.75   # present / measurable >= this -> confirmed
-  notfound_share: 0.25  # present / measurable <= this -> not found; between -> inconsistent
+  confirm_share: 0.75   # present / measured >= this -> present
+  notfound_share: 0.25  # present / measured <= this -> absent; between -> mixed
   recent_samples: 5     # Variants table cells vote on the last N covered samples of a
                         #   city ("is it there now?"); the Evidence text covers the window
 
@@ -64,3 +65,19 @@ evidence:
   min_days: 2
   relative_share: 0.95 # combinations: recombinant trees carrying >= this share of a
                        # RECOMBINANT finding's mutation count as its family
+
+# ── Completeness graph ────────────────────────────────────────────────────
+# Applied in the UI: a streamlit restart is enough.
+graph:
+  min_reads: 1000       # a sampling date needs >= this many informative reads to be drawn
+  match_fraction: 0.8   # an unexplained read counts for a found lineage (red) when it
+                        #   carries >= this share of one of its mutation groups
+
+# ── List lengths on the page ──────────────────────────────────────────────
+# Longer lists are cut; the page says "showing N of M". cross_check_max is
+# how many lineages found elsewhere are checked per city (phase 3).
+lists:
+  cross_check_max: 40
+  named_only_max: 25
+  broad_max: 25
+  near_changes_max: 8

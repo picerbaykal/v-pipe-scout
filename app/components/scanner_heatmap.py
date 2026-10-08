@@ -23,12 +23,9 @@ from collections import defaultdict
 from typing import List, Dict, Set, Optional, Tuple
 import re as _re
 
-import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
 import streamlit as st
 
-_STAR_MAX = 30          # legacy fallback only: results without block["mut_star"]
 _MAX_POS = 5            # cap positions per haplotype block (keeps coverage high)
 _UNCOVERED = {"N", "-"}
 
@@ -39,20 +36,8 @@ def _pos(m: str) -> int:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# per-MUTATION frequency fetch  (used by the DETAIL view + render_scanner_heatmap)
+# per-MUTATION frequency fetch  (the Mutations tables)
 # ─────────────────────────────────────────────────────────────────────────────
-def _build_queries(mutations: List[str]) -> List[Dict[str, str]]:
-    queries = []
-    for mut in mutations:
-        pos = mut[:-1]
-        queries.append({
-            "displayLabel": mut,
-            "countQuery": f"main:{pos}{mut[-1]}",
-            "coverageQuery": f"!main:{pos}N",
-        })
-    return queries
-
-
 def _fetch_frequencies(client, location, date_range, mutations) -> pd.DataFrame:
     """Cached wrapper around the per-mutation fetch."""
     try:
@@ -159,9 +144,9 @@ def _star_info(member_blocks):
     """(is_star(m), outside(m)) from the scanner's blocks.
 
     ★ = rare outside the finding's own family (block["mut_star"], set by the
-    scanner with the same rule it confirms findings with). outside(m) = number of
-    lineages outside the family carrying m. Older results without these fields
-    fall back to the legacy global carrier count <= _STAR_MAX."""
+    scanner with the same rule it confirms findings with; also set by
+    process.variant_explorer.marker_blocks and for novel patterns).
+    outside(m) = number of lineages outside the family carrying m."""
     star, outside, car = {}, {}, {}
     for b in member_blocks or []:
         star.update(b.get("mut_star", {}) or {})
@@ -169,10 +154,7 @@ def _star_info(member_blocks):
         car.update(b.get("mut_carriers", {}) or {})
 
     def is_star(m):
-        if m in star:
-            return bool(star[m])
-        n = car.get(m)
-        return n is not None and n <= _STAR_MAX
+        return bool(star.get(m, False))
 
     def n_outside(m):
         return outside.get(m, car.get(m))
@@ -528,151 +510,3 @@ def render_clade_heatmap(
                                  location, date_range, evidence_days)
     _render_per_mutation_blocks(clade_node, shared_mutations, member_blocks, client,
                                 location, date_range, max_muts_per_block=max_muts_per_block)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# unchanged: single-variant heatmap (used elsewhere)
-# ─────────────────────────────────────────────────────────────────────────────
-def _classify_mutations(mutations, lineage_sig, panel_variants,
-                        all_lineage_signatures, cowwid_signatures) -> Dict[str, str]:
-    panel_union = set().union(
-        *(all_lineage_signatures.get(p, set()) for p in panel_variants)
-    ) if all_lineage_signatures else set()
-    cowwid_union = set().union(*cowwid_signatures.values()) if cowwid_signatures else set()
-    result = {}
-    for mut in mutations:
-        if mut in panel_union:
-            result[mut] = 'shared_panel'
-        elif mut in cowwid_union:
-            result[mut] = 'shared_cowwid'
-        else:
-            result[mut] = 'unique'
-    return result
-
-
-def _make_figure(pivot, hover, cov, mut_classes, title) -> go.Figure:
-    col_labels = [datetime.strptime(c, "%Y-%m-%d").strftime("%b %d")
-                  for c in pivot.columns]
-    priority = {'unique': 0, 'shared_cowwid': 1, 'shared_panel': 2}
-    sorted_muts = sorted(pivot.index, key=lambda m: (
-        priority.get(mut_classes.get(m, 'shared_panel'), 2), m))
-    groups = [('unique', 'Blues', 'unique to lineage'),
-              ('shared_cowwid', 'Oranges', 'shared with known variant'),
-              ('shared_panel', 'Greys', 'shared with panel variant')]
-    fig = go.Figure()
-    for group_key, colorscale, label in groups:
-        group_muts = [m for m in sorted_muts if mut_classes.get(m) == group_key]
-        if not group_muts:
-            continue
-        z = pivot.loc[group_muts].values.tolist()
-        hover_text = []
-        for mut in group_muts:
-            row_hover = []
-            for col in pivot.columns:
-                f = pivot.loc[mut, col]
-                c = hover.loc[mut, col] if mut in hover.index else 0
-                cv = cov.loc[mut, col] if mut in cov.index else 0
-                cls = mut_classes.get(mut, '')
-                cls_label = {'unique': '🔵 unique',
-                             'shared_cowwid': '🟠 shared (known variant)',
-                             'shared_panel': '⚫ shared (panel)'}.get(cls, '')
-                row_hover.append(f"<b>{mut}</b> {cls_label}<br>freq: {f:.1%}<br>"
-                                 f"{int(c):,} / {int(cv):,} reads")
-            hover_text.append(row_hover)
-        zmax = max((max(max(r) for r in z), 0.01))
-        fig.add_trace(go.Heatmap(
-            z=z, x=col_labels, y=group_muts, text=hover_text,
-            hovertemplate="%{text}<extra></extra>", colorscale=colorscale,
-            zmin=0, zmax=zmax, showscale=(group_key == 'unique'),
-            colorbar=dict(title="freq", tickformat=".0%", x=1.02)
-            if group_key == 'unique' else None, name=label))
-    fig.update_layout(
-        title=dict(text=title, font=dict(size=14)),
-        height=max(200, 32 * len(sorted_muts) + 90),
-        margin=dict(t=50, b=40, l=100, r=60), template="plotly_white",
-        xaxis=dict(side="bottom", title=None),
-        yaxis=dict(autorange="reversed", title=None,
-                   tickfont=dict(family="monospace", size=11)),
-        legend=dict(orientation="h", y=-0.12, x=0, font=dict(size=11)))
-    return fig
-
-
-def render_scanner_heatmap(
-    variant, mutations, client, location, date_range, max_mutations=30,
-    panel_variants=None, all_lineage_signatures=None, cowwid_signatures=None,
-    lineage_sig=None, member_blocks=None, shared_mutations=None,
-) -> None:
-    if not mutations:
-        st.caption(f"No discriminating mutations found for {variant}.")
-        return
-    shown = sorted(mutations)[:max_mutations]
-    if len(mutations) > max_mutations:
-        st.caption(f"Showing {max_mutations} of {len(mutations)} observed mutations.")
-    if all_lineage_signatures is not None and cowwid_signatures is not None and panel_variants:
-        mut_classes = _classify_mutations(shown, lineage_sig, panel_variants,
-                                          all_lineage_signatures, cowwid_signatures)
-    else:
-        mut_classes = {m: 'unique' for m in shown}
-    n_unique = sum(1 for c in mut_classes.values() if c == 'unique')
-    n_shared = sum(1 for c in mut_classes.values() if c != 'unique')
-    legend_parts = []
-    if n_unique:
-        legend_parts.append(
-            f'<span style="background:#dbeafe;color:#1e40af;padding:2px 8px;'
-            f'border-radius:10px;font-size:11px;margin-right:6px">'
-            f'🔵 {n_unique} unique</span>')
-    if n_shared:
-        legend_parts.append(
-            f'<span style="background:#ffedd5;color:#9a3412;padding:2px 8px;'
-            f'border-radius:10px;font-size:11px;margin-right:6px">'
-            f'🟠 {n_shared} shared with known variant</span>')
-    if legend_parts:
-        st.markdown(" ".join(legend_parts), unsafe_allow_html=True)
-    with st.spinner(f"Fetching {variant} signal over time…"):
-        df = _fetch_frequencies(client, location, date_range, shown)
-    if df.empty:
-        st.caption("No frequency data returned.")
-        return
-    pivot = df.pivot(index="mutation", columns="dateFrom", values="frequency")
-    hover_df = df.pivot(index="mutation", columns="dateFrom", values="count")
-    cov_df = df.pivot(index="mutation", columns="dateFrom", values="coverage")
-    unique_muts_in_pivot = [m for m in shown
-                            if mut_classes.get(m) == 'unique' and m in pivot.index]
-    if unique_muts_in_pivot:
-        unique_pivot = pivot.loc[unique_muts_in_pivot]
-        max_unique_freq = unique_pivot.values.max()
-        if len(pivot.columns) >= 2:
-            last2 = unique_pivot.iloc[:, -2:].values
-            n_rising = sum(1 for row in last2 if row[-1] > row[0])
-        else:
-            n_rising, max_unique_freq = 0, 0
-        if max_unique_freq > 0.05 and n_rising >= 2:
-            st.success(f"**Real signal** — {n_rising} unique mutations rising "
-                       f"together (max {max_unique_freq:.1%})")
-        elif max_unique_freq > 0.005:
-            st.warning(f"**Weak signal** — unique mutations present but low "
-                       f"({max_unique_freq:.1%} max). Monitor over time.")
-        else:
-            st.info("**Likely noise** — unique mutations not rising. Signal may "
-                    "be from a related known variant.")
-    if member_blocks:
-        _guide = []
-        if shared_mutations:
-            _guide.append(f"<b>shared (clade):</b> {', '.join(shared_mutations[:4])}")
-        for _b in member_blocks[:6]:
-            _dm = ", ".join(_b.get("discriminating", [])[:3])
-            if _dm:
-                _guide.append(f"<b>{_b['member']}:</b> {_dm}")
-        if _guide:
-            st.markdown("<div style='font-size:11px;color:#6b7280;margin:4px 0;'>"
-                        "Rows below, grouped by member — a member is present when "
-                        "its own row(s) light up alongside the shared rows.<br>"
-                        + " &nbsp;·&nbsp; ".join(_guide) + "</div>",
-                        unsafe_allow_html=True)
-    title = f"{variant} — mutation frequencies by week in {location}"
-    fig = _make_figure(pivot, hover_df, cov_df, mut_classes, title)
-    st.plotly_chart(fig, use_container_width=True)
-    st.caption(
-        "Frequency = reads with mutation / reads covering that position. "
-        "Blue = mutations unique to this lineage (true signal). "
-        "Orange = shared with a known variant not in your panel.")

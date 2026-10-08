@@ -341,8 +341,8 @@ CHECK_DEFAULTS = {
     "link_min": 0.8,         # ... and >= this share of those reads match the
     "min_link": 20,          #     variant at neighbouring positions (>= 20 reads)
     "absent_freq": 0.01,     # absent: < this share carry it
-    "confirm_share": 0.75,   # present / measurable >= this -> confirmed
-    "notfound_share": 0.25,  # present / measurable <= this -> not found
+    "confirm_share": 0.75,   # present / measured >= this -> present
+    "notfound_share": 0.25,  # present / measured <= this -> absent
 }
 
 
@@ -534,11 +534,13 @@ def check_verdicts(markers: List[str],
       absent      <  absent_freq of covering reads carry it
       unmeasured  fewer than min_cov covering reads, or anything in between
     Verdict from present / (present + absent):
-      confirmed >= confirm_share · not_found <= notfound_share · else inconsistent
-      cant_confirm when the variant has no markers or none is measurable.
+      present >= confirm_share · absent <= notfound_share · else mixed
+      not_covered when the variant has no markers or none is measurable.
+    (Until 2026-10-08 the verdicts were named confirmed / not_found /
+    inconsistent / cant_confirm.)
     Uses reads only — never the deconvolution abundance."""
     c = _check_cfg(cfg)
-    empty = {"verdict": "cant_confirm", "n_markers": len(markers or []),
+    empty = {"verdict": "not_covered", "n_markers": len(markers or []),
              "n_present": 0, "n_measured": 0, "markers": {}}
     if not markers:
         return empty
@@ -568,12 +570,12 @@ def check_verdicts(markers: List[str],
         out[m] = {"cov": cov, "freq": f, "link": link, "status": st}
     n_meas = n_p + n_a
     if n_meas == 0:
-        verdict = "cant_confirm"
+        verdict = "not_covered"
     elif n_p / n_meas >= c["confirm_share"]:
-        verdict = "confirmed"
+        verdict = "present"
     elif n_p / n_meas <= c["notfound_share"]:
-        verdict = "not_found"
+        verdict = "absent"
     else:
-        verdict = "inconsistent"
+        verdict = "mixed"
     return {"verdict": verdict, "n_markers": len(markers), "n_present": n_p,
             "n_measured": n_meas, "markers": out}

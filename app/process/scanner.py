@@ -66,12 +66,6 @@ MIN_FINGERPRINT = int(_cfg("scanner.min_fingerprint", 2))
 # rules. Was a literal 15 in three places.
 SMALL_SET = int(_cfg("scanner.small_candidate_set", 15))
 
-# A mutation is discriminating (★) if few lineages carry it. A co-occurrence
-# block counts as evidence only if it holds at least one such mutation; a block
-# whose mutations are all high-carrier backbone can't confirm a specific variant.
-# Kept in sync with _STAR_MAX in components/scanner_heatmap.py.
-STAR_CARRIER_MAX = 30   # legacy global count; kept only for the UI heatmap ★
-
 # 2026-09: a block is discriminating when one of its mutations is rare OUTSIDE
 # the finding's own family (own sublineages never count against it — the global
 # count above breaks on the granular Nextclade tree, e.g. PQ.16.1.1).
@@ -622,8 +616,8 @@ def scan_unexplained_patterns(
     # So classify EVERY finding node independently:
     #   has a discriminating (★) block   -> confirmed (co-occurrence-confirmed)
     #   no ★ block (backbone / no block) -> matched-no-haplotype (violet)
-    # A ★ block is an observed amplicon group carrying a mutation few lineages
-    # hold (carrier <= STAR_CARRIER_MAX); an all-backbone block (e.g. LF.7's
+    # A ★ block is an observed amplicon group carrying a mutation rare outside
+    # the finding's family (STAR_OUTSIDE_MAX); an all-backbone block (e.g. LF.7's
     # "@ 7842 [101 lineages]") can't confirm a specific variant.
     for c in _all_clades:
         c["member_resolved"] = bool(c.get("member_blocks"))

@@ -57,28 +57,28 @@ def _row(d, n, **bases):
     return r
 
 
-def test_confirmed_when_markers_present_on_variant_reads():
+def test_present_when_markers_present_on_variant_reads():
     rows = [[_row("a", 900, p400="T", p300="G"), _row("a", 100, p400="C", p300="G"),
              _row("a", 500, p500="A", p300="G")]]
     out = check_verdicts(["400T", "500A"], _tally(rows, ["400T", "500A"]), CFG)
-    assert out["verdict"] == "confirmed"
+    assert out["verdict"] == "present"
     assert (out["n_present"], out["n_measured"]) == (2, 2)
     assert out["markers"]["400T"]["status"] == "present"
 
 
-def test_not_found_and_one_convergent_marker_does_not_flip_it():
+def test_absent_and_one_convergent_marker_does_not_flip_it():
     rows = [[_row("a", 900, p400="T", p300="G"), _row("a", 1100, p400="C", p300="G"),
              _row("a", 2000, p500="G", p600="T", p700="A", p300="G")]]
     mk = ["400T", "500A", "600C", "700G"]
     out = check_verdicts(mk, _tally(rows, mk), CFG)
     assert (out["n_present"], out["n_measured"]) == (1, 4)
-    assert out["verdict"] == "not_found"
+    assert out["verdict"] == "absent"
 
 
-def test_real_split_is_inconsistent():
+def test_real_split_is_mixed():
     rows = [[_row("a", 2000, p400="T", p300="G"), _row("a", 2000, p500="G", p300="G")]]
     out = check_verdicts(["400T", "500A"], _tally(rows, ["400T", "500A"]), CFG)
-    assert out["verdict"] == "inconsistent"
+    assert out["verdict"] == "mixed"
 
 
 def test_marker_on_non_variant_reads_is_not_present():
@@ -86,20 +86,20 @@ def test_marker_on_non_variant_reads_is_not_present():
     rows = [[_row("a", 500, p400="T", p300="A"), _row("a", 500, p400="C", p300="A")]]
     out = check_verdicts(["400T"], _tally(rows, ["400T"]), CFG)
     assert out["markers"]["400T"]["status"] == "unmeasured"
-    assert out["verdict"] == "cant_confirm"
+    assert out["verdict"] == "not_covered"
 
 
 def test_counts_are_pooled_over_dates():
     rows = [[_row("a", 60, p400="T", p300="G")], [_row("b", 60, p400="T", p300="G")]]
     out = check_verdicts(["400T"], _tally(rows, ["400T"]), CFG)
     assert out["markers"]["400T"]["cov"] == 120
-    assert out["verdict"] == "confirmed"
+    assert out["verdict"] == "present"
 
 
-def test_too_few_reads_or_no_markers_cant_confirm():
-    assert check_verdicts([], {}, CFG)["verdict"] == "cant_confirm"
+def test_too_few_reads_or_no_markers_not_covered():
+    assert check_verdicts([], {}, CFG)["verdict"] == "not_covered"
     rows = [[_row("a", 30, p400="T", p300="G")]]
-    assert check_verdicts(["400T"], _tally(rows, ["400T"]), CFG)["verdict"] == "cant_confirm"
+    assert check_verdicts(["400T"], _tally(rows, ["400T"]), CFG)["verdict"] == "not_covered"
 
 
 def test_positions_outside_batch_ignored():

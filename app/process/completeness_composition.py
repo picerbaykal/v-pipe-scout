@@ -45,7 +45,18 @@ except Exception:                                   # pragma: no cover
             return present - max(panel_sigs.values(), key=lambda s: len(present & s))
         return present - set(panel_sigs or ())
 
-_MATCH_FRACTION = 0.8      # share of a finding's group a read must carry
+def _graph_cfg(key: str, default):
+    """graph.* from app/config/cooc_config.yaml, else the default."""
+    try:
+        from utils.config import get_cooc_setting
+        val = get_cooc_setting(f"graph.{key}", default)
+        return default if val is None else val
+    except Exception:
+        return default
+
+
+# share of a finding's mutation group a read must carry to count for it (red)
+_MATCH_FRACTION = float(_graph_cfg("match_fraction", 0.8))
 _NEAR_TOP = 3
 
 
@@ -77,7 +88,7 @@ def _star_markers(scanner_result: dict) -> Set[str]:
 
 def compute_completeness_composition(cooc_result: dict,
                                      scanner_result: dict = None,
-                                     min_reads: int = 1000,
+                                     min_reads: Optional[int] = None,
                                      panel_union: Optional[Union[Set[str], Dict[str, Set[str]]]] = None
                                      ) -> List[Dict]:
     """Per-date normalized composition rows.
@@ -87,7 +98,11 @@ def compute_completeness_composition(cooc_result: dict,
        explained_pct, near_pct, addable_pct, noise_pct,
        near_top: [(label, reads), ...]  — largest "variant + 1 change" groups}
     Percentages are of that date's total and sum to 1.0.
+    min_reads: dates with fewer informative reads are dropped (default:
+    graph.min_reads in the config, 1000).
     """
+    if min_reads is None:
+        min_reads = int(_graph_cfg("min_reads", 1000))
     dates = cooc_result.get("dates", [])
     matched = cooc_result.get("matched_counts", [])
     unexpl = cooc_result.get("unexplained_counts", [])

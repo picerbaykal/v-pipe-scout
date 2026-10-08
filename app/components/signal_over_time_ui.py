@@ -6,7 +6,8 @@ lineage or novel pattern in one of the run's cities, per week
 and 'Investigate a variant' stay short.
 
 Picker order: lineages the deep scan found (most reads first), the panel,
-the run's recurring novel patterns, then any pango lineage. A lineage the
+the run's recurring novel patterns (>= evidence.min_days days), then any
+pango lineage. A lineage the
 scanner reported in the chosen city uses the scanner's groups of positions
 (and its evidence days as ● marks); any other lineage, groups of its ★
 markers (process.variant_explorer.marker_blocks).
@@ -25,6 +26,10 @@ NOVEL_PREFIX = "novel · "
 def _scan_index(scanner_results):
     """From the deep scan, per city: {node: blocks}, {node: counted days};
     the found nodes by reads; the recurring novel patterns."""
+    try:
+        from process.scanner import EVIDENCE_MIN_DAYS as min_days
+    except Exception:
+        min_days = 2
     blocks, days, reads, novel = {}, {}, {}, {}
     for city, r in (scanner_results or {}).items():
         for k in ("resolved_clade", "one_day"):
@@ -36,7 +41,7 @@ def _scan_index(scanner_results):
                 days.setdefault(city, {})[n] = list(f.get("counted_days") or [])
                 reads[n] = reads.get(n, 0) + int(f.get("total_reads", 0) or 0)
         for g in (r.get("novel") or {}).get("groups") or []:
-            if len(g.get("days") or []) >= 2 and not g.get("likely_error"):
+            if len(g.get("days") or []) >= min_days and not g.get("likely_error"):
                 novel[" ".join(g["mutations"])] = list(g["mutations"])
     found = [n for n, _r in sorted(reads.items(), key=lambda kv: -kv[1])]
     return blocks, days, found, novel
