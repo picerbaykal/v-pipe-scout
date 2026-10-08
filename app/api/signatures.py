@@ -6,7 +6,9 @@ import os
 import re
 from typing import Dict, List, Optional, Any, Tuple
 from pathlib import Path
-from pydantic import BaseModel, validator
+# pydantic 2 (2026-10-08; was pydantic 1: validator / parse_obj). The worker
+# imports this file through /app_shared and needs pydantic 2 for covvfit.
+from pydantic import BaseModel, field_validator
 import logging
 
 # Configure logging
@@ -52,13 +54,15 @@ class Mutation(BaseModel):
     ref: str
     alt: str
 
-    @validator('position', allow_reuse=True)
+    @field_validator('position')
+    @classmethod
     def validate_position(cls, v):
         if v <= 0:
             raise ValueError("Position must be a positive integer")
         return v
 
-    @validator('ref', allow_reuse=True)
+    @field_validator('ref')
+    @classmethod
     def validate_ref(cls, v):
         if not (len(v) == 0 or len(v) == 1):
             raise ValueError("Reference must be empty or a single nucleotide")
@@ -66,7 +70,8 @@ class Mutation(BaseModel):
             raise ValueError("Reference must be one of A, C, G, T, or N")
         return v
 
-    @validator('alt', allow_reuse=True)
+    @field_validator('alt')
+    @classmethod
     def validate_alt(cls, v):
         if len(v) != 1:
             raise ValueError("Alternative must be a single character")
@@ -145,7 +150,8 @@ class VariantDefinition(BaseModel):
     variant: VariantInfo
     mut: Dict[int, str]
 
-    @validator('mut', pre=True, allow_reuse=True)
+    @field_validator('mut', mode='before')
+    @classmethod
     def convert_string_keys_to_int(cls, v):
         """Convert dictionary string keys to integers for mutation positions."""
         return {int(k): v for k, v in v.items()}
@@ -360,7 +366,7 @@ def load_variant_definition(yaml_data: Dict[str, Any]) -> Optional[VariantDefini
         # Avoid overwriting any keys in mut with shared
         merged_mut = {**shared, **mut}
         yaml_data['mut'] = merged_mut
-        return VariantDefinition.parse_obj(yaml_data)
+        return VariantDefinition.model_validate(yaml_data)
     except Exception as e:
         logger.error(f"Error parsing variant definition: {e}")
         return None

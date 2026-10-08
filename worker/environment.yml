@@ -19,12 +19,17 @@ dependencies:
   - lollipop>=0.5.3
   - aiohttp
   - requests
-  - pydantic>=1.9,<2
+  # pydantic 2 (2026-10-08): covvfit needs >= 2.10; app/api/signatures.py,
+  # which the worker imports through /app_shared, moved to the pydantic 2 API
+  - pydantic>=2.10,<3
   
   # CLI tools - for tallymut assembly
   - xsv=0.13.0
   - gawk=5.3.1
   
+  # git: pip installs covvfit from GitHub (see Dockerfile)
+  - git
+
   # other python
   - pyyaml
 

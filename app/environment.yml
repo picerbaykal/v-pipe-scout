@@ -14,8 +14,9 @@ dependencies:
   - pytest
   - pytest-asyncio
   - pytest-mock
-  - streamlit-pydantic
-  - pydantic>=1.9,<2
+  # pydantic 2 (2026-10-08), as in the worker: app/api/signatures.py runs in
+  # both. streamlit-pydantic removed: nothing in the app imports it.
+  - pydantic>=2.10,<3
   - plotly>=6.2.0
   - pip
   - celery==5.5.3
