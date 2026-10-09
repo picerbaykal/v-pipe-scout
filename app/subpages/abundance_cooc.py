@@ -200,6 +200,95 @@ def _panel_verdicts(cooc_res: dict, variants: list) -> dict:
     return out
 
 
+# LolliPop settings (2026-10-09: moved from the left column to "Deconvolution
+# settings" under the Run deconvolution button)
+_BOOTSTRAPS = {"Rapid": 50, "Standard": 100, "Reliable": 300}
+_BANDWIDTHS = {"Narrow": 10, "Medium": 20, "Wide": 30}
+_SETTINGS_ICON = ":material/tune:"
+
+
+def _kept(kind: str, label: str, store: str, default, **kw):
+    """A widget whose value survives tab switches (2026-10-09). Streamlit
+    forgets a widget's value when the widget isn't drawn in a rerun, and the
+    settings live in one tab; so the value is kept under `store` and the
+    widget (key store + "__w") is drawn from it."""
+    st.session_state.setdefault(store, default)
+    wkey = store + "__w"
+
+    def _copy():
+        st.session_state[store] = st.session_state[wkey]
+    cur = st.session_state[store]
+    if kind == "slider":
+        return st.slider(label, value=cur, key=wkey, on_change=_copy, **kw)
+    if kind == "radio":
+        opts = list(kw.pop("options"))
+        return st.radio(label, opts, index=opts.index(cur) if cur in opts else 0,
+                        key=wkey, on_change=_copy, **kw)
+    if kind == "multiselect":
+        opts = list(kw.pop("options"))
+        return st.multiselect(label, opts, default=[x for x in cur if x in opts],
+                              key=wkey, on_change=_copy, **kw)
+    raise ValueError(kind)
+
+
+@st.dialog("Start a new run?")
+def _confirm_new_run(reasons: list, clears: list) -> None:
+    """Before ▶ Run clears results (2026-10-09): says why a new run is needed
+    and exactly what it clears."""
+    st.markdown(("Changed since the current run: " + "; ".join(reasons) + ". ")
+                if reasons else "")
+    st.markdown("A new run clears:")
+    st.markdown("\n".join(f"- {c}" for c in clears) or "- nothing yet")
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Start new run", type="primary", width="stretch",
+                     key="acooc_confirm_new"):
+            st.session_state["acooc_trigger_run"] = True
+            st.rerun()
+    with c2:
+        if st.button("Cancel", width="stretch", key="acooc_confirm_cancel"):
+            st.rerun()
+
+
+def _run_scope(selected_locations, all_selected_variants, start_date, end_date) -> dict:
+    """How the left side compares with the current run (2026-10-09):
+    mode "first" (no run yet), "add" (only locations added: same panel and
+    dates), "new" (panel or dates changed, or nothing new: a new run).
+    Also the reasons and the tags for the run line."""
+    ss = st.session_state
+    has_run = bool(ss.get("acooc_cooc_tasks"))
+    ran_panel = list(ss.get("acooc_ran_panel") or [])
+    ran_locs = list(ss.get("acooc_ran_locations") or [])
+    ran_dates = tuple(ss.get("acooc_ran_dates") or ())
+    now_dates = (start_date.isoformat(), end_date.isoformat())
+    plus = sorted(set(all_selected_variants) - set(ran_panel))
+    minus = sorted(set(ran_panel) - set(all_selected_variants))
+    new_locs = [c for c in selected_locations if c not in ran_locs]
+    reasons = []
+    if plus or minus:
+        reasons.append("panel " + " ".join([f"+ {v}" for v in plus] + [f"− {v}" for v in minus]))
+    if ran_dates and now_dates != ran_dates:
+        reasons.append(f"dates {now_dates[0]} – {now_dates[1]}")
+    if not has_run:
+        mode = "first"
+    elif not reasons and new_locs:
+        mode = "add"
+    else:
+        mode = "new"
+    pending = has_run and bool(reasons or new_locs)
+    if not pending:
+        block = ""
+    elif mode == "add":
+        block = ("Add " + ", ".join(l.split("(")[0].strip() for l in new_locs)
+                 + " to the run first")
+    else:
+        block = ("The left side changed (" + "; ".join(reasons) + "): start a new run "
+                 "first, or undo the change")
+    return {"mode": mode, "reasons": reasons, "new_locs": new_locs, "pending": pending,
+            "block": block, "ran_panel": ran_panel, "ran_locs": ran_locs,
+            "ran_dates": ran_dates}
+
+
 # Result tabs, grouped in the order results arrive (2026-10-08): panel and
 # abundance (is the panel good enough for a deconvolution? then the
 # deconvolution), the deep scan (lineages, signal over time), and the look-up.
@@ -245,34 +334,98 @@ def _render_section_tabs(marks: dict) -> str:
     return st.session_state["acooc_section"]
 
 
-def _render_covvfit(r: dict) -> None:
-    """CovvFit's result (2026-10-09): the figure, the growth advantages between
-    panel variants (each pair once, the faster one first), the rows against
-    covvfit's "other" apart, and the downloads."""
+def _covvfit_location_figure(df, color_map: dict, height: int = 300):
+    """One location's covvfit curves (plotly), from predictions.csv rows of
+    that location: samples (dots), fit with its 95 % range (line, light band),
+    prediction with its range (dashed, on a grey background). covvfit's own
+    "other" is left out (it is 1 minus the panel)."""
+    import plotly.graph_objects as go
+
+    def _rgba(c, a):
+        """'#rrggbb' or 'rgb(r, g, b)' -> 'rgba(r, g, b, a)' with 0-255 channels
+        (multi_location_results.get_rgba_color writes 0-1, which browsers
+        read as near black)."""
+        c = str(c).strip()
+        try:
+            if c.startswith("#") and len(c) >= 7:
+                r, g, b = int(c[1:3], 16), int(c[3:5], 16), int(c[5:7], 16)
+            else:
+                r, g, b = [int(float(x)) for x in c[c.index("(") + 1:c.index(")")].split(",")[:3]]
+            return f"rgba({r}, {g}, {b}, {a})"
+        except Exception:
+            return f"rgba(128, 128, 128, {a})"
+    fig = go.Figure()
+    d = df[df["variant"] != "other"]
+    pred_dates = d.loc[d["label"] == "predicted_value", "date"]
+    if len(pred_dates):
+        fig.add_vrect(x0=pred_dates.min(), x1=pred_dates.max(), fillcolor="#F1EFE8",
+                      opacity=0.6, line_width=0, layer="below")
+    for v in [x for x in color_map if x in set(d["variant"])] + sorted(
+            set(d["variant"]) - set(color_map)):
+        c = color_map.get(v, "#6b7280")
+        dv = d[d["variant"] == v]
+
+        def _ser(label):
+            x = dv[dv["label"] == label].sort_values("date")
+            return list(x["date"]), list(x["value"])
+        for kind, dash in (("fitted", None), ("predicted", "dot")):
+            xs, ys = _ser(f"{kind}_value")
+            _, lo = _ser(f"{kind}_lower_ci")
+            _, hi = _ser(f"{kind}_upper_ci")
+            if not xs:
+                continue
+            if len(lo) == len(xs) and len(hi) == len(xs):
+                fig.add_trace(go.Scatter(x=xs + xs[::-1], y=hi + lo[::-1], fill="toself",
+                                         fillcolor=_rgba(c, 0.18),
+                                         line=dict(color="rgba(0,0,0,0)"),
+                                         hoverinfo="skip", showlegend=False))
+            fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", name=v, showlegend=False,
+                                     line=dict(color=c, width=2, dash=dash),
+                                     hovertemplate=f"<b>{v}</b> {kind}: %{{y:.1%}}<extra></extra>"))
+        xs, ys = _ser("observed_value")
+        if xs:
+            fig.add_trace(go.Scatter(x=xs, y=ys, mode="markers", name=v, showlegend=False,
+                                     marker=dict(color=c, size=5, opacity=0.7),
+                                     hovertemplate=f"<b>{v}</b> sample: %{{y:.1%}}<extra></extra>"))
+    fig.update_layout(height=height, margin=dict(t=10, b=36, l=48, r=12),
+                      template="plotly_white", hovermode="x unified",
+                      yaxis=dict(tickformat=".0%", range=[0, 1]))
+    return fig
+
+
+def _render_covvfit(r: dict, color_map: dict = None, checked: list = None) -> None:
+    """CovvFit's result (2026-10-09), one section for all locations (the
+    growth advantages are shared by them): what was fitted, the advantages
+    between panel variants (each pair once, the faster one first), the rows
+    against covvfit's "other" apart, the fitted curves per location (drawn
+    here from predictions.csv, 2 per row, the deconvolution plots' colours),
+    and the downloads (covvfit's own figure too)."""
     import base64 as _b64
+    import io as _io
     import math as _math
     import pandas as _pd
+    color_map = {k: v for k, v in (color_map or {}).items() if k != "undetermined"}
+    checked = list(checked or [])
+    locs = list(r.get("locations") or [])
+    _short = lambda l: l.split("(")[0].strip()
     st.caption(
-        f"Fitted on each sample's own estimate (deconvolution without smoothing), "
-        f"{r.get('date_min', '')} – {r.get('date_max', '')}, predicted {r.get('horizon', '')} "
-        f"days ahead (grey area). One growth advantage per variant, shared by "
-        f"{len(r.get('locations') or [])} location(s).")
+        f"Fitted on {len(locs)} location(s), {r.get('date_min', '')} – {r.get('date_max', '')}, "
+        f"predicted {r.get('horizon', '')} days ahead. One growth advantage per variant, "
+        f"shared by all locations. Panel check covered: "
+        f"{', '.join(_short(l) for l in checked) or 'none'}.")
     for _l, _why in (r.get("skipped") or {}).items():
         st.warning(f"Left out: {_l} ({_why})")
-    if r.get("figure_png"):
-        st.image(_b64.b64decode(r["figure_png"]), width="stretch")
 
     rows = r.get("pairwise") or []
     main = [x for x in rows if not x.get("involves_other") and x["estimate"] > 0]
     if main:
-        def _reading(x):
-            return ("grows faster" if x["lower"] > 0 else "no clear difference")
         df = _pd.DataFrame([{
             "Variant": x["variant"], "against": x["reference"],
             "advantage per week": round(x["estimate"], 3),
             "95 % range": f"{x['lower']:.3f} – {x['upper']:.3f}",
             "odds × per week": round(_math.exp(x["estimate"]), 2),
-            "reading": _reading(x)} for x in sorted(main, key=lambda x: -x["estimate"])])
+            "reading": "grows faster" if x["lower"] > 0 else "no clear difference"}
+            for x in sorted(main, key=lambda x: -x["estimate"])])
         st.markdown("<div style='font-size:13px;font-weight:600;margin-top:6px;'>"
                     "Between your panel variants</div>", unsafe_allow_html=True)
         st.caption("Advantage per week on the log-odds scale: 0.5 means the odds of the "
@@ -291,15 +444,47 @@ def _render_covvfit(r: dict) -> None:
                 "95 % range": f"{x['lower']:.3f} – {x['upper']:.3f}"} for x in oth]),
                 width="stretch", hide_index=True)
 
+    # fitted curves per location
+    if r.get("predictions_csv"):
+        try:
+            pdf = _pd.read_csv(_io.StringIO(r["predictions_csv"]), sep="\t")
+            pdf["date"] = _pd.to_datetime(pdf["date"])
+        except Exception as e:
+            pdf = None
+            st.caption(f"Could not read covvfit's predictions: {e}")
+        if pdf is not None and len(pdf):
+            used = [v for v in color_map if v in set(pdf["variant"])]
+            st.markdown(
+                "<div style='display:flex;justify-content:space-between;align-items:center;"
+                "flex-wrap:wrap;margin-top:8px;'><span style='font-size:13px;font-weight:600;'>"
+                "Fitted curves per location</span><span style='font-size:12px;color:#5F5E5A;'>"
+                + "".join(f"<span style='display:inline-block;width:16px;height:3px;"
+                          f"border-radius:2px;background:{color_map[v]};margin:0 5px 3px 12px;'>"
+                          f"</span>{v}" for v in used)
+                + " &nbsp;·&nbsp; ● samples · — fit · ┈ prediction</span></div>",
+                unsafe_allow_html=True)
+            names = [l for l in locs if l in set(pdf["location"])] or sorted(set(pdf["location"]))
+            for i in range(0, len(names), 2):
+                cols = st.columns(2)
+                for j, loc in enumerate(names[i:i + 2]):
+                    with cols[j]:
+                        note = ("panel checked" if loc in checked else "panel not checked")
+                        st.markdown(f"<div style='font-size:12.5px;font-weight:600;'>{loc} "
+                                    f"<span style='font-weight:400;color:#6b7280;'>· {note}"
+                                    f"</span></div>", unsafe_allow_html=True)
+                        st.plotly_chart(
+                            _covvfit_location_figure(pdf[pdf["location"] == loc], color_map),
+                            width="stretch", key=f"acooc_cvf_fig_{loc}")
+
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         if r.get("figure_png"):
-            st.download_button("⬇ Figure (PNG)", _b64.b64decode(r["figure_png"]),
+            st.download_button("⬇ covvfit figure (PNG)", _b64.b64decode(r["figure_png"]),
                                file_name="covvfit_figure.png", mime="image/png",
                                key="acooc_cvf_png", width="stretch")
     with c2:
         if r.get("figure_pdf"):
-            st.download_button("⬇ Figure (PDF)", _b64.b64decode(r["figure_pdf"]),
+            st.download_button("⬇ covvfit figure (PDF)", _b64.b64decode(r["figure_pdf"]),
                                file_name="covvfit_figure.pdf", mime="application/pdf",
                                key="acooc_cvf_pdf", width="stretch")
     with c3:
@@ -508,7 +693,7 @@ def app():
         st.markdown("---")
 
         # ── Step 3b: Date range + LolliPop params ─────────────────────────────
-        _step_label(3, "Date range", done=has_locations)
+        _step_label(4, "Date range", done=has_locations)
         default_start, default_end, min_date, max_date = wiseLoculus.get_cached_date_range_with_bounds("abundance_cooc")
         # quick date-range presets — anchored on the latest available data date
         # (max_date), clamped to the available window [min_date, max_date].
@@ -549,21 +734,10 @@ def app():
         if end_date <= start_date:
             st.warning("End date must be after start date.")
 
-        with st.expander("LolliPop parameters", expanded=False):
-            bootstrap_options = {"Rapid": 50, "Standard": 100, "Reliable": 300}
-            selected_bootstrap = st.radio(
-                "Bootstrap iterations", options=list(bootstrap_options.keys()),
-                format_func=lambda k: f"{k} · {bootstrap_options[k]} bootstraps",
-                index=1, key="acooc_bootstrap",
-            )
-            bootstraps = bootstrap_options[selected_bootstrap]
-            bandwidth_options = {"Narrow": 10, "Medium": 20, "Wide": 30}
-            selected_bandwidth = st.radio(
-                "Bandwidth", options=list(bandwidth_options.keys()),
-                format_func=lambda k: f"{k} · bandwidth {bandwidth_options[k]}",
-                index=0, key="acooc_bandwidth",
-            )
-            bandwidth = bandwidth_options[selected_bandwidth]
+        # LolliPop settings: drawn under "Run deconvolution" (Deconvolution
+        # settings); their kept values are read here (2026-10-09)
+        bootstraps = _BOOTSTRAPS.get(st.session_state.get("acooc_bootstrap", "Standard"), 100)
+        bandwidth = _BANDWIDTHS.get(st.session_state.get("acooc_bandwidth", "Narrow"), 10)
 
         st.markdown("---")
 
@@ -644,25 +818,100 @@ def app():
                 )
 
         _step_label(5, "Run analysis", done=has_run, active=not has_run and can_run)
+        # 2026-10-09: results belong to one run. Only locations added (same
+        # panel and dates) -> they join the current run, the rest stays; a
+        # changed panel or dates -> a new run, which asks before clearing.
+        _scope = _run_scope(selected_locations, all_selected_variants, start_date, end_date)
+        _short = lambda l: l.split("(")[0].strip()
+        if _scope["mode"] == "add":
+            _nl = _scope["new_locs"]
+            _run_label = ("▶ Add " + " and ".join(_short(l) for l in _nl) + " to the run"
+                          if len(_nl) <= 2 else f"▶ Add {len(_nl)} locations to the run")
+            _run_note = "keeps the current results"
+        elif _scope["mode"] == "new":
+            _run_label, _run_note = "▶ Start a new run", "asks before clearing the current results"
+        else:
+            _run_label, _run_note = "▶ Run analysis", "panel check for all locations"
+        # one highlighted button at a time (2026-10-09): Run is it when there
+        # is no run yet or the left side changed, and nothing is running
+        _run_next = (_scope["mode"] == "first" or _scope["pending"]) and not _busy
         if st.button(
-            "▶ Run analysis",
-            type="primary",
+            _run_label,
+            type="primary" if _run_next else "secondary",
             disabled=not can_run,
             key="acooc_run_button",
             use_container_width=True,
-            help="Runs the panel check for all locations. Deconvolution and "
-                 "the deep scan have their own buttons above the results."
+            help="Runs the panel check. Deconvolution and the deep scan have their "
+                 "own buttons above the results."
                  if not _busy else "Wait for the current analysis to finish, or stop it.",
         ):
-            st.session_state["acooc_trigger_run"] = True
-        st.caption("panel check for all locations" if not _busy
+            if _scope["mode"] == "add":
+                st.session_state["acooc_trigger_add"] = list(_scope["new_locs"])
+            elif _scope["mode"] == "new":
+                _ss = st.session_state
+                _clears = [f"panel check ({', '.join(_short(l) for l in _scope['ran_locs'])})"]
+                if _ss.get("location_results"):
+                    _clears.append("deconvolution (" + ", ".join(
+                        _short(l) for l in _ss["location_results"]) + ")")
+                if _ss.get("acooc_scanner_results"):
+                    _clears.append("deep scan and cross-check (" + ", ".join(
+                        _short(l) for l in _ss["acooc_scanner_results"]) + ")")
+                if _ss.get("acooc_covvfit_results"):
+                    _clears.append("CovvFit")
+                _confirm_new_run(_scope["reasons"], _clears)
+            else:
+                st.session_state["acooc_trigger_run"] = True
+        st.caption(_run_note if not _busy
                    else "⟳ analysis in progress… (Stop is above the results)")
     # ── Right column: all outputs ─────────────────────────────────────────────
     with col_results:
 
+        # adding locations to the current run (2026-10-09): same panel and
+        # dates, so the per-location results stay; the new locations get the
+        # parts the others had, and the cross-check is redone for all
+        if st.session_state.get("acooc_trigger_add"):
+            _add = [l for l in st.session_state.pop("acooc_trigger_add")
+                    if l not in (st.session_state.get("acooc_cooc_tasks") or {})]
+            _ss = st.session_state
+            _rd0, _rd1 = _ss.get("acooc_ran_dates")
+            _rp = list(_ss.get("acooc_ran_panel") or [])
+            _had_deconv = bool(_ss.get("acooc_location_tasks"))
+            _had_scan = bool(_ss.get("acooc_scanner_tasks")) or bool(_ss.get("acooc_want_scan"))
+            _bs, _bw = _ss.get("acooc_deconv_settings") or (bootstraps, bandwidth)
+            for loc in _add:
+                _ss["acooc_cooc_tasks"][loc] = celery_app.send_task(
+                    "tasks.run_cooc_completeness_lapis",
+                    kwargs={"location": loc, "start_date": _rd0, "end_date": _rd1,
+                            "variants": _rp}).id
+                if _had_deconv:
+                    _ss["acooc_location_tasks"][loc] = celery_app.send_task(
+                        "tasks.run_deconvolve_lapis",
+                        kwargs={"location": loc, "start_date": _rd0, "end_date": _rd1,
+                                "variants": _rp, "bootstraps": _bs, "bandwidth": _bw}).id
+            _ss["acooc_ran_locations"] = sorted(set(_ss.get("acooc_ran_locations") or []) | set(_add))
+            if _had_scan:
+                # the new locations' deep scans start when their panel check
+                # is in; the cross-check (every scan x every location) starts over
+                _ss["acooc_want_scan"] = True
+                _ss["acooc_xcheck_tasks"] = {}
+                _ss["acooc_xcheck_results"] = {}
+                _ss.pop("acooc_xcheck_found_in", None)
+                (_ss.get("acooc_failed") or {}).pop("cross-check", None)
+            for _k in ("completeness", "deconvolution", "scanner"):
+                _ss.setdefault("acooc_phase_t0", {}).pop(_k, None)
+            _names = ", ".join(l.split("(")[0].strip() for l in _add)
+            _parts = ["panel check"] + (["deconvolution"] if _had_deconv else []) + (
+                ["deep scan"] if _had_scan else [])
+            _ss["acooc_notice"] = (
+                f"{_names} added to the run: " + ", ".join(_parts) + " running"
+                + ("; the cross-check will be redone for all locations once every deep "
+                   "scan is in" if _had_scan else "") + ".")
+            logger.info(f"Added to the run: {_add}")
+
         # task submission
         if st.session_state.get("acooc_trigger_run"):
             st.session_state["acooc_trigger_run"] = False
+            st.session_state.pop("acooc_notice", None)
             # ▶ Run = completeness only (2026-10-08). Deconvolution, the deep
             # scan (+ cross-check) and CovvFit start from their buttons, with
             # the cities, panel and dates saved here (acooc_ran_*).
@@ -736,29 +985,28 @@ def app():
                                         "mutation tables per lineage.",
                 }[_sec0])
         else:
-            # Smart "re-run needed" warning. A re-run is needed only when the
-            # existing results become stale/incomplete:
-            #  - variants changed (deconv+scanner are computed for that panel)
-            #  - date range changed (results are for that window)
-            #  - a NEW city was added (it has no results yet)
-            # Removing a city does NOT need a re-run — the remaining cities'
-            # results are still valid (each city is computed independently).
-            _ran = st.session_state.get("acooc_ran_panel")
-            _ran_locs = st.session_state.get("acooc_ran_locations", [])
-            _ran_dates = st.session_state.get("acooc_ran_dates")
-            _now_dates = (start_date.isoformat(), end_date.isoformat())
-            _reasons = []
-            if _ran is not None and sorted(all_selected_variants) != _ran:
-                _reasons.append("variant panel changed")
-            if _ran_dates is not None and _now_dates != _ran_dates:
-                _reasons.append("date range changed")
-            _added_cities = [c for c in selected_locations if c not in _ran_locs]
-            if _added_cities:
-                _reasons.append(f"new location(s) added ({', '.join(_added_cities)})")
-            if _reasons:
-                st.warning("⚠ Re-run needed — " + "; ".join(_reasons)
-                           + ". Results below, and the buttons in the tabs, "
-                           "use the previous run.")
+            # The run line (2026-10-09, replaces the "re-run needed" warnings):
+            # what the results belong to, and how the left side differs.
+            _scope = _run_scope(selected_locations, all_selected_variants, start_date, end_date)
+            _sh = lambda l: l.split("(")[0].strip()
+            _rl = list(st.session_state.get("acooc_cooc_tasks") or {})
+            _rdates = st.session_state.get("acooc_ran_dates") or ("", "")
+            _tags = []
+            if _scope["new_locs"]:
+                _tags.append(", ".join(_sh(l) for l in _scope["new_locs"]) + " not in the run yet")
+            _tags += _scope["reasons"]
+            st.markdown(
+                "<div style='display:flex;flex-wrap:wrap;gap:8px;align-items:center;"
+                "font-size:13px;background:#F6F5F1;border-radius:8px;padding:6px 10px;"
+                "margin-bottom:6px;'><b>Run</b>"
+                f"<span>{', '.join(_sh(l) for l in _rl)} · "
+                f"{len(st.session_state.get('acooc_ran_panel') or [])} variants · "
+                f"{str(_rdates[0])[:10]} – {str(_rdates[1])[:10]}</span>"
+                + "".join(f"<span style='font-size:11.5px;padding:1px 8px;border-radius:8px;"
+                          f"background:#FAEEDA;color:#854F0B;'>{t}</span>" for t in _tags)
+                + "</div>", unsafe_allow_html=True)
+            if st.session_state.get("acooc_notice"):
+                st.caption(st.session_state["acooc_notice"])
             # collect completed results — track if anything new arrives this cycle
             _new_collected = False
             # failed tasks: {stage: {city: message}}. A failed task is "ready" but
@@ -795,11 +1043,41 @@ def app():
             def _btn_deconv():
                 _open = _stage_open(*_RUN_STAGES[1])
                 _label = "Run deconvolution" if not location_tasks else "Re-run deconvolution"
-                if st.button(_label, key="acooc_btn_deconv", use_container_width=True,
-                             disabled=bool(_open),
+                _lr = st.session_state.get("location_results") or {}
+                _used = st.session_state.get("acooc_deconv_settings")
+                _changed = bool(location_tasks and _used
+                                and tuple(_used) != (bootstraps, bandwidth))
+                if _scope["pending"]:
+                    _why = _scope["block"]
+                elif _open:
+                    _why = "Running for " + ", ".join(_l.split("(")[0].strip() for _l in _open)
+                elif _changed:
+                    _why = (f"Settings changed since the last deconvolution ({_used[0]} → "
+                            f"{bootstraps} bootstraps, bandwidth {_used[1]} → {bandwidth}): "
+                            "re-run to apply")
+                elif _lr:
+                    _why = "Done for " + ", ".join(_l.split("(")[0].strip() for _l in _lr)
+                else:
+                    _why = f"{bootstraps} bootstraps, bandwidth {bandwidth} (settings below)"
+                # the next step when the panel check is in and there is no
+                # deconvolution yet, or its settings changed (2026-10-09)
+                _next = (not _scope["pending"] and not _outstanding
+                         and ((not location_tasks) or _changed))
+                _clicked = st.button(_label, key="acooc_btn_deconv", use_container_width=True,
+                             type="primary" if _next else "secondary",
+                             disabled=bool(_open) or _scope["pending"],
                              help=("Running…" if _open else
-                                   f"LolliPop per location with the settings of step 4 "
-                                   f"({bootstraps} bootstraps, bandwidth {bandwidth}).")):
+                                   f"LolliPop per location ({bootstraps} bootstraps, "
+                                   f"bandwidth {bandwidth})."))
+                st.caption(_why)
+                with st.expander("Deconvolution settings", expanded=False, icon=_SETTINGS_ICON):
+                    _kept("radio", "Bootstrap iterations", "acooc_bootstrap", "Standard",
+                          options=list(_BOOTSTRAPS),
+                          format_func=lambda k: f"{k} · {_BOOTSTRAPS[k]} bootstraps")
+                    _kept("radio", "Bandwidth", "acooc_bandwidth", "Narrow",
+                          options=list(_BANDWIDTHS),
+                          format_func=lambda k: f"{k} · bandwidth {_BANDWIDTHS[k]}")
+                if _clicked:
                     _new = {}
                     for _l in location_names:
                         _new[_l] = celery_app.send_task(
@@ -840,45 +1118,95 @@ def app():
                 closed expander under the button."""
                 _open = _stage_open(*_RUN_STAGES[4])
                 _lr = st.session_state.get("location_results", {}) or {}
-                _locs = [l for l in location_names if l in _lr]
-                _ready = bool(_locs) and not _stage_open(*_RUN_STAGES[1])
+                # the button waits for the run's deconvolution (workflow; the
+                # colours come from it); covvfit gets the chosen locations
+                _ready = (any(l in _lr for l in location_names)
+                          and not _stage_open(*_RUN_STAGES[1]))
                 _done = _ALL in (st.session_state.get("acooc_covvfit_results") or {})
-                _h = int(st.session_state.get("acooc_covvfit_horizon", 60))
+                _h = int(st.session_state.get("acooc_covvfit_horizon", 60))  # kept (_kept)
                 # covvfit fits from (run end - past days) to the run end, not the
                 # run's window: a run is often a month, too short for a stable fit
                 # with several variants (2026-10-09). The worker fetches the
                 # deconvolution for that period itself.
                 _past = int(st.session_state.get("acooc_covvfit_past", 180))
+                # locations (2026-10-09): covvfit's advantages are shared by the
+                # locations it gets, so all available ones by default; the
+                # run's own are the only ones whose panel was checked
+                try:
+                    _all_locs = [str(x) for x in (cached_fetch_locations() or [])]
+                except Exception:
+                    _all_locs = []
+                _all_locs = _all_locs or list(location_names)
+                st.session_state.setdefault("acooc_covvfit_locs", list(_all_locs))
+                _cv_locs = [l for l in st.session_state["acooc_covvfit_locs"] if l in _all_locs]
                 from datetime import date as _date, timedelta as _td
                 _cv_d0 = (_date.fromisoformat(str(_run_d1)[:10]) - _td(days=_past)).isoformat()
+                _now_cvf = (tuple(sorted(_cv_locs)), _past, _h)
+                _used_cvf = st.session_state.get("acooc_covvfit_used")
+                _changed_cvf = bool(_done and _used_cvf and tuple(_used_cvf) != _now_cvf)
+                if _scope["pending"]:
+                    _why = _scope["block"]
+                elif _open:
+                    _why = "Running"
+                elif not _ready:
+                    _why = "Waits for the deconvolution"
+                elif _changed_cvf:
+                    _why = "Settings changed since the last CovvFit: re-run to apply"
+                elif not _cv_locs:
+                    _why = "Choose locations in the settings below"
+                elif _done:
+                    _why = (f"Done · {len((st.session_state.get('acooc_covvfit_results') or {}).get(_ALL, {}).get('locations') or [])}"
+                            f" location(s)")
+                else:
+                    _why = f"{len(_cv_locs)} location(s), {_past} days back"
                 if st.button("Re-run CovvFit" if _done else "Run CovvFit",
                              key="acooc_btn_covvfit", use_container_width=True,
-                             disabled=bool(_open) or not _ready,
+                             type=("primary" if _changed_cvf and not _scope["pending"]
+                                   and not _outstanding else "secondary"),
+                             disabled=(bool(_open) or not _ready or not _cv_locs
+                                       or _scope["pending"]),
                              help=("Running…" if _open else
                                    "Available once the deconvolution is done." if not _ready else
-                                   f"Growth advantage of each panel variant, from the "
-                                   f"{len(_locs)} location(s) with a deconvolution; "
+                                   "Choose at least one location in CovvFit settings."
+                                   if not _cv_locs else
+                                   f"Growth advantage of each panel variant, shared by "
+                                   f"{len(_cv_locs)} location(s); "
                                    f"fits {_cv_d0} – {str(_run_d1)[:10]}, predicts "
                                    f"{_h} days ahead.")):
                     _tid = celery_app.send_task(
                         "tasks.run_covvfit_lapis",
-                        kwargs={"locations": _locs, "start_date": _cv_d0,
+                        kwargs={"locations": _cv_locs, "start_date": _cv_d0,
                                 "end_date": _run_d1, "variants": _run_panel,
                                 "horizon": _h, "colors": _variant_colors()}).id
                     st.session_state["acooc_covvfit_tasks"] = {_ALL: _tid}
+                    st.session_state["acooc_covvfit_used"] = list(_now_cvf)
                     st.session_state["acooc_covvfit_results"] = {}
                     _failed.pop("covvfit", None)
                     st.session_state.setdefault("acooc_phase_t0", {}).pop("covvfit", None)
-                    logger.info(f"CovvFit submitted for {len(_locs)} location(s)")
+                    logger.info(f"CovvFit submitted for {len(_cv_locs)} location(s)")
                     st.rerun()
-                with st.expander("CovvFit settings", expanded=False):
-                    st.slider("Days of past data to fit", 30, 365, 180, step=1,
-                              key="acooc_covvfit_past",
+                st.caption(_why)
+                with st.expander("CovvFit settings", expanded=False, icon=_SETTINGS_ICON):
+                    _kept("multiselect", "Locations", "acooc_covvfit_locs", list(_all_locs),
+                                   options=_all_locs,
+                                   help="covvfit fits one growth advantage per variant, "
+                                        "shared by these locations: more locations, "
+                                        "narrower ranges. Each takes its own "
+                                        "deconvolution over the period below.")
+                    _unchecked = [l for l in _cv_locs if l not in location_names]
+                    if _unchecked:
+                        st.caption(
+                            "The panel check covered only "
+                            + ", ".join(l.split("(")[0].strip() for l in location_names)
+                            + ". A location where the panel misses a variant biases the "
+                            "shared advantages: check the others first, or leave them out.")
+                    _kept("slider", "Days of past data to fit", "acooc_covvfit_past", 180,
+                              min_value=30, max_value=365, step=1,
                               help="Counted back from the run's end date. Longer than a "
                                    "typical run on purpose: a month of samples is too "
                                    "short for a stable fit with several variants.")
-                    st.slider("Days to predict after the last date", 7, 120, 60, step=1,
-                              key="acooc_covvfit_horizon",
+                    _kept("slider", "Days to predict after the last date",
+                              "acooc_covvfit_horizon", 60, min_value=7, max_value=120, step=1,
                               help="covvfit's --horizon.")
 
             def _btn_scan():
@@ -892,9 +1220,24 @@ def app():
                 _done = (bool(st.session_state.get("acooc_xcheck_tasks"))
                          and not _stage_open(*_RUN_STAGES[2])
                          and not _stage_open(*_RUN_STAGES[3]))
+                if _scope["pending"]:
+                    _why = _scope["block"]
+                elif _wait_graph:
+                    _why = "Waits for the panel check of every location"
+                elif _resume:
+                    _why = "Stopped: resumes the stopped locations, then the cross-check"
+                elif _scan_req and _done:
+                    _why = "Done for " + ", ".join(
+                        _l.split("(")[0].strip() for _l in st.session_state.get("acooc_scanner_results") or {})
+                elif _scan_req:
+                    _why = ("Running: the lineages it finds appear when the cross-check "
+                            "ends (progress above)")
+                else:
+                    _why = "Looks outside your panel in every location"
                 if st.button("Resume deep scan" if _resume else "Run deep scan",
                              key="acooc_btn_scan", use_container_width=True,
-                             disabled=_wait_graph or (_scan_req and not _resume),
+                             disabled=(_wait_graph or (_scan_req and not _resume)
+                                       or _scope["pending"]),
                              help=("Waits for the panel check of every location."
                                    if _wait_graph else
                                    ("Done for these results; press ▶ Run for new ones."
@@ -914,6 +1257,7 @@ def app():
                     st.session_state["acooc_want_scan"] = True
                     st.session_state["acooc_stopped"] = False
                     st.rerun()
+                st.caption(_why)
 
             def _btn_stop():
                 if st.button("■ Stop", key="acooc_btn_stop", use_container_width=True,
@@ -1503,24 +1847,15 @@ def app():
                   elif _cvf:
                       st.error(f"CovvFit failed: {_cvf}")
                   if _cvr and not _covvfit_outstanding:
-                      _render_covvfit(_cvr)
+                      _render_covvfit(_cvr, color_map=_variant_colors(),
+                                      checked=list(location_names))
 
 
             if _active_section in ("Panel check", "Lineages"):
               # panel-changed warning: scanner findings reflect the panel that was
               # run, so flag when the current selection differs.
-              _ran_sc = st.session_state.get("acooc_ran_panel")
-              _sc_stale = (
-                  (_ran_sc is not None and sorted(all_selected_variants) != _ran_sc)
-                  or (st.session_state.get("acooc_ran_dates") is not None
-                      and (start_date.isoformat(), end_date.isoformat())
-                      != st.session_state.get("acooc_ran_dates"))
-                  or any(c not in st.session_state.get("acooc_ran_locations", [])
-                         for c in selected_locations)
-              )
-              if _sc_stale:
-                  st.warning("⚠ Re-run needed — the panel, dates, or locations "
-                             "changed since these results were computed.")
+              # (2026-10-09: the run line above the progress box says when
+              # the left side differs from the run)
               # ── Panel completeness (at top of scanner — shows what each city's
               #    signal is made of, before the findings that fill the gaps) ─────
               _cr_all = st.session_state.get("acooc_cooc_results", {})
@@ -1643,14 +1978,6 @@ def app():
                 _ls1, _ls2 = st.columns([1, 2])
                 with _ls1:
                     _btn_scan()
-                if _cooc_outstanding and not st.session_state.get("acooc_want_scan"):
-                    with _ls2:
-                        st.caption("Available once the panel check is in for "
-                                   "every location.")
-                elif _scan_outstanding:
-                    with _ls2:
-                        st.caption("Deep scan running: the lineages it finds appear "
-                                   "when the cross-check ends (progress above).")
                 # ── Variants: one city selector; the tree (left) and one table for
                 #    everything co-occurrence says (right); then the chosen city's
                 #    signal over time. Uses the panel that was RUN, so the colours
