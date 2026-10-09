@@ -483,6 +483,28 @@ def run_cooc_deep_scan_lapis(self, location: str, start_date: str, end_date: str
 
 
 @app.task(bind=True)
+def run_covvfit_lapis(self, locations: list, start_date: str, end_date: str,
+                      variants: list, horizon: int = 60, colors: dict = None):
+    """CovvFit (2026-10-08): relative growth advantages of the panel variants,
+    from the run's locations, panel and dates (covvfit_runner): LolliPop per
+    location without smoothing, then `covvfit infer`. Started from the page's
+    "Run CovvFit" once the deconvolution is done; colors = the page's
+    variant colours, so both figures match."""
+    from datetime import datetime
+    from covvfit_runner import run_covvfit_lapis as _run
+    _p = _reporter(f"task_progress:{self.request.id}", total=3)
+    try:
+        r = _run(locations, datetime.fromisoformat(start_date),
+                 datetime.fromisoformat(end_date), variants, horizon=horizon,
+                 colors=colors, progress=_p)
+        _p(3, "CovvFit complete.")
+        return r
+    except Exception as e:
+        _p(0, f"Error: {str(e)}")
+        raise
+
+
+@app.task(bind=True)
 def run_cooc_lineages_check_lapis(self, location: str, start_date: str, end_date: str,
                                   variants: list, panel: list):
     """Phase 3, cross-check (2026-10-02): the ★ marker check for lineages the
