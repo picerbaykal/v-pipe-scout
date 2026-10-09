@@ -119,6 +119,9 @@ def near_panel_label(
     confirmed_present: Set[str],
     confirmed_absent: Set[str],
     variant_signatures: Dict[str, Set[str]],
+    in_tree=None,
+    support: Optional[Dict[str, float]] = None,
+    stats: Optional[Dict[str, int]] = None,
 ) -> str:
     """For an UNEXPLAINED read: "variant + 1 change" label, else "".
 
@@ -131,27 +134,55 @@ def near_panel_label(
                                                         -> "XFG − 23021G"
     Needs >= 2 of the variant's mutations on the read so the match means
     something. Reads differing at 2+ positions from every variant return "".
-    Independent of which other variants are in the panel."""
-    best = None
+    Independent of which other variants are in the panel.
+
+    Several variants one change away: the one sharing more mutations with the
+    read. Still a tie (2026-10-09; was: first in panel order, so the label
+    changed with the panel's order):
+      1. pango decides: in_tree(variant, sign, mut) -> True when a designated
+         sublineage of that variant has exactly this change (where_in_tree);
+         if exactly one tied variant has it, it is that one;
+      2. else the dominant variant: support = {variant: reads it explains
+         that day}, the most supported wins;
+      3. else alphabetical (stable, but arbitrary: counted as unresolved).
+    stats, if given, counts {"ties", "pango", "dominant", "unresolved"}."""
+    cands = []
     for name, sig in variant_signatures.items():
-        if len(confirmed_present & sig) < 2:
+        shared = len(confirmed_present & sig)
+        if shared < 2:
             continue
         extra = confirmed_present - sig
         missing = sig & confirmed_absent
-        n = len(extra) + len(missing)
-        if n == 1 and best is None:
-            best = (name, extra, missing)
-        elif n == 1 and best is not None:
-            # tie between variants: keep the one sharing more mutations
-            if len(confirmed_present & sig) > len(confirmed_present &
-                                                   variant_signatures[best[0]]):
-                best = (name, extra, missing)
-    if best is None:
+        if len(extra) + len(missing) == 1:
+            if extra:
+                cands.append((name, "+", next(iter(extra)), shared))
+            else:
+                cands.append((name, "−", next(iter(missing)), shared))
+    if not cands:
         return ""
-    name, extra, missing = best
-    if extra:
-        return f"{name} + {next(iter(extra))}"
-    return f"{name} − {next(iter(missing))}"
+    top = max(c[3] for c in cands)
+    tied = sorted((c for c in cands if c[3] == top), key=lambda c: c[0])
+    best = tied[0]
+    if len(tied) > 1:
+        how = "unresolved"
+        if in_tree is not None:
+            known = [c for c in tied if in_tree(c[0], c[1], c[2])]
+            if len(known) == 1:
+                best, how = known[0], "pango"
+            elif known:
+                tied = known
+        if how == "unresolved" and support:
+            def _sup(c):
+                return float(support.get(c[0], 0) or 0)
+            sup = sorted(tied, key=lambda c: (-_sup(c), c[0]))
+            if _sup(sup[0]) > _sup(sup[1]):
+                best, how = sup[0], "dominant"
+        if how == "unresolved":
+            best = tied[0]
+        if stats is not None:
+            stats["ties"] = stats.get("ties", 0) + 1
+            stats[how] = stats.get(how, 0) + 1
+    return f"{best[0]} {best[1]} {best[2]}"
 
 
 # ── Per-batch DataFrame processing ──────────────────────────────────────
@@ -161,6 +192,8 @@ def annotate_cooc_dataframe(
     positions: List[int],
     amp_dict: Dict[int, List[str]],
     variant_signatures: Dict[str, Set[str]],
+    in_tree=None,
+    stats: Optional[Dict[str, int]] = None,
 ) -> pd.DataFrame:
     """
     Annotate each row of a cooc DataFrame with confirmed_present /
@@ -189,6 +222,10 @@ def annotate_cooc_dataframe(
 
     annotated_rows = []
     dropped = 0
+    parsed = []
+    # reads each panel variant explains, per date: the "dominant variant"
+    # tie-breaker of near_panel_label (2026-10-09)
+    support: Dict[str, Dict[str, float]] = {}
     for row in df.to_dict("records"):
         if require_covered:
             if any(row.get(f"[{p}]", "N") in uncovered_bases for p in positions):
@@ -196,7 +233,15 @@ def annotate_cooc_dataframe(
                 continue
         cp, ca = row_to_confirmed_sets(row, positions, amp_dict, include_dels)
         classification = classify_pattern(cp, ca, variant_signatures)
-        near = (near_panel_label(cp, ca, variant_signatures)
+        if classification == "matched":
+            day = support.setdefault(str(row["date"]), {})
+            for name, sig in variant_signatures.items():
+                if cp.issubset(sig) and not (sig & ca):
+                    day[name] = day.get(name, 0) + float(row["count"] or 0)
+        parsed.append((row, cp, ca, classification))
+    for row, cp, ca, classification in parsed:
+        near = (near_panel_label(cp, ca, variant_signatures, in_tree=in_tree,
+                                 support=support.get(str(row["date"])), stats=stats)
                 if classification == "unexplained" else "")
         annotated_rows.append({
             "date": row["date"],

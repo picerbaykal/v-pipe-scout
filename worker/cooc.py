@@ -137,6 +137,35 @@ def get_panel_parent_map() -> dict:
     return _PANEL_PARENT_MAP
 
 
+_CHILDREN_MAP = None
+_IN_TREE_CACHE: Dict[tuple, bool] = {}
+
+
+def in_tree(variant: str, sign: str, mut: str) -> bool:
+    """True when a designated sublineage of `variant` has exactly this change
+    ('+' gained / '−' lost), from the same pango tree as the scanner
+    (process.near_changes.where_in_tree). The tie-breaker of the "± 1 change"
+    label (2026-10-09). Cached: the same few changes come back on every date."""
+    global _CHILDREN_MAP
+    key = (variant, sign, mut)
+    if key in _IN_TREE_CACHE:
+        return _IN_TREE_CACHE[key]
+    from process.near_changes import where_in_tree
+    if _CHILDREN_MAP is None:
+        ch: Dict[str, list] = {}
+        for lin, par in get_panel_parent_map().items():
+            if par:
+                ch.setdefault(par, []).append(lin)
+        _CHILDREN_MAP = ch
+    try:
+        ok = where_in_tree(variant, sign, mut, get_all_lineage_signatures(),
+                           _CHILDREN_MAP) is not None
+    except Exception:
+        ok = False
+    _IN_TREE_CACHE[key] = ok
+    return ok
+
+
 def _build_variant_signatures(
     variants: List[str],
     pango_loader: PangoLoader,
@@ -535,6 +564,8 @@ def run_cooc_panel_completeness(
         # ALL reads, explained or not: tells the scanner whether a later sample
         # could have shown a one-day finding again (2026-10-02)
         position_coverage: Dict[str, Dict[str, int]] = {}
+        # "± 1 change" ties and how they were decided (2026-10-09)
+        tie_stats: Dict[str, int] = {}
 
         async def _one_query(session, batch_idx, batch_positions, date_str):
             async with sem:
@@ -556,7 +587,8 @@ def run_cooc_panel_completeness(
             import pandas as _pd
             df = _pd.DataFrame(rows)
             annotated = annotate_cooc_dataframe(
-                df, comp_positions, amp_dict, variant_signatures
+                df, comp_positions, amp_dict, variant_signatures,
+                in_tree=in_tree, stats=tie_stats,
             )
             per_date = panel_completeness_by_date(annotated)
             if not per_date.empty:
@@ -600,6 +632,12 @@ def run_cooc_panel_completeness(
             f"[cooc][{location}] processed {len(per_date_results)} dates, "
             f"{len(per_date_unexplained)} with unexplained patterns"
         )
+        if tie_stats.get("ties"):
+            logger.info(
+                f"[cooc][{location}] ± 1 change ties: {tie_stats['ties']} read patterns "
+                f"(pango {tie_stats.get('pango', 0)}, dominant variant "
+                f"{tie_stats.get('dominant', 0)}, unresolved/alphabetical "
+                f"{tie_stats.get('unresolved', 0)})")
         return per_date_results, per_date_unexplained, position_coverage
 
     try:
