@@ -21,6 +21,7 @@ from __future__ import annotations
 import base64
 import csv
 import io
+import json
 import logging
 import subprocess
 from datetime import datetime
@@ -79,11 +80,24 @@ def pairwise_rows(csv_text: str) -> List[dict]:
     return out
 
 
+# A location's deconvolution without smoothing is kept this long (seconds) in
+# the cache, so re-running CovvFit with other settings or locations doesn't
+# fetch it from LAPIS again (2026-10-09: ~40 s per location over 180 days).
+CACHE_SECONDS = 3600
+
+
+def cache_key(location: str, start_date: datetime, end_date: datetime,
+              variants: List[str]) -> str:
+    return (f"covvfit:deconv:{location}:{start_date.date()}:{end_date.date()}:"
+            f"{','.join(sorted(variants))}:{NO_SMOOTHING_BANDWIDTH}")
+
+
 def run_covvfit_lapis(locations: List[str], start_date: datetime, end_date: datetime,
                       variants: List[str], horizon: int = 60,
                       colors: Optional[Dict[str, str]] = None,
                       progress: Optional[Callable] = None,
-                      deconvolve: Optional[Callable] = None) -> Dict:
+                      deconvolve: Optional[Callable] = None,
+                      cache=None) -> Dict:
     """CovvFit on the run's locations, panel and dates. Returns
     {figure_png, figure_pdf (base64), pairwise: [...], pairwise_csv,
     predictions_csv, n_rows, locations, variants, date_min, date_max, horizon,
@@ -91,7 +105,8 @@ def run_covvfit_lapis(locations: List[str], start_date: datetime, end_date: date
 
     deconvolve(location, start, end, variants) -> LolliPop JSON; defaults to
     abundance_cooc.run_deconv_lapis without smoothing (a parameter so tests
-    can pass their own)."""
+    can pass their own). cache: an object with get(key) and set(key, value,
+    ex=seconds), e.g. the worker's redis client, or None."""
     if deconvolve is None:
         from abundance_cooc import run_deconv_lapis
 
@@ -105,11 +120,28 @@ def run_covvfit_lapis(locations: List[str], start_date: datetime, end_date: date
             progress(step, msg, frac)
 
     # 1-2. per-location deconvolution without smoothing -> one table
-    rows, skipped = [], {}
+    rows, skipped, from_cache = [], {}, []
     for i, loc in enumerate(locations):
         _p(1, f"Deconvolution without smoothing: {loc}...", i / max(n, 1))
+        key = cache_key(loc, start_date, end_date, variants)
         try:
-            got = deconv_rows(loc, deconvolve(loc, start_date, end_date, variants))
+            raw = None
+            if cache is not None:
+                try:
+                    raw = cache.get(key)
+                except Exception:
+                    raw = None
+            if raw:
+                deconvolved = json.loads(raw)
+                from_cache.append(loc)
+            else:
+                deconvolved = deconvolve(loc, start_date, end_date, variants)
+                if cache is not None:
+                    try:
+                        cache.set(key, json.dumps(deconvolved), ex=CACHE_SECONDS)
+                    except Exception as e:
+                        logger.warning(f"[covvfit] could not cache {loc}: {e}")
+            got = deconv_rows(loc, deconvolved)
         except Exception as e:                       # one city must not sink the others
             logger.warning(f"[covvfit] deconvolution failed in {loc}: {e}")
             skipped[loc] = f"deconvolution failed: {e}"[:300]
@@ -126,7 +158,7 @@ def run_covvfit_lapis(locations: List[str], start_date: datetime, end_date: date
     used_vars = [v for v in variants if v in set(df["variant"])]
     used_locs = [l for l in locations if l in set(df["location"])]
     logger.info(f"[covvfit] input: {len(df)} rows, {len(used_locs)} location(s), "
-                f"{len(used_vars)} variant(s)")
+                f"{len(used_vars)} variant(s); {len(from_cache)} from the cache")
 
     # 3. covvfit infer
     _p(2, f"covvfit: fitting {len(used_vars)} variants in {len(used_locs)} location(s)...")
@@ -162,7 +194,7 @@ def run_covvfit_lapis(locations: List[str], start_date: datetime, end_date: date
         result = {"figure_png": base64.b64encode(png.read_bytes()).decode("ascii"),
                   "n_rows": int(len(df)), "locations": used_locs, "variants": used_vars,
                   "date_min": d_min, "date_max": d_max, "horizon": int(horizon),
-                  "skipped": skipped}
+                  "skipped": skipped, "from_cache": from_cache}
         pdf = out / "figure.pdf"
         if pdf.exists():
             result["figure_pdf"] = base64.b64encode(pdf.read_bytes()).decode("ascii")

@@ -496,7 +496,7 @@ def run_covvfit_lapis(self, locations: list, start_date: str, end_date: str,
     try:
         r = _run(locations, datetime.fromisoformat(start_date),
                  datetime.fromisoformat(end_date), variants, horizon=horizon,
-                 colors=colors, progress=_p)
+                 colors=colors, progress=_p, cache=redis_client)
         _p(3, "CovvFit complete.")
         return r
     except Exception as e:

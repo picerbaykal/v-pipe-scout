@@ -83,3 +83,24 @@ def test_no_samples_anywhere_raises():
     with pytest.raises(RuntimeError, match="No deconvolved samples"):
         run_covvfit_lapis(["Broken"], datetime(2026, 1, 20), datetime(2026, 4, 5),
                           ["KP.2", "XFG"], deconvolve=_fake_deconvolve)
+
+
+class _DictCache(dict):
+    def set(self, k, v, ex=None):
+        self[k] = v
+
+
+def test_second_run_uses_the_cache():
+    calls = []
+
+    def counting(loc, d0, d1, vs):
+        calls.append(loc)
+        return _fake_deconvolve(loc, d0, d1, vs)
+    cache = _DictCache()
+    args = (["Lugano (TI)"], datetime(2026, 1, 20), datetime(2026, 4, 5), ["KP.2", "XFG"])
+    for _ in range(2):
+        try:
+            run_covvfit_lapis(*args, deconvolve=counting, cache=cache)
+        except RuntimeError:
+            pass                      # covvfit itself may be missing here; the cache is what's tested
+    assert calls == ["Lugano (TI)"] and len(cache) == 1

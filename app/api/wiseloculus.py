@@ -15,7 +15,6 @@ from interface import MutationType
 
 from process.mutations import lapis_mutation_to_pos
 
-
 # Constants for fallback date range
 # When API fails, use the last 3 months instead of an entire year to avoid huge API calls
 def get_fallback_date_range() -> Tuple[datetime, datetime]:
@@ -27,32 +26,30 @@ def get_fallback_date_range() -> Tuple[datetime, datetime]:
     start_date = end_date - timedelta(days=90)  # Approximately 3 months
     return start_date, end_date
 
-
 FALLBACK_START_DATE, FALLBACK_END_DATE = get_fallback_date_range()
 
 # Connection pool limits to prevent "too many open files" errors
 # These limits control the maximum number of concurrent HTTP connections
 MAX_CONCURRENT_CONNECTIONS = 100  # Total connections per session
-MAX_CONNECTIONS_PER_HOST = 50  # Connections per host
-
+MAX_CONNECTIONS_PER_HOST = 50    # Connections per host
 
 class WiseLoculusLapis(Lapis):
     """Wise-Loculus Instance API"""
-
+    
     @staticmethod
     def _handle_connection_error(error: Exception, context: str = "") -> APIError:
         """
         Convert connection errors to user-friendly APIError messages.
-
+        
         Args:
             error: The exception that occurred
             context: Additional context about where the error occurred
-
+            
         Returns:
             APIError with user-friendly message
         """
         error_msg = str(error)
-
+        
         if "too many open files" in error_msg.lower():
             return APIError(
                 f"Too many concurrent connections to the API server. This can happen when querying many locations or a long date range. Try reducing the date range or querying fewer locations at once",
@@ -70,13 +67,13 @@ class WiseLoculusLapis(Lapis):
     def _mutations_to_and_query(self, mutations: List[str]) -> str:
         """
         Convert a list of mutations to an AND query string for advancedQuery.
-
+        
         Args:
             mutations: List of mutations (e.g., ["23149T", "23224T", "23311T"])
-
+            
         Returns:
             str: AND query string (e.g., "23149T & 23224T & 23311T")
-
+            
         Examples:
             >>> _mutations_to_and_query(["23149T"])
             "23149T"
@@ -105,29 +102,29 @@ class WiseLoculusLapis(Lapis):
         # Negative lookahead (?!of) prevents matching "3-of" in "[3-of: ...]"
         # Note: No trailing \b because mutations can end with "-" or "." which are not word chars
         pattern = r'(!\s*)?\b([A-Za-z0-9]+:)?(?:[A-Z])?(\d+)[A-Z\-\.](?!of)'
-
+        
         def replace_match(match):
             gene_prefix = match.group(2) or "main:"
             position = match.group(3)
             return f"!{gene_prefix}{position}N"
-
+            
         return re.sub(pattern, replace_match, query)
 
     async def sample_mutations(
-            self,
+            self, 
             type: MutationType,
-            date_range: Tuple[datetime, datetime],
+            date_range: Tuple[datetime, datetime], 
             locationName: Optional[str] = None,
             min_proportion: float = 0.01,
             nucleotide_mutations: Optional[List[str]] = None,
             amino_acid_mutations: Optional[List[str]] = None,
-    ) -> pd.DataFrame:
+        ) -> pd.DataFrame:
         """
         Fetches nucleotide mutations for a given date range and optional location.
         Fetches mutations (nucleotide or amino acid) for a given date range and optional location.
         Filters for sequences/reads with particular nucleotide or amino acid mutations, depending on the specified mutation type and provided filters.
-
-        Returns a DataFrame with
+        
+        Returns a DataFrame with 
         Columns: ['mutation', 'count', 'coverage', 'proportion', 'sequenceName', 'mutationFrom', 'mutationTo', 'position']
         """
 
@@ -135,7 +132,7 @@ class WiseLoculusLapis(Lapis):
             "samplingDateFrom": date_range[0].strftime('%Y-%m-%d'),
             "samplingDateTo": date_range[1].strftime('%Y-%m-%d'),
             "locationName": locationName,
-            "minProportion": min_proportion,
+            "minProportion": min_proportion, 
             "orderBy": "proportion",
             "limit": 10000,  # Adjust limit as needed
             "dataFormat": "JSON",
@@ -157,12 +154,12 @@ class WiseLoculusLapis(Lapis):
             return pd.DataFrame()
 
         try:
-            timeout = aiohttp.ClientTimeout(total=30)
+            timeout = aiohttp.ClientTimeout(total=30) 
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.get(
-                        endpoint,
-                        params=payload,
-                        headers={'accept': 'application/json'}
+                    endpoint,
+                    params=payload,
+                    headers={'accept': 'application/json'}
                 ) as response:
                     if response.status == 200:
                         data = await response.json()
@@ -382,6 +379,13 @@ class WiseLoculusLapis(Lapis):
     # Dates per /component/nucleotideMutationsOverTime request: keeps each
     # request well under the timeout for a full panel (~150 mutations).
     _TALLYMUT_DATE_BLOCK = 30
+    # At most this many of those requests at once (2026-10-09). A full panel
+    # over 180 days takes LAPIS ~40 s per request; 5 at once came back as
+    # 504 (gateway timeout), so more in parallel makes it fail, not faster.
+    _TALLYMUT_PARALLEL = 2
+    # A request answered 502/503/504, or cut off by a timeout or a dropped
+    # connection, is tried again after these pauses (seconds).
+    _TALLYMUT_RETRY_WAITS = (5, 20)
 
     @staticmethod
     def _bare_mutation(mutation: str) -> str:
@@ -392,22 +396,28 @@ class WiseLoculusLapis(Lapis):
 
     @staticmethod
     def _panel_mutations(variants: List[str], pango_loader,
-                         cowwid_variants=None) -> List[str]:
+                         cowwid_variants=None, informative_only: bool = False) -> List[str]:
         """Every substitution of every panel variant ("22896T"), sorted by
         position. Deletions are left out (LolliPop runs with
         remove_deletions). Reconstructed nodes (e.g. BA.3.2) use their cowwid
-        signature, as the variant-membership columns do."""
+        signature, as the variant-membership columns do.
+
+        informative_only (2026-10-09): leave out the mutations EVERY panel
+        variant carries. LolliPop drops those rows anyway (general_preprocess
+        "remove uninformative mutations": membership sum 0 or all), so
+        fetching them only makes the LAPIS request bigger and slower."""
         recon = getattr(pango_loader, "_reconstructed_signatures", None) or {}
-        muts = set()
+        per_variant = []
         for v in variants:
             if v in recon and cowwid_variants and v in cowwid_variants:
                 sig = cowwid_variants[v]
             else:
                 sig = pango_loader.get_signature(v)
-            for m in sig or ():
-                m = str(m).strip()
-                if re.match(r"^\d+[ACGT]$", m):
-                    muts.add(m)
+            per_variant.append({str(m).strip() for m in (sig or ())
+                                if re.match(r"^\d+[ACGT]$", str(m).strip())})
+        muts = set().union(*per_variant) if per_variant else set()
+        if informative_only and len(per_variant) > 1:
+            muts -= set.intersection(*per_variant)
         return sorted(muts, key=lambda m: (int(re.match(r"^(\d+)", m).group(1)), m))
 
     @staticmethod
@@ -484,13 +494,38 @@ class WiseLoculusLapis(Lapis):
             raise self._handle_connection_error(
                 e, f"fetching mutation counts for {locationName} {dates[0]}…{dates[-1]}")
 
+    async def _fetch_tallymut_block_retry(self, session, locationName, mutations, dates,
+                                          gate: "asyncio.Semaphore") -> dict:
+        """_fetch_tallymut_block, at most _TALLYMUT_PARALLEL at once (gate),
+        tried again after a gateway error (502/503/504), a timeout or a
+        dropped connection. Any other error, or the last failure, is raised."""
+        waits = list(self._TALLYMUT_RETRY_WAITS)
+        while True:
+            try:
+                async with gate:
+                    return await self._fetch_tallymut_block(session, locationName,
+                                                            mutations, dates)
+            except Exception as e:
+                status = getattr(e, "status_code", None)
+                transient = (status in (502, 503, 504)
+                             or any(f"status {c}" in str(e) for c in (502, 503, 504))
+                             or isinstance(
+                    e, (asyncio.TimeoutError, aiohttp.ClientConnectionError))
+                    or "timeout" in str(e).lower())
+                if not transient or not waits:
+                    raise
+                wait = waits.pop(0)
+                logging.warning(f"get_tallymut: {locationName} {dates[0]}…{dates[-1]} "
+                                f"failed ({e}); trying again in {wait} s")
+                await asyncio.sleep(wait)
+
     async def get_tallymut(
             self,
             locationName: str,
             date_range: Tuple[datetime, datetime],
             variants: List[str],
             pango_loader,
-            cowwid_variants=None,  # fallback for reconstructed nodes
+            cowwid_variants=None, #fallback for reconstructed nodes
             reference_positions: set = None,
     ) -> pd.DataFrame:
         """
@@ -529,7 +564,9 @@ class WiseLoculusLapis(Lapis):
         if reference_positions:
             logging.info("get_tallymut: reference_positions is no longer used")
 
-        mutations = self._panel_mutations(variants, pango_loader, cowwid_variants)
+        mutations = self._panel_mutations(variants, pango_loader, cowwid_variants,
+                                          informative_only=True)
+        n_shared = len(self._panel_mutations(variants, pango_loader, cowwid_variants)) - len(mutations)
         if not mutations:
             logging.warning(
                 f"No mutations found for variants {variants} — "
@@ -550,7 +587,8 @@ class WiseLoculusLapis(Lapis):
         blocks = [dates[i:i + n] for i in range(0, len(dates), n)]
         logging.info(
             f"Fetching tallymut: {locationName} {dates[0]} → {dates[-1]} | "
-            f"{len(variants)} variants | {len(mutations)} mutations | "
+            f"{len(variants)} variants | {len(mutations)} mutations "
+            f"(+{n_shared} carried by every panel variant, not fetched) | "
             f"{len(dates)} sampling dates in {len(blocks)} request(s)"
         )
 
@@ -559,9 +597,10 @@ class WiseLoculusLapis(Lapis):
             limit_per_host=MAX_CONNECTIONS_PER_HOST
         )
         timeout = aiohttp.ClientTimeout(total=120)
+        gate = asyncio.Semaphore(self._TALLYMUT_PARALLEL)
         async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
             results = await asyncio.gather(
-                *[self._fetch_tallymut_block(session, locationName, mutations, b)
+                *[self._fetch_tallymut_block_retry(session, locationName, mutations, b, gate)
                   for b in blocks],
                 return_exceptions=True,
             )
@@ -821,10 +860,11 @@ class WiseLoculusLapis(Lapis):
                     raise RuntimeError(result["error"])
                 return result.get("data", {})
 
+
     async def get_date_range(self) -> Tuple[Optional[datetime], Optional[datetime]]:
         """
         Fetches all available sampling dates and returns the earliest and latest dates.
-
+        
         Returns:
             Tuple[Optional[datetime], Optional[datetime]]: (earliest_date, latest_date) or (None, None) if no data
         """
@@ -832,18 +872,18 @@ class WiseLoculusLapis(Lapis):
             timeout = aiohttp.ClientTimeout(total=30)  # 30 second timeout for this query
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.get(
-                        f'{self.server_ip}/sample/aggregated',
-                        params={'fields': 'samplingDate'},
-                        headers={'accept': 'application/json'}
+                    f'{self.server_ip}/sample/aggregated',
+                    params={'fields': 'samplingDate'},
+                    headers={'accept': 'application/json'}
                 ) as response:
                     if response.status == 200:
                         data = await response.json()
                         sample_data = data.get('data', [])
-
+                        
                         if not sample_data:
                             logging.warning("No sampling date data available")
                             return None, None
-
+                        
                         # Extract all dates and convert to datetime objects
                         dates = []
                         for entry in sample_data:
@@ -853,23 +893,22 @@ class WiseLoculusLapis(Lapis):
                                     dates.append(date_obj)
                                 except ValueError as e:
                                     logging.warning(f"Invalid date format: {entry['samplingDate']}: {e}")
-
+                        
                         if not dates:
                             logging.warning("No valid sampling dates found")
                             return None, None
-
+                        
                         earliest_date = min(dates)
                         latest_date = max(dates)
-
-                        logging.info(
-                            f"Date range: {earliest_date.strftime('%Y-%m-%d')} to {latest_date.strftime('%Y-%m-%d')}")
+                        
+                        logging.info(f"Date range: {earliest_date.strftime('%Y-%m-%d')} to {latest_date.strftime('%Y-%m-%d')}")
                         return earliest_date, latest_date
-
+                        
                     else:
                         logging.error(f"Failed to fetch sampling dates: {response.status}")
                         logging.error(await response.text())
                         return None, None
-
+                        
         except Exception as e:
             logging.error(f"Error fetching date range: {e}")
             return None, None
@@ -878,89 +917,88 @@ class WiseLoculusLapis(Lapis):
         """
         Get the date range with caching to avoid repeated API calls.
         Returns pandas Timestamps for compatibility with Streamlit date inputs.
-
+        
         Args:
             cache_key: Unique key for this cache (allows multiple cached ranges)
-
+            
         Returns:
             Tuple[datetime, datetime]: Start and end dates as pandas Timestamps
         """
         import streamlit as st
         import asyncio
         import pandas as pd
-
+        
         # Create a unique session state key
         session_key = f"wiseloculus_date_range_{cache_key}"
-
+        
         # Check if we already have cached date range
         if session_key in st.session_state:
             cached_range = st.session_state[session_key]
             logging.debug(f"Using cached date range for {cache_key}: {cached_range}")
             return cached_range
-
+        
         # Fetch new date range
         try:
             earliest, latest = asyncio.run(self.get_date_range())
-
+            
             if earliest and latest:
                 # Convert to pandas Timestamps for Streamlit compatibility
                 date_range = (pd.to_datetime(earliest), pd.to_datetime(latest))
-                logging.info(
-                    f"Fetched date range for {cache_key}: {date_range[0].strftime('%Y-%m-%d')} to {date_range[1].strftime('%Y-%m-%d')}")
+                logging.info(f"Fetched date range for {cache_key}: {date_range[0].strftime('%Y-%m-%d')} to {date_range[1].strftime('%Y-%m-%d')}")
             else:
                 # Fallback to default dates
                 date_range = (pd.to_datetime(FALLBACK_START_DATE), pd.to_datetime(FALLBACK_END_DATE))
                 logging.warning(f"API date range not available for {cache_key}, using defaults: {date_range}")
-
+                
         except Exception as e:
             # Fallback to default dates
             date_range = (pd.to_datetime(FALLBACK_START_DATE), pd.to_datetime(FALLBACK_END_DATE))
             logging.warning(f"Error fetching date range for {cache_key}: {e}, using defaults")
-
+        
         # Cache the result
         st.session_state[session_key] = date_range
         return date_range
 
-    def get_cached_date_range_with_bounds(self, cache_key: str = "default") -> Tuple[
-        datetime, datetime, datetime, datetime]:
+    def get_cached_date_range_with_bounds(self, cache_key: str = "default") -> Tuple[datetime, datetime, datetime, datetime]:
         """
         Get the date range with bounds for enforcing min/max in date inputs.
-
+        
         Args:
             cache_key: Unique key for this cache
-
+            
         Returns:
             Tuple[datetime, datetime, datetime, datetime]: (start_date, end_date, min_date, max_date)
         """
         start_date, end_date = self.get_cached_date_range(cache_key)
-
+        
         # Use the same dates as bounds to enforce API limits
         # Add a small buffer for edge cases (1 day on each side)
         import pandas as pd
         buffer = pd.Timedelta(days=1)
         min_date = start_date - buffer
         max_date = end_date + buffer
-
+        
         return start_date, end_date, min_date, max_date
+    
 
     async def _component_mutations_over_time(
             self,
             endpoint: str,
             mutation_type_name: str,
-            mutations: List[str],
+            mutations: List[str], 
             date_ranges: List[Tuple[datetime, datetime]],
             locationName: str
-    ) -> dict[str, Any]:
+        ) -> dict[str, Any]:
         """
         Helper method for fetching mutations over time data from component endpoints.
-
+        
         Args:
             endpoint: The API endpoint name (e.g., "aminoAcidMutationsOverTime")
             mutation_type_name: Display name for logging (e.g., "amino acid")
             mutations: List of mutations
             date_ranges: List of date range tuples
             locationName: Location name to filter by
-
+            
         Returns:
             Dict containing the API response with mutations, dateRanges, and data matrix
         """
@@ -980,17 +1018,17 @@ class WiseLoculusLapis(Lapis):
         }
 
         logging.debug(f"Fetching {mutation_type_name} mutations over time with payload: {payload}")
-
+        
         try:
             timeout = aiohttp.ClientTimeout(total=30)  # 30 second timeout (consistent with other API calls)
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(
-                        f'{self.server_ip}/component/{endpoint}',
-                        headers={
-                            'accept': 'application/json',
-                            'Content-Type': 'application/json'
-                        },
-                        json=payload
+                    f'{self.server_ip}/component/{endpoint}',
+                    headers={
+                        'accept': 'application/json',
+                        'Content-Type': 'application/json'
+                    },
+                    json=payload
                 ) as response:
                     if response.status == 200:
                         data = await response.json()
@@ -1002,7 +1040,7 @@ class WiseLoculusLapis(Lapis):
                         logging.error(f"Payload: {payload}")
                         error_text = await response.text()
                         logging.error(f"Server response: {error_text}")
-
+                        
                         # Raise custom APIError for better frontend handling
                         raise APIError(
                             f"Internal Server Error: The backend API server is experiencing issues. This is not an application error.",
@@ -1033,20 +1071,20 @@ class WiseLoculusLapis(Lapis):
             )
 
     async def component_aminoAcidMutationsOverTime(
-            self,
-            mutations: List[str],
+            self, 
+            mutations: List[str], 
             date_ranges: List[Tuple[datetime, datetime]],
             locationName: str
-    ) -> dict[str, Any]:
+        ) -> dict[str, Any]:
         """
         Fetches amino acid mutations over time for a given location and specific date ranges.
         Returns counts and coverage for each mutation and date range.
-
+        
         Args:
             mutations: List of amino acid mutations in format ["S:N501Y", "N:N8N"]
             date_ranges: List of date range tuples [(start_date, end_date), ...]
             locationName: Location name to filter by
-
+            
         Returns:
             Dict containing the API response with mutations, dateRanges, and data matrix
         """
@@ -1059,20 +1097,20 @@ class WiseLoculusLapis(Lapis):
         )
 
     async def component_nucleotideMutationsOverTime(
-            self,
-            mutations: List[str],
+            self, 
+            mutations: List[str], 
             date_ranges: List[Tuple[datetime, datetime]],
             locationName: str
-    ) -> dict[str, Any]:
+        ) -> dict[str, Any]:
         """
         Fetches nucleotide mutations over time for a given location and specific date ranges.
         Returns counts and coverage for each mutation and date range.
-
+        
         Args:
             mutations: List of nucleotide mutations in format ["A5341C", "C34G"]
             date_ranges: List of date range tuples [(start_date, end_date), ...]
             locationName: Location name to filter by
-
+            
         Returns:
             Dict containing the API response with mutations, dateRanges, and data matrix
         """
@@ -1085,36 +1123,36 @@ class WiseLoculusLapis(Lapis):
         )
 
     def _generate_date_ranges(
-            self,
-            date_range: Tuple[datetime, datetime],
+            self, 
+            date_range: Tuple[datetime, datetime], 
             interval: str = "daily"
-    ) -> List[Tuple[datetime, datetime]]:
+        ) -> List[Tuple[datetime, datetime]]:
         """
         Generate date ranges based on the specified interval.
-
+        
         Args:
             date_range: Tuple of (start_date, end_date)
             interval: "daily", "weekly", or "monthly"
-
+            
         Returns:
             List of date range tuples
         """
         start_date, end_date = date_range
         date_ranges = []
-
+        
         if interval == "daily":
             current_date = start_date
             while current_date <= end_date:
                 date_ranges.append((current_date, current_date))
                 current_date += pd.Timedelta(days=1)
-
+                
         elif interval == "weekly":
             current_date = start_date
             while current_date <= end_date:
                 week_end = min(current_date + pd.Timedelta(days=6), end_date)
                 date_ranges.append((current_date, week_end))
                 current_date = week_end + pd.Timedelta(days=1)
-
+                
         elif interval == "monthly":
             current_date = start_date
             while current_date <= end_date:
@@ -1126,20 +1164,20 @@ class WiseLoculusLapis(Lapis):
                 month_end = min(next_month - pd.Timedelta(days=1), end_date)
                 date_ranges.append((current_date, month_end))
                 current_date = next_month
-
+                
         else:
             raise ValueError(f"Unsupported interval: {interval}. Use 'daily', 'weekly', or 'monthly'")
-
+            
         return date_ranges
 
     async def mutations_over_time(
-            self,
-            mutations: List[str],
-            mutation_type: MutationType,
-            date_range: Tuple[datetime, datetime],
+            self, 
+            mutations: List[str], 
+            mutation_type: MutationType, 
+            date_range: Tuple[datetime, datetime], 
             locationName: str,
             interval: str = "daily"
-    ) -> pd.DataFrame:
+        ) -> pd.DataFrame:
         """
         Fetches mutation counts, coverage, and frequency using component endpoints for specified time intervals.
 
@@ -1151,13 +1189,13 @@ class WiseLoculusLapis(Lapis):
             interval (str): Time interval - "daily" (default), "weekly", or "monthly".
 
         Returns:
-            pd.DataFrame: A MultiIndex DataFrame with mutation and samplingDate as the index,
+            pd.DataFrame: A MultiIndex DataFrame with mutation and samplingDate as the index, 
                          and count, coverage, and frequency as columns.
         """
         try:
             # Generate date ranges based on the specified interval
             date_ranges = self._generate_date_ranges(date_range, interval)
-
+            
             # Choose the appropriate component endpoint based on mutation type
             if mutation_type == MutationType.AMINO_ACID:
                 api_data = await self.component_aminoAcidMutationsOverTime(mutations, date_ranges, locationName)
@@ -1174,34 +1212,33 @@ class WiseLoculusLapis(Lapis):
             data_matrix = api_data_content.get("data", [])
 
             # Debug logging
-            logging.debug(
-                f"mutations_over_time: Received {len(api_mutations)} mutations, {len(api_date_ranges)} date ranges")
+            logging.debug(f"mutations_over_time: Received {len(api_mutations)} mutations, {len(api_date_ranges)} date ranges")
 
             # Process the data matrix
             for i, mutation in enumerate(api_mutations):
                 for j, date_range_info in enumerate(api_date_ranges):
                     if i < len(data_matrix) and j < len(data_matrix[i]):
                         mutation_data = data_matrix[i][j]
-
+                        
                         # Extract count and coverage from the API response
                         count = mutation_data.get("count", 0)
                         coverage = mutation_data.get("coverage", 0)
-
+                        
                         # Calculate frequency from count and coverage
                         frequency = count / coverage if coverage > 0 else pd.NA
-
+                        
                         # For interval-based data, use the start date as the samplingDate
                         # or use the midpoint for better representation
                         start_date = pd.to_datetime(date_range_info["dateFrom"])
                         end_date = pd.to_datetime(date_range_info["dateTo"])
-
+                        
                         if interval == "daily":
                             samplingDate = start_date.strftime('%Y-%m-%d')
                         else:
                             # Use midpoint for weekly/monthly intervals
                             midpoint = start_date + (end_date - start_date) / 2
                             samplingDate = midpoint.strftime('%Y-%m-%d')
-
+                        
                         # Add all records, even those with coverage = 0
                         # This allows us to see when data is missing vs when mutations don't exist
                         records.append({
@@ -1222,12 +1259,11 @@ class WiseLoculusLapis(Lapis):
                 # Check for duplicates
                 duplicates = df.duplicated(subset=['mutation', 'samplingDate'], keep=False)
                 if duplicates.any():
-                    logging.warning(
-                        f"Found {duplicates.sum()} duplicate mutation-date combinations, removing duplicates")
+                    logging.warning(f"Found {duplicates.sum()} duplicate mutation-date combinations, removing duplicates")
                     # Keep first occurrence of each duplicate, preferring non-zero values
                     df = df.drop_duplicates(subset=['mutation', 'samplingDate'], keep='first')
                     logging.debug(f"After deduplication: {len(df)} records remain")
-
+                
                 df.set_index(["mutation", "samplingDate"], inplace=True)
             else:
                 # Create empty DataFrame with proper MultiIndex structure
@@ -1255,19 +1291,19 @@ class WiseLoculusLapis(Lapis):
             mutations: Optional[List[str]] = None,
             advanced_query: Optional[str] = None,
             interval: str = "daily"
-    ) -> pd.DataFrame:
+        ) -> pd.DataFrame:
         """
         Fetch proportion data for a SET of mutations (AND filter) or an advanced query over time.
-
+        
         Args:
             date_range: Tuple of (start_date, end_date)
             locationName: Location name to filter by
             mutations: List of nucleotide mutations to filter by (AND condition). Used if advanced_query is None.
             advanced_query: Raw advanced query string. If provided, overrides mutations.
             interval: "daily", "weekly", or "monthly"
-
+            
         Returns:
-            DataFrame with columns: samplingDate, count, coverage, frequency
+            DataFrame with columns: samplingDate, count, coverage, frequency 
         """
         try:
             # Determine query string and mutations for coverage
@@ -1286,23 +1322,23 @@ class WiseLoculusLapis(Lapis):
 
             # Step 1: Query for reads matching query and intersection coverage simultaneously
             date_ranges = self._generate_date_ranges(date_range, interval)
-
+            
             filtered_lookup = {}  # date -> count of reads matching query
             coverage_lookup = {}  # date -> reads covering all positions
-
+            
             # Configure TCPConnector with connection limits to prevent "too many open files"
             # This prevents exhausting file descriptors when querying many locations/dates
             connector = aiohttp.TCPConnector(
                 limit=MAX_CONCURRENT_CONNECTIONS,
                 limit_per_host=MAX_CONNECTIONS_PER_HOST
             )
-
+            
             async with aiohttp.ClientSession(
-                    timeout=aiohttp.ClientTimeout(total=60),
-                    connector=connector
+                timeout=aiohttp.ClientTimeout(total=60),
+                connector=connector
             ) as session:
                 tasks = []
-
+                
                 for date_start, date_end in date_ranges:
                     # Task 1: Filtered count (reads matching query)
                     filtered_payload = {
@@ -1312,13 +1348,13 @@ class WiseLoculusLapis(Lapis):
                         "advancedQuery": query_str,
                         "fields": ["samplingDate"]
                     }
-
+                    
                     filtered_task = session.post(
                         f'{self.server_ip}/sample/aggregated',
                         headers={'accept': 'application/json', 'Content-Type': 'application/json'},
                         json=filtered_payload
                     )
-
+                    
                     # Task 2: Intersection coverage (reads covering all positions)
                     # Require non-N calls at all positions: !posN & !posN ...
                     intersection_payload = {
@@ -1328,27 +1364,27 @@ class WiseLoculusLapis(Lapis):
                         "advancedQuery": coverage_query_str,
                         "fields": ["samplingDate"]
                     }
-
+                    
                     intersection_task = session.post(
                         f'{self.server_ip}/sample/aggregated',
                         headers={'accept': 'application/json', 'Content-Type': 'application/json'},
                         json=intersection_payload
                     )
-
+                    
                     tasks.append((filtered_task, intersection_task))
-
+                
                 # Execute all queries in parallel
                 all_results = await asyncio.gather(*[task for pair in tasks for task in pair], return_exceptions=True)
-
+                
                 # Process results in pairs (filtered, intersection)
                 for idx in range(0, len(all_results), 2):
                     filtered_resp = all_results[idx]
                     intersection_resp = all_results[idx + 1]
-
+                    
                     # Process filtered response
                     if isinstance(filtered_resp, Exception):
                         raise self._handle_connection_error(filtered_resp, "fetching filtered data")
-
+                    
                     if filtered_resp.status == 200:
                         filtered_data = await filtered_resp.json()
                         filtered_items = filtered_data.get('data', [])
@@ -1360,8 +1396,7 @@ class WiseLoculusLapis(Lapis):
                     else:
                         error_text = await filtered_resp.text()
                         logging.error(f"API error for filtered data: status={filtered_resp.status}, body={error_text}")
-                        raise APIError(f"API error (filtered data): {filtered_resp.status}",
-                                       status_code=filtered_resp.status, details=error_text)
+                        raise APIError(f"API error (filtered data): {filtered_resp.status}", status_code=filtered_resp.status, details=error_text)
 
                     # Process coverage (intersection) response
                     if isinstance(intersection_resp, Exception):
@@ -1377,11 +1412,9 @@ class WiseLoculusLapis(Lapis):
                                 coverage_lookup[date_str] = count
                     else:
                         error_text = await intersection_resp.text()
-                        logging.error(
-                            f"API error for intersection coverage: status={intersection_resp.status}, body={error_text}")
-                        raise APIError(f"API error (coverage data): {intersection_resp.status}",
-                                       status_code=intersection_resp.status, details=error_text)
-
+                        logging.error(f"API error for intersection coverage: status={intersection_resp.status}, body={error_text}")
+                        raise APIError(f"API error (coverage data): {intersection_resp.status}", status_code=intersection_resp.status, details=error_text)
+            
             # Step 2: Combine coverage and filtered count to calculate frequency
             records = []
             for date_str, coverage in coverage_lookup.items():
@@ -1394,7 +1427,7 @@ class WiseLoculusLapis(Lapis):
                         'coverage': coverage,
                         'frequency': frequency
                     })
-
+            
             # Create DataFrame
             if records:
                 df = pd.DataFrame(records)
@@ -1402,7 +1435,7 @@ class WiseLoculusLapis(Lapis):
                 return df
             else:
                 return pd.DataFrame(columns=['samplingDate', 'count', 'coverage', 'frequency'])
-
+                
         except APIError:
             raise
         except OSError as e:
@@ -1425,9 +1458,9 @@ class WiseLoculusLapis(Lapis):
     # first, then query /sample/nucleotideMutations once per date.
 
     async def _get_sampling_dates(
-            self,
-            locationName: str,
-            date_range: Tuple[datetime, datetime],
+        self,
+        locationName: str,
+        date_range: Tuple[datetime, datetime],
     ) -> List[str]:
         """
         Fetch actual sampling dates available for a location and date range.
@@ -1491,3 +1524,5 @@ class WiseLoculusLapis(Lapis):
                 f"Unexpected error fetching sampling dates: {str(e)}",
                 details=str(e)
             )
+
+    

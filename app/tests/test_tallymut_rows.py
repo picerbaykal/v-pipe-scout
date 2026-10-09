@@ -64,3 +64,49 @@ def test_panel_mutations_union_sorted_no_deletions():
 def test_reconstructed_node_uses_cowwid_signature():
     muts = W._panel_mutations(["BA.3.2"], _Loader(), cowwid_variants={"BA.3.2": {"1234G"}})
     assert muts == ["1234G"]
+
+
+# ── 2026-10-09: smaller and safer LAPIS requests ──────────────────────────
+
+def test_mutations_every_variant_carries_are_not_fetched():
+    loader = _Loader()
+    loader._reconstructed_signatures = {}
+    got = W._panel_mutations(["XFG", "NB.1.8.1"], loader, informative_only=True)
+    assert got == ["823T", "8350C"]                 # 22896T is in both: LolliPop drops it
+    assert "22896T" in W._panel_mutations(["XFG", "NB.1.8.1"], loader)
+
+
+def test_gateway_timeout_is_retried_then_succeeds(monkeypatch):
+    import asyncio
+    from api.exceptions import APIError
+    w = W.__new__(W)
+    w._TALLYMUT_RETRY_WAITS = (0, 0)
+    calls = []
+
+    async def fake(session, loc, muts, dates):
+        calls.append(1)
+        if len(calls) < 3:
+            raise APIError(f"nucleotideMutationsOverTime failed: status 504", status_code=504)
+        return {"ok": True}
+    w._fetch_tallymut_block = fake
+    out = asyncio.run(w._fetch_tallymut_block_retry(None, "Lugano (TI)", ["1A"], ["2026-01-01"],
+                                                    asyncio.Semaphore(2)))
+    assert out == {"ok": True} and len(calls) == 3
+
+
+def test_other_errors_are_not_retried():
+    import asyncio
+    import pytest
+    from api.exceptions import APIError
+    w = W.__new__(W)
+    w._TALLYMUT_RETRY_WAITS = (0, 0)
+    calls = []
+
+    async def fake(session, loc, muts, dates):
+        calls.append(1)
+        raise APIError("bad request: status 400", status_code=400)
+    w._fetch_tallymut_block = fake
+    with pytest.raises(APIError):
+        asyncio.run(w._fetch_tallymut_block_retry(None, "Lugano (TI)", ["1A"], ["2026-01-01"],
+                                                  asyncio.Semaphore(2)))
+    assert len(calls) == 1
