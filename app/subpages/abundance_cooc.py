@@ -200,6 +200,51 @@ def _panel_verdicts(cooc_res: dict, variants: list) -> dict:
     return out
 
 
+# Result tabs, grouped in the order results arrive (2026-10-08): panel and
+# abundance (is the panel good enough for a deconvolution? then the
+# deconvolution), the deep scan (lineages, signal over time), and the look-up.
+_SECTION_GROUPS = [("Panel and abundance", ["Panel check", "Deconvolution"]),
+                   ("Deep scan", ["Lineages", "Signal over time"]),
+                   ("Look-up", ["Investigate a variant"])]
+
+
+def _render_section_tabs(marks: dict) -> str:
+    """The tab row (buttons, so the selection survives the autorefresh; st.tabs
+    reset to the first tab on each rerun), with a group label above each group
+    and a thin line between groups. marks = {tab: " ✓" / " ⟳" / " ■" / " ○"},
+    the state of the tab's task. Returns the selected tab. Shown before a run
+    too (2026-10-09), so the page looks the same before and after."""
+    _all = [x for _, xs in _SECTION_GROUPS for x in xs]
+    if st.session_state.get("acooc_section") not in _all:
+        st.session_state["acooc_section"] = "Panel check"
+    spec = []
+    for gi, (_, xs) in enumerate(_SECTION_GROUPS):
+        if gi:
+            spec.append(0.06)                          # separator
+        spec += [1.15 if x == "Investigate a variant" else 1 for x in xs]
+    sep = ("<div style='border-left:1px solid rgba(0,0,0,.18);height:{h}px;"
+           "width:0;margin:0 auto;'></div>")
+    lab_cols, btn_cols = st.columns(spec), st.columns(spec)
+    ci = 0
+    for gi, (gname, xs) in enumerate(_SECTION_GROUPS):
+        if gi:
+            lab_cols[ci].markdown(sep.format(h=16), unsafe_allow_html=True)
+            btn_cols[ci].markdown(sep.format(h=38), unsafe_allow_html=True)
+            ci += 1
+        lab_cols[ci].markdown(f"<div style='font-size:11px;color:#898781;'>{gname}</div>",
+                              unsafe_allow_html=True)
+        for snm in xs:
+            with btn_cols[ci]:
+                active = st.session_state["acooc_section"] == snm
+                if st.button(snm + marks.get(snm, ""), key=f"acooc_sec_{snm}",
+                             use_container_width=True,
+                             type="primary" if active else "secondary"):
+                    st.session_state["acooc_section"] = snm
+                    st.rerun()
+            ci += 1
+    return st.session_state["acooc_section"]
+
+
 def _render_covvfit(r: dict) -> None:
     """CovvFit's result (2026-10-09): the figure, the growth advantages between
     panel variants (each pair once, the faster one first), the rows against
@@ -669,12 +714,27 @@ def app():
         location_tasks = st.session_state.get("acooc_location_tasks", {})
 
         if not st.session_state.get("acooc_cooc_tasks"):
-            st.info("Complete steps 1–5 on the left to see results here.")
-            # quick look-up works without a run: ★ markers and relatives come
-            # from the pango tree; "Check in data" needs a run's cities
-            st.markdown("---")
-            render_variant_explorer(pango_loader=cached_get_pango_loader(),
-                                    panel=all_selected_variants)
+            # before a run (2026-10-09): the same tabs as after one. The
+            # look-up works without a run (★ markers and relatives come from
+            # the pango tree; "Check in data" needs a run's cities); the
+            # other tabs say what fills them.
+            _sec0 = _render_section_tabs({"Panel check": " ○", "Deconvolution": " ○",
+                                          "Lineages": " ○"})
+            st.markdown("<hr style='margin:2px 0 10px;opacity:.12;'>", unsafe_allow_html=True)
+            if _sec0 == "Investigate a variant":
+                render_variant_explorer(pango_loader=cached_get_pango_loader(),
+                                        panel=all_selected_variants)
+            else:
+                st.info({
+                    "Panel check": "Press ▶ Run (step 5 on the left) to check whether your "
+                                   "panel is good enough for a deconvolution.",
+                    "Deconvolution": "Available after ▶ Run: the variant shares over time, "
+                                     "then CovvFit's growth advantages.",
+                    "Lineages": "Available after ▶ Run: your panel variants with their ★ "
+                                "check, then the deep scan for what's outside your panel.",
+                    "Signal over time": "Available after ▶ Run: weekly co-occurrence and "
+                                        "mutation tables per lineage.",
+                }[_sec0])
         else:
             # Smart "re-run needed" warning. A re-run is needed only when the
             # existing results become stale/incomplete:
@@ -784,6 +844,13 @@ def app():
                 _ready = bool(_locs) and not _stage_open(*_RUN_STAGES[1])
                 _done = _ALL in (st.session_state.get("acooc_covvfit_results") or {})
                 _h = int(st.session_state.get("acooc_covvfit_horizon", 60))
+                # covvfit fits from (run end - past days) to the run end, not the
+                # run's window: a run is often a month, too short for a stable fit
+                # with several variants (2026-10-09). The worker fetches the
+                # deconvolution for that period itself.
+                _past = int(st.session_state.get("acooc_covvfit_past", 180))
+                from datetime import date as _date, timedelta as _td
+                _cv_d0 = (_date.fromisoformat(str(_run_d1)[:10]) - _td(days=_past)).isoformat()
                 if st.button("Re-run CovvFit" if _done else "Run CovvFit",
                              key="acooc_btn_covvfit", use_container_width=True,
                              disabled=bool(_open) or not _ready,
@@ -791,10 +858,11 @@ def app():
                                    "Available once the deconvolution is done." if not _ready else
                                    f"Growth advantage of each panel variant, from the "
                                    f"{len(_locs)} location(s) with a deconvolution; "
-                                   f"predicts {_h} days ahead.")):
+                                   f"fits {_cv_d0} – {str(_run_d1)[:10]}, predicts "
+                                   f"{_h} days ahead.")):
                     _tid = celery_app.send_task(
                         "tasks.run_covvfit_lapis",
-                        kwargs={"locations": _locs, "start_date": _run_d0,
+                        kwargs={"locations": _locs, "start_date": _cv_d0,
                                 "end_date": _run_d1, "variants": _run_panel,
                                 "horizon": _h, "colors": _variant_colors()}).id
                     st.session_state["acooc_covvfit_tasks"] = {_ALL: _tid}
@@ -804,9 +872,14 @@ def app():
                     logger.info(f"CovvFit submitted for {len(_locs)} location(s)")
                     st.rerun()
                 with st.expander("CovvFit settings", expanded=False):
+                    st.slider("Days of past data to fit", 30, 365, 180, step=1,
+                              key="acooc_covvfit_past",
+                              help="Counted back from the run's end date. Longer than a "
+                                   "typical run on purpose: a month of samples is too "
+                                   "short for a stable fit with several variants.")
                     st.slider("Days to predict after the last date", 7, 120, 60, step=1,
                               key="acooc_covvfit_horizon",
-                              help="covvfit's --horizon; the fit itself uses the run's dates.")
+                              help="covvfit's --horizon.")
 
             def _btn_scan():
                 _scan_req = (bool(st.session_state.get("acooc_want_scan"))
@@ -1297,13 +1370,6 @@ def app():
             # (lineages, signal over time), and the look-up. A mark on the label
             # tells the state of the tab's task: ✓ done, ⟳ running, ■ stopped,
             # ○ not started.
-            _GROUPS = [("Panel and abundance", ["Panel check", "Deconvolution"]),
-                       ("Deep scan", ["Lineages", "Signal over time"]),
-                       ("Look-up", ["Investigate a variant"])]
-            _all_secs = [_x for _, _xs in _GROUPS for _x in _xs]
-            if st.session_state.get("acooc_section") not in _all_secs:
-                st.session_state["acooc_section"] = "Panel check"
-
             def _mark(running, stages):
                 if running:
                     return " ⟳"
@@ -1316,31 +1382,7 @@ def app():
                      "Deconvolution": _mark(_deconv_outstanding or _covvfit_outstanding,
                                             _RUN_STAGES[1:2]),
                      "Lineages": _mark(_scan_outstanding, _RUN_STAGES[2:4])}
-            _spec = []
-            for _gi, (_, _xs) in enumerate(_GROUPS):
-                if _gi:
-                    _spec.append(0.06)                 # separator
-                _spec += [1.15 if _x == "Investigate a variant" else 1 for _x in _xs]
-            _SEP = ("<div style='border-left:1px solid rgba(0,0,0,.18);height:{h}px;"
-                    "width:0;margin:0 auto;'></div>")
-            _lab_cols, _btn_cols = st.columns(_spec), st.columns(_spec)
-            _ci = 0
-            for _gi, (_gname, _xs) in enumerate(_GROUPS):
-                if _gi:
-                    _lab_cols[_ci].markdown(_SEP.format(h=16), unsafe_allow_html=True)
-                    _btn_cols[_ci].markdown(_SEP.format(h=38), unsafe_allow_html=True)
-                    _ci += 1
-                _lab_cols[_ci].markdown(f"<div style='font-size:11px;color:#898781;'>{_gname}</div>",
-                                        unsafe_allow_html=True)
-                for _snm in _xs:
-                    with _btn_cols[_ci]:
-                        _active = st.session_state["acooc_section"] == _snm
-                        if st.button(_snm + _MARK.get(_snm, ""), key=f"acooc_sec_{_snm}",
-                                     use_container_width=True,
-                                     type="primary" if _active else "secondary"):
-                            st.session_state["acooc_section"] = _snm
-                            st.rerun()
-                    _ci += 1
+            _render_section_tabs(_MARK)
             _active_section = st.session_state["acooc_section"]
             st.markdown("<hr style='margin:2px 0 10px;opacity:.12;'>", unsafe_allow_html=True)
 
