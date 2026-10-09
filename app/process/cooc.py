@@ -386,8 +386,12 @@ CHECK_DEFAULTS = {
     "link_min": 0.8,         # ... and >= this share of those reads match the
     "min_link": 20,          #     variant at neighbouring positions (>= 20 reads)
     "absent_freq": 0.01,     # absent: < this share carry it
-    "confirm_share": 0.75,   # present / measured >= this -> present
+    "confirm_share": 0.75,   # present / measured >= this -> present ...
+    "min_present": 2,        # ... and at least this many markers present (one
+                             #     marker can come from an unrelated lineage that
+                             #     carries it: XFZ carries LP.8's 1954A)
     "notfound_share": 0.25,  # present / measured <= this -> absent
+    "calendar_samples": 12,  # Evidence squares shown per row (UI only)
 }
 
 
@@ -579,7 +583,9 @@ def check_verdicts(markers: List[str],
       absent      <  absent_freq of covering reads carry it
       unmeasured  fewer than min_cov covering reads, or anything in between
     Verdict from present / (present + absent):
-      present >= confirm_share · absent <= notfound_share · else mixed
+      present >= confirm_share AND at least min_present markers present
+      absent <= notfound_share · else mixed (also a single present marker:
+      one marker alone can come from an unrelated lineage, 2026-10-09)
       not_covered when the variant has no markers or none is measurable.
     (Until 2026-10-08 the verdicts were named confirmed / not_found /
     inconsistent / cant_confirm.)
@@ -616,7 +622,7 @@ def check_verdicts(markers: List[str],
     n_meas = n_p + n_a
     if n_meas == 0:
         verdict = "not_covered"
-    elif n_p / n_meas >= c["confirm_share"]:
+    elif n_p / n_meas >= c["confirm_share"] and n_p >= int(c["min_present"]):
         verdict = "present"
     elif n_p / n_meas <= c["notfound_share"]:
         verdict = "absent"

@@ -27,7 +27,7 @@ markers:
   out_other_max: 5      # carriers outside the family that didn't inherit it
 
 # ── Co-occurrence check: a vote among each panel variant's ★ markers ────────
-# Per city, pooled over the last recent_samples covered samples. Reads only —
+# Per city, pooled over all samples in the chosen dates. Reads only —
 # never the deconvolution abundance. Applied in the UI: a streamlit restart is
 # enough. Verdict words (code and UI): present / absent / mixed / not covered.
 check:
@@ -36,10 +36,12 @@ check:
   link_min: 0.8         # ... and >= 80% of those match the variant at neighbouring
   min_link: 20          #     positions (needs >= 20 such reads)
   absent_freq: 0.01     # absent: < 1% carry it
-  confirm_share: 0.75   # present / measured >= this -> present
+  confirm_share: 0.75   # present / measured >= this -> present ...
+  min_present: 2        # ... and at least 2 markers present (one alone can come
+                        #   from an unrelated lineage: XFZ carries LP.8's 1954A)
   notfound_share: 0.25  # present / measured <= this -> absent; between -> mixed
-  recent_samples: 5     # Variants table cells vote on the last N covered samples of a
-                        #   city ("is it there now?"); the Evidence text covers the window
+  calendar_samples: 12  # Evidence squares shown per row, the newest; the cell always
+                        #   adds up ALL samples in the chosen dates
 
 # ── Scanner: names co-occurrence signal the panel doesn't explain ──────────
 # Worker settings: changing them needs a worker restart + re-scan.

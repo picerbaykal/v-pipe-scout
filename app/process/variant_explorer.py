@@ -198,53 +198,99 @@ def investigate_variant(variant: str, pango_loader,
 
 
 def check_in_data(markers: List[str], per_date: Dict[str, Dict[str, list]],
-                  dates: List[str], recent: Optional[int] = None) -> Dict:
+                  dates: List[str]) -> Dict:
     """One city's answer from the worker's counts.
 
     per_date: {date: {marker: [cov, hit, link_n, link_ok]}} (accumulate_check_stats)
     dates:    every sampling date in the window (also those with no reads on it)
 
-    recent:   when set, the vote (state, n_present, n_measured) uses only the
-              last `recent` covered sampling days ("is it there now?"); the
-              timeline still covers the whole window. recent_dates lists them.
+    The vote (state, n_present, n_measured) adds up the reads of every date
+    (2026-10-09: the chosen window; from 2 Oct to 9 Oct the last 5 samples).
 
-    Returns {state, n_present, n_measured, n_markers, timeline, recent_dates}
+    Returns {state, n_present, n_measured, n_markers, timeline, day_detail}
       state: present / absent / mixed / not_covered / no_marker
              (the check's own vote, process.cooc.check_verdicts)
-      timeline: [[date, mark]], mark per day pooled over the markers:
-             present  >= present_freq of >= min_cov reads
-             absent   <  absent_freq  of >= min_cov reads
-             weak     in between
-             uncovered < min_cov reads at its markers
+      timeline: [[date, mark]], one mark per day: the cells' vote on that
+             day's reads alone (2026-10-09; until then the reads were pooled
+             over the markers, so one marker carried by an unrelated lineage
+             could make a day "present": XFZ and LP.8's 1954A):
+             present    the vote says present (>= min_present markers)
+             absent     the vote says absent
+             mixed      >= 2 markers decided and they disagree
+             thin       reads, but fewer than 2 markers (1 for a lineage with
+                        one marker) decided that day: one day alone can't
+                        tell; the cell pools the last samples
+             uncovered  no marker with >= min_cov reads that day
+             The link test ("are the reads carrying the marker this lineage's
+             reads?") is a property of the marker, not of the day, and one day
+             rarely has the 20 reads it needs; so a day uses each marker's link
+             pooled over the whole window, and its own reads for the share.
+      day_detail: {date: "14808C 8 % of 140 reads ✓ · …"} for the squares'
+             hover: why the day got its mark
     """
     from process.cooc import _check_cfg, check_verdicts
     c = _check_cfg()
     if not markers:
         return {"state": "no_marker", "n_present": 0, "n_measured": 0,
-                "n_markers": 0, "timeline": [], "recent_dates": []}
-    tl = []
+                "n_markers": 0, "timeline": [], "day_detail": {}}
+    tl, detail = [], {}
+    link = {m: [0, 0] for m in markers}          # [link_n, link_ok] over the window
+    for cells in (per_date or {}).values():
+        for m in markers:
+            x = cells.get(m)
+            if x:
+                link[m][0] += x[2]
+                link[m][1] += x[3]
+    need = min(2, len(markers))
     for d in sorted(set(dates or []) | set(per_date or {})):
         cells = (per_date or {}).get(d, {})
-        cov = sum(cells.get(m, [0, 0])[0] for m in markers)
-        hit = sum(cells.get(m, [0, 0])[1] for m in markers)
-        # a day is covered when at least one marker has min_cov reads
-        if not any(cells.get(m, [0])[0] >= c["min_cov"] for m in markers):
-            mark = "uncovered"
-        elif hit / cov >= c["present_freq"]:
-            mark = "present"
-        elif hit / cov < c["absent_freq"]:
-            mark = "absent"
+        if not any((cells.get(m) or [0])[0] >= c["min_cov"] for m in markers):
+            tl.append([d, "uncovered"])
+            continue
+        # this day's reads, the window's link
+        day = {m: [x[0], x[1], link[m][0], link[m][1]]
+               for m, x in cells.items() if m in link and x}
+        r = check_verdicts(markers, {d: day}, c)
+        if r["n_measured"] < need:
+            mark = "present" if r["verdict"] == "present" else "thin"
         else:
-            mark = "weak"
+            mark = r["verdict"] if r["verdict"] in ("present", "absent") else "mixed"
         tl.append([d, mark])
-    recent_dates = ([d for d, m in tl if m != "uncovered"][-recent:] if recent else [])
-    pd_ = ({d: (per_date or {}).get(d, {}) for d in recent_dates} if recent
-           else (per_date or {}))
+        detail[d] = _day_detail(markers, day, r, c)
+    pd_ = per_date or {}
     res = check_verdicts(markers, pd_)
     state = res["verdict"]          # present / absent / mixed / not_covered
     return {"state": state, "n_present": res["n_present"], "n_measured": res["n_measured"],
-            "n_markers": res["n_markers"], "timeline": tl, "recent_dates": recent_dates,
-            "detail": _marker_detail(markers, pd_, res, c)}
+            "n_markers": res["n_markers"], "timeline": tl,
+            "day_detail": detail, "detail": _marker_detail(markers, pd_, res, c)}
+
+
+def _day_detail(markers, cells, r, c, n_max=8) -> str:
+    """One day, every marker: '14808C 8 % of 140 reads ✓ · 21249A 0 % of 900
+    reads ✗ · 24604G 3 % of 300 reads (1–5 %) · 4927T 12 reads (under 100)'."""
+    out = []
+    for m in markers:
+        x = (r.get("markers") or {}).get(m) or {}
+        cov, f, st = x.get("cov", 0), x.get("freq"), x.get("status")
+        if not cov:
+            out.append(f"{m} no reads")
+            continue
+        num = f"{m} {f * 100:.0f} % of {cov:,} reads"
+        if st == "present":
+            out.append(num + " ✓")
+        elif st == "absent":
+            out.append(num + " ✗")
+        elif cov < c["min_cov"]:
+            out.append(f"{m} {cov} reads (under {c['min_cov']})")
+        elif f < c["present_freq"]:
+            out.append(num + f" ({c['absent_freq'] * 100:g}–{c['present_freq'] * 100:g} %)")
+        else:
+            lk_n = (cells.get(m) or [0, 0, 0, 0])[2]
+            out.append(num + (f" (link test: {lk_n} reads in the window, needs "
+                              f"{c['min_link']})" if lk_n < c["min_link"]
+                              else " (its reads don't look like this lineage)"))
+    more = f" · +{len(out) - n_max} more" if len(out) > n_max else ""
+    return " · ".join(out[:n_max]) + more
 
 
 def _marker_detail(markers, per_date, res, c) -> List[Dict]:

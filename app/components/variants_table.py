@@ -171,50 +171,55 @@ def _pl(n, word):
 
 # ── per-row pieces ─────────────────────────────────────────────────────────
 
-# ── panel cells: a colour scale instead of cut-offs (2026-10-01) ──────────
-# hue   = share of the MEASURED markers that are present: orange (0 %) →
-#         pale grey (50 %) → green (100 %)
-# depth = share of ALL its markers that could be measured: faint when few
-#         were (2 of 5), full when all were
-_SC_LO, _SC_MID, _SC_HI = (245, 158, 11), (209, 213, 219), (22, 163, 74)
+# ── cells: one fixed colour per answer of the ★ check (2026-10-09) ─────────
+# The check answers present / mixed / absent (process.cooc.check_verdicts);
+# the cell shows that answer, the count says how many markers voted.
+#                 in your panel                  not in your panel
+#   present       green: fine                    red: missing from your panel
+#   mixed         grey                           grey
+#   absent        orange: in the panel, not in   pale: nothing to do
+#                 the wastewater
+# (Until 2026-10-09 a gradient by the share present, on two different scales
+# for panel and found rows, so the same 2/5 had two colours.)
+MIXED_BG, PALE_BG, PALE_FG = "#b4bac3", "#f3f4f6", "#6b7280"
+S_MIXED = _fill(MIXED_BG, "#111827")
+S_PALE = _fill(PALE_BG, PALE_FG) + "box-shadow:inset 0 0 0 1px #e5e7eb;"
+D_PALE = f"background:{PALE_BG};box-shadow:inset 0 0 0 1px #d1d5db;"   # a pale day square
 
 
-def _hex(rgb):
-    return "#%02x%02x%02x" % tuple(int(round(x)) for x in rgb)
-
-
-def _mix(a, b, t):
-    return tuple(a[i] + (b[i] - a[i]) * t for i in range(3))
-
-
-_SC_GREY, _SC_RED = (229, 231, 235), (220, 38, 38)
+def _state(d):
+    """The check's answer for one cell: the result's own state, or (for
+    results without one, e.g. the legend) the vote from its counts."""
+    st = d.get("state")
+    if st in ("present", "absent", "mixed"):
+        return st
+    n_mk, p, a, u = _vote_counts(d)
+    if p + a == 0:
+        return "not_covered"
+    hi, lo = _shares()
+    if p / (p + a) >= hi and p >= _min_present():
+        return "present"
+    return "absent" if p / (p + a) <= lo else "mixed"
 
 
 def _scale(d, found=False):
     """(cell style, label, dot colour, name colour, share present or None)
-    for one city's check result. found: a lineage not in the panel — grey
-    (absent) → red (present) instead of orange → green; absent is no warning
-    for a lineage you don't track."""
+    for one city's check result. found: a lineage not in the panel."""
     n_mk, p, a, u = _vote_counts(d)
     if n_mk == 0:
         return S_NOMARK, "·", GREY, "#6b7280", None
     m = p + a
     if m == 0:
         return S_NODATA, "?", GREY, "#6b7280", None
-    share = p / m
-    if found:
-        hue = _mix(_SC_GREY, _SC_RED, share)
-        depth = 0.3 + 0.7 * (m / n_mk)
-        bg = _mix((255, 255, 255), hue, depth)
-        fg = "#fff" if share >= 0.7 and depth > 0.8 else "#111827"
-        return _fill(_hex(bg), fg), f"{p}/{m}", _hex(bg), RED, share
-    hue = _mix(_SC_LO, _SC_MID, share * 2) if share <= 0.5 else _mix(_SC_MID, _SC_HI, share * 2 - 1)
-    depth = 0.3 + 0.7 * (m / n_mk)                 # 30 % strength at the least
-    bg = _mix((255, 255, 255), hue, depth)
-    fg = "#111827"                                 # always dark: one ink for all cells
-    hi, lo = _shares()
-    ink = "#15803d" if share >= hi else AMBER_T if share <= lo else "#4b5563"
-    return _fill(_hex(bg), fg), f"{p}/{m}", _hex(bg), ink, share
+    share, st = p / m, _state(d)
+    if st == "present":
+        col = RED if found else GREEN
+        return _fill(col, "#fff"), f"{p}/{m}", col, (RED if found else "#15803d"), share
+    if st == "absent" and not found:
+        return S_NOTFOUND, f"{p}/{m}", AMBER, AMBER_T, share
+    if st == "absent":
+        return S_PALE, f"{p}/{m}", PALE_BG, RED, share
+    return S_MIXED, f"{p}/{m}", MIXED_BG, (RED if found else "#4b5563"), share
 
 
 def _panel_cells(v, per_city, cities, sel):
@@ -277,8 +282,18 @@ def _num():
         from process.scanner import EVIDENCE_MIN_DAYS, EVIDENCE_MIN_READS, EVIDENCE_MIN_SHARE
     except Exception:
         EVIDENCE_MIN_READS, EVIDENCE_MIN_SHARE, EVIDENCE_MIN_DAYS = 20, 0.005, 2
-    return {"mc": mc, "pf": _pct(pf), "af": _pct(af), "er": int(EVIDENCE_MIN_READS),
+    return {"mc": mc, "pf": _pct(pf), "af": _pct(af), "mp": _min_present(),
+            "er": int(EVIDENCE_MIN_READS),
             "es": _pct(float(EVIDENCE_MIN_SHARE) * 100), "ed": int(EVIDENCE_MIN_DAYS)}
+
+
+def _min_present():
+    """Markers that must be present for "present" (check.min_present)."""
+    try:
+        from process.cooc import _check_cfg
+        return int(_check_cfg().get("min_present", 2))
+    except Exception:
+        return 2
 
 
 def _shares():
@@ -351,42 +366,55 @@ def _marker_details(d, v):
 
 # ── the Evidence calendar (2026-10-02): one square per sampling day of the
 #    chosen city, for every row ─────────────────────────────────────────────
-def _day_marks(top):
-    """mark -> (square style, meaning). top = colour of a present day."""
+def _day_marks(top, low=None):
+    """mark -> (square style, meaning). top = colour of a present day, low =
+    of an absent one: the same colours as the cells (orange for a panel
+    variant, pale for a found lineage)."""
     n = _num()
     return {
-        # lineages (★ markers pooled per day, process.variant_explorer.check_in_data)
-        "present": (f"background:{top};", f"★ markers present (≥ {n['pf']} % of ≥ {n['mc']} reads)"),
-        "weak": (f"background:{top}55;", "★ markers between absent and present"),
-        "absent": ("background:#d1d5db;", f"★ markers absent (< {n['af']} % of ≥ {n['mc']} reads)"),
+        # lineages: the ★ check's vote on that day's reads
+        # (process.variant_explorer.check_in_data)
+        "present": (f"background:{top};", f"★ markers present (≥ {n['mp']} markers at ≥ "
+                                          f"{n['pf']} % of ≥ {n['mc']} reads)"),
+        "mixed": (f"background:{MIXED_BG};", "★ markers disagree"),
+        "weak": (f"background:{MIXED_BG};", "★ markers disagree"),
+        "thin": ("background:#fff;border:1.5px dotted #6b7280;",
+                 "too few reads to tell from this sample alone (the cell adds up the "
+                 "reads of all samples in the chosen dates)"),
+        "absent": (f"background:{low};" if low else D_PALE, f"★ markers absent (< {n['af']} % of ≥ {n['mc']} reads)"),
         # novel combinations (scanner timeline)
-        "day": (f"background:{top};", f"passes the day rule (≥ {n['er']} reads, ≥ {n['es']} % of the day)"),
-        "seen": (f"background:{top}55;", "seen, below the day rule"),
+        "day": (f"background:{top};", f"passes the evidence rule (≥ {n['er']} reads, ≥ {n['es']} % of the sample's reads)"),
+        "seen": (f"background:{top}55;", "seen, below the evidence rule"),
         "gone": ("background:#d1d5db;", f"≥ {n['mc']} reads at its positions, not there"),
-        "uncovered": ("background:#fff;border:1.5px dashed #9ca3af;",
-                      f"under {n['mc']} reads at its positions — couldn't show"),
+        "uncovered": ("background:#fff;border:1.5px dotted #6b7280;",
+                      f"under {n['mc']} reads at its markers — too few reads to tell"),
         "unknown": ("background:#e5e7eb;", "no coverage data (re-run)"),
     }
 
 
-def _recent_n():
+def _cal_max():
+    """Squares shown at most (check.calendar_samples): the newest ones."""
     try:
         from process.cooc import _check_cfg
-        return int(_check_cfg().get("recent_samples", 5))
+        return int(_check_cfg().get("calendar_samples", 12))
     except Exception:
-        return 5
+        return 12
 
 
-def _day_cal(tl, top):
-    """The last N covered samples only (check.recent_samples): what the cell
-    voted on — "is it there now?". Days with too few reads are skipped."""
-    n = _recent_n()
-    last = [(d, m) for d, m in (tl or []) if m not in ("uncovered", "unknown")][-n:]
-    if not last:
+def _day_cal(tl, top, low=None, detail=None):
+    """One square per sample in the chosen dates, oldest left, newest right;
+    the newest check.calendar_samples when there are more (the text after
+    the squares counts all of them).
+    A sample with too few reads is a dotted square."""
+    tl = [(d, m) for d, m in (tl or []) if m != "unknown"]
+    if not tl:
         return ""
-    mk = _day_marks(top)
+    n = _cal_max()
+    last = tl[-n:]          # the text after the squares counts all samples
+    mk = _day_marks(top, low)
+    detail = detail or {}
     sq = "".join(f"<i style='{mk.get(m, mk['unknown'])[0]}' "
-                 f"data-tip='{_e(_short_date(d) + ': ' + mk.get(m, mk['unknown'])[1])}'></i>"
+                 f"data-tip='{_e(_short_date(d) + ': ' + mk.get(m, mk['unknown'])[1] + (' — ' + detail[d] if detail.get(d) else ''))}'></i>"
                  for d, m in last)
     pad = "".join("<i style='background:transparent'></i>" for _ in range(n - len(last)))
     return f"<span class='cal' style='margin-left:0;margin-right:8px'>{pad}{sq}</span>"
@@ -398,17 +426,30 @@ def _cal_phrase(tl, word="present"):
     if not tl:
         return ""
     on = {"present", "day"}
-    cov = [(d, m) for d, m in tl if m not in ("uncovered", "unknown")]
+    cov = [(d, m) for d, m in tl if m != "unknown"]
     hits = [d for d, m in cov if m in on]
-    if not cov:
-        return f"not covered — under {_num()['mc']} reads at its positions"
+    if not cov or all(m in ("uncovered", "thin") for _d, m in cov):
+        return f"too few reads in all {len(cov)} {_pl(len(cov), 'sample')}"
     if not hits:
-        weak = sum(1 for _d, m in cov if m in ("weak", "seen"))
-        return (f"absent all {len(cov)} {_pl(len(cov), 'day')}" if not weak
-                else f"weak {weak} of {len(cov)} {_pl(len(cov), 'day')}, never present")
+        mid = sum(1 for _d, m in cov if m in ("mixed", "weak", "seen"))
+        thin = sum(1 for _d, m in cov if m in ("thin", "uncovered"))
+        if not mid and not thin:
+            return f"absent all {len(cov)} {_pl(len(cov), 'sample')}"
+        if word != "present":
+            return f"weak {mid} of {len(cov)} {_pl(len(cov), 'sample')}, never {word}"
+        ab = len(cov) - mid - thin
+        parts = ([f"{ab} absent"] if ab else []) + ([f"{mid} mixed"] if mid else []) \
+            + ([f"{thin} too few reads"] if thin else [])
+        return f"never present in {len(cov)} {_pl(len(cov), 'sample')}: " + " · ".join(parts)
     after = sum(1 for d, _m in cov if d > hits[-1])
     tail = "in the latest sample" if not after else f"last {_short_date(hits[-1])}"
-    return f"{word} {len(hits)} of {len(cov)} {_pl(len(cov), 'day')} · {tail}"
+    return f"{word} {len(hits)} of {len(cov)} {_pl(len(cov), 'sample')} · {tail}"
+
+
+def _star_phrase(tl):
+    """The ★ check's days, named as such so they can't be mixed up with the
+    deep scan's evidence days."""
+    return "★ markers: " + _cal_phrase(tl)
 
 
 def _panel_evidence(per_city, sel, v=""):
@@ -418,7 +459,7 @@ def _panel_evidence(per_city, sel, v=""):
     n_mk, p, a, u = _vote_counts(d)
     if n_mk == 0:
         return f"<span class='dim'>{_vote_text(d)}</span>"
-    tip = (f"{v} · the cell votes on the last {_recent_n()} samples with enough reads: "
+    tip = (f"{v} · the cell adds up the reads of all samples in the chosen dates: "
            f"present / (present + absent) = {p}/{p + a} — "
            + _breakdown(d, v, html=False)
            + ". Markers that are neither present nor absent don't count either way"
@@ -426,7 +467,8 @@ def _panel_evidence(per_city, sel, v=""):
     tl = d.get("timeline")
     if not tl:                                      # results from before 2026-10-02
         return f"<span data-tip='{_e(tip)}'>{_breakdown(d, v)}</span>"
-    return f"{_day_cal(tl, GREEN)}<span data-tip='{_e(tip)}'>{_e(_cal_phrase(tl))}</span>"
+    return (f"{_day_cal(tl, GREEN, AMBER, d.get('day_detail'))}<span data-tip='{_e(tip)}'>"
+            f"{_e(_star_phrase(tl))}</span>")
 
 
 def _panel_tint(per_city, sel):
@@ -455,24 +497,24 @@ def _finding_cells(v, f, cities, sel):
             style, label, _dot, _ink, _share = _scale(chk, found=True)
             style += "border:1.5px dashed #b91c1c;"
             fi = ", ".join(city_name(x) for x in d.get("found_in") or [])
-            out.append(_cell(label, style, f"{v} · {city_name(c)}, last {_recent_n()} samples "
-                             f"with enough reads: {_vote_text(chk)} · not named by this city's "
+            out.append(_cell(label, style, f"{v} · {city_name(c)}, all samples "
+                             f"in the chosen dates: {_vote_text(chk)} · not named by this city's "
                              f"scan (its reads here may carry only one mutation beyond your "
                              f"panel); checked because it was found in {fi}", c == sel))
             continue
         if chk and n > 0:
             # the same measure as the panel: ★ markers present / measurable
             style, label, _dot, _ink, _share = _scale(chk, found=True)
-            out.append(_cell(label, style, f"{v} · {city_name(c)}, last {_recent_n()} samples "
-                             f"with enough reads: {_vote_text(chk)} · the scanner counted "
-                             f"{n} {_pl(n, 'day')} of evidence in the window", c == sel))
+            out.append(_cell(label, style, f"{v} · {city_name(c)}, all samples "
+                             f"in the chosen dates: {_vote_text(chk)} · the scanner counted "
+                             f"{n} {_pl(n, 'sample')} of evidence in the window", c == sel))
             continue
         if n == 0:
             out.append(_cell("0", S_NAMED, f"{v} · {city_name(c)}: named only — reads point to "
-                             f"{v}, but they also fit related lineages, so no day has evidence "
+                             f"{v}, but they also fit related lineages, so no sample has evidence "
                              f"specific to {v}", c == sel))
             continue
-        tip = (f"{v} · {city_name(c)}: evidence on {n} {_pl(n, 'day')} · "
+        tip = (f"{v} · {city_name(c)}: evidence on {n} {_pl(n, 'sample')} · "
                + (f"{len(stars)} ★ {_pl(len(stars), 'marker')} ({', '.join(stars[:5])})"
                   if stars else "no ★ marker (combinations only)")
                + (f" · {len(regs)} genome {_pl(len(regs), 'region')}: "
@@ -562,23 +604,32 @@ def _finding_evidence(f, sel):
         fi = ", ".join(city_name(x) for x in d.get("found_in") or [])
         why = (f"not named by this city's scan; checked because it was found in {fi} — "
                "its ★ markers one by one, as for panel variants")
-        return (f"{_day_cal(tl, RED)}<span data-tip='{_e(why)}'>{_e(_cal_phrase(tl))}"
-                f" <span class='dim'>· cross-check</span></span>")
+        return (f"{_day_cal(tl, RED, None, (d.get('check') or {}).get('day_detail'))}"
+                f"<span data-tip='{_e(why)}'>{_e(_star_phrase(tl))}"
+                f" <span class='dim'>· cross-check, not named by this city's deep scan</span></span>")
     if n == 0:
         return ("<span class='dim'>named only — reads point to it but also fit related "
-                "lineages; no day with specific evidence</span>")
+                "lineages; no sample with specific evidence</span>")
     stars, regs = d.get("stars") or [], d.get("regions") or []
-    facts = (f"scanner: {n} {_pl(n, 'day')} · "
+    facts = (f"scanner: {n} {_pl(n, 'sample')} · "
              + (f"{len(stars)} ★ {_pl(len(stars), 'marker')}" if stars else "combinations only")
              + f" · {len(regs)} genome {_pl(len(regs), 'region')}"
              + (" · 1 day " + _after_text(d["after"], html=False)
                 if n == 1 and d.get("after") else ""))
     tl = (d.get("check") or {}).get("timeline")
     if tl:
-        txt = (f"{_day_cal(tl, RED)}<span data-tip='{_e(facts + '. ' + _REGION_TIP)}'>"
-               f"{_e(_cal_phrase(tl))}</span>")
+        nn = _num()
+        scan_tip = (f"The deep scan counts a sample when reads with the lineage's mutations "
+                    f"are ≥ {nn['er']} reads and ≥ {nn['es']} % of the sample's reads. The ★ "
+                    f"samples are the ★ check's vote on its specific markers (≥ {nn['mp']} "
+                    f"present at ≥ {nn['pf']} %): a different, stricter question. " + facts
+                    + ". " + _REGION_TIP)
+        txt = (f"{_day_cal(tl, RED, None, (d.get('check') or {}).get('day_detail'))}"
+               f"<span>{_e(_star_phrase(tl))}</span>"
+               f" <span class='dim' data-tip='{_e(scan_tip)}'>· deep scan: evidence on "
+               f"{n} {_pl(n, 'sample')}</span>")
     else:                                        # results from before 2026-10-02
-        txt = (f"{n} {_pl(n, 'day')} · "
+        txt = (f"{n} {_pl(n, 'sample')} · "
                + (f"{len(stars)} ★ {_pl(len(stars), 'marker')}" if stars else "combinations only")
                + f" · <span data-tip='{_e(_REGION_TIP)}'>{len(regs)} genome "
                f"{_pl(len(regs), 'region')}</span>")
@@ -638,12 +689,12 @@ def _pattern_row(muts, days, cities, sel, style_full, style_one, color, evidence
         if n is None:
             cells.append(_empty(f"{city_name(c)}: not seen", sel == c))
         elif n == 0:
-            cells.append(_cell("0", S_NOMARK, f"{city_name(c)}: seen, but on no day above "
-                               f"the evidence rule ({nn['er']} reads and {nn['es']} % of the day)",
+            cells.append(_cell("0", S_NOMARK, f"{city_name(c)}: seen, but in no sample above "
+                               f"the evidence rule ({nn['er']} reads and {nn['es']} % of the sample's reads)",
                                sel == c))
         else:
             cells.append(_cell(n, style_full if n >= nn["ed"] else style_one,
-                               f"{city_name(c)}: {tip_word} on {n} {_pl(n, 'day')} — "
+                               f"{city_name(c)}: {tip_word} on {n} {_pl(n, 'sample')} — "
                                f"{' '.join(muts)}", sel == c))
     m = " ".join(muts[:4]) + (" …" if len(muts) > 4 else "")
     return (f"<tr><td style='padding-left:14px'><span class='mono' style='color:{color}' "
@@ -675,11 +726,11 @@ def _near_rows(r, v, changes, cities, sel, gid, n_cols):
             reads = c.get("reads", {}).get(city, 0)
             if not n:
                 cells.append(_empty(f"{city_name(city)}: "
-                                    + (f"{reads:,} reads, no day above the day rule" if reads
+                                    + (f"{reads:,} reads, no sample above the evidence rule" if reads
                                        else "not seen"), city == sel))
                 continue
             cells.append(_cell(n, S_NEAR if n >= _num()["ed"] else S_NEAR1,
-                               f"{c['label']} · {city_name(city)}: {n} {_pl(n, 'day')} "
+                               f"{c['label']} · {city_name(city)}: {n} {_pl(n, 'sample')} "
                                f"({reads:,} reads)", city == sel))
         n_sel = c["per_city"].get(sel, 0)
         w = c.get("where")
@@ -692,7 +743,7 @@ def _near_rows(r, v, changes, cities, sel, gid, n_cols):
             place = (f"no designated sublineage of {v} {'carries' if gain else 'lacks'} it"
                      + (" — not designated yet?" if gain else
                         " — reversion, or reads at a coverage edge"))
-        ev = (f"{n_sel} {_pl(n_sel, 'day')} here · " if n_sel else
+        ev = (f"{n_sel} {_pl(n_sel, 'sample')} here · " if n_sel else
               "<span class='dim'>not in this city · </span>") + place
         if not gain:
             ev = f"<span class='dim'>{ev}</span>"
@@ -778,7 +829,7 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
             if _dsel.get("xcheck"):
                 dk = "dashed" if (_dsel.get("check") or {}).get("state") == "present" else "ring"
             tip = (f"{v}: not in your panel · {sname}: "
-                   + ("named only" if named else f"evidence on {n_sel} {_pl(n_sel, 'day')}"
+                   + ("named only" if named else f"evidence on {n_sel} {_pl(n_sel, 'sample')}"
                       if n_sel else "not seen here"))
             btn = ""
             if f.get("addable"):
@@ -803,13 +854,13 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
                         and c["per_city"][sel] >= near_min_days)
             if here:
                 tip = (f"{v} ± 1 change in {sname} — reads that are {v} with one mutation "
-                       f"more (+) or one less (−), on days with ≥ {nn['er']} such reads and "
-                       f"≥ {nn['es']} % of the day: "
+                       f"more (+) or one less (−), in samples with ≥ {nn['er']} such reads and "
+                       f"≥ {nn['es']} % of the sample's reads: "
                        + "; ".join(f"{c['label']} ({c['per_city'][sel]} d)"
                                    for c in here[:near_max])
                        + (f"; +{len(here) - near_max} more" if len(here) > near_max else ""))
             else:
-                tip = (f"No ± 1 change on any day in {sname}; in other cities: "
+                tip = (f"No ± 1 change in any sample in {sname}; in other cities: "
                        + "; ".join(f"{c['label']}" for c in nch[:near_max])
                        + (f"; +{len(nch) - near_max} more" if len(nch) > near_max else ""))
             label = (f"◆ {n_tag} {_pl(n_tag, 'change')}" if n_tag
@@ -929,40 +980,52 @@ def _ld(style, text):
     return f"<span class='i'><i class='d' style='{style}'></i>{text}</span>"
 
 
+def _lc(d, found=False, extra=""):
+    st, lb = _scale(d, found=found)[:2]
+    return f"<i class='c' style='width:auto;padding:0 6px;{st}{extra}'>{lb}</i>"
+
+
 _LEGEND_ROWS = (
     ""
-    "<div class='row'><span class='t'>Panel</span>"
-    "<span class='i'>markers present / measured:"
-    + "".join(f"<i class='c' style='width:auto;padding:0 6px;{_scale(d)[0]}'>{_scale(d)[1]}</i>"
-              for d in ({"n_markers": 4, "n_measured": 4, "n_present": 0},
-                        {"n_markers": 4, "n_measured": 4, "n_present": 2},
-                        {"n_markers": 4, "n_measured": 4, "n_present": 4},
-                        {"n_markers": 5, "n_measured": 2, "n_present": 2}))
-    + " the last: only 2 of 5 markers measured, so faint</span>"
+    "<div class='row'><span class='t'>★ check</span>"
+    "<span class='i'>markers present / measured, in your panel:"
+    + _lc({"n_markers": 4, "n_measured": 4, "n_present": 4}) + "present"
+    + _lc({"n_markers": 5, "n_measured": 5, "n_present": 2}) + "mixed"
+    + _lc({"n_markers": 4, "n_measured": 4, "n_present": 0})
+    + "absent — in your panel but not in the wastewater</span>"
+    + "<span class='i'>not in your panel:"
+    + _lc({"n_markers": 3, "n_measured": 3, "n_present": 3}, True)
+    + "present — missing from your panel"
+    + _lc({"n_markers": 5, "n_measured": 5, "n_present": 2}, True) + "mixed"
+    + _lc({"n_markers": 3, "n_measured": 3, "n_present": 0}, True) + "absent</span>"
+    + f"<span class='i'>present = ≥ {_shares()[0] * 100:g} % of the measured markers and "
+      f"at least {_min_present()} of them; absent = ≤ {_shares()[1] * 100:g} %; "
+      "mixed = in between, or only one marker present</span>"
     + _li(S_NOMARK, "·", "no ★ marker")
     + _li(S_NODATA, "?", "too few reads")
+    + "<span class='i'>"
+    + _lc({"n_markers": 3, "n_measured": 3, "n_present": 0}, True,
+          "border:1.5px dashed #b91c1c;")
+    + "dashed = not named by this city's deep scan, checked because found in another city</span>"
     + "</div><div class='row'><span class='t'>Found</span>"
-    + "<span class='i'>not in your panel, same check:"
-    + "".join(f"<i class='c' style='width:auto;padding:0 6px;{_scale(d, found=True)[0]}'>"
-              f"{_scale(d, found=True)[1]}</i>"
-              for d in ({"n_markers": 3, "n_measured": 3, "n_present": 0},
-                        {"n_markers": 3, "n_measured": 3, "n_present": 3}))
-    + "</span>"
-    + "<span class='i'><i class='c' style='width:auto;padding:0 6px;"
-    + _scale({"n_markers": 2, "n_measured": 1, "n_present": 1}, found=True)[0]
-    + "border:1.5px dashed #b91c1c;'>1/1</i>dashed = not named by this city's scan, "
-      "checked because found in another city</span>"
     + _li(S_FOUND, "5", "older results: days with evidence")
     + _li(S_NAMED, "0", "named only (shared mutations)")
 
     + _li(S_NOVEL, "3", "novel · days")
     + _li(S_BROAD, "2", "too broad to name · days")
     + _li(S_NEAR, "3", "◆ panel variant ± 1 change · days (a hint)")
-    + "</div><div class='row'><span class='t'>Days</span>"
-    + "<span class='i'>Evidence, one square per sampling day in the chosen city:"
+    + "</div><div class='row'><span class='t'>Samples</span>"
+    + "<span class='i'>The cell adds up the reads of all samples in the chosen dates. Evidence: "
+      "one square per sample in the chosen city (newest right, at most "
+    + f"{_cal_max()}), the ★ check "
+      "on that sample's reads, same colours as the cells:"
     + "<span class='cal'>" + "".join(
-        f"<i style='{_day_marks(GREEN)[k][0]}'></i>" for k in ("present", "weak", "absent", "uncovered"))
-    + f"</span> present · weak · absent · under {_num()['mc']} reads (red for found, blue for novel)</span>"
+        f"<i style='{_day_marks(GREEN, AMBER)[k][0]}'></i>" for k in ("present", "mixed", "absent", "thin"))
+    + "</span> present · mixed · absent · too few reads to tell from that sample "
+      "(hover a square: each marker's reads in it; blue for novel)</span>"
+    + "<span class='i'>deep scan: evidence on N samples = a different count: samples with ≥ "
+    + f"{_num()['er']} reads and ≥ {_num()['es']} % of the sample's reads carrying the "
+      "lineage's mutations</span>"
     + "</div><div class='row'><span class='t'>Tree</span>"
     + _ld(f"background:{RED}", "found in this city")
     + _ld(f"border:1.8px dashed {RED}", "1 day here")

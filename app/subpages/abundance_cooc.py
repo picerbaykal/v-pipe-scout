@@ -65,8 +65,18 @@ def cached_get_pango_loader() -> PangoLoader:
 def _cached_tree_check(tree_id: str, etag: str, tree_updated: str) -> dict:
     """The online check for a newer Nextclade tree, at most once a day per
     tree in use (pango_loader.check_tree_update)."""
+    from datetime import date as _d
     from api.pango_loader import check_tree_update
-    return check_tree_update({"etag": etag, "tree_updated": tree_updated or None})
+    r = dict(check_tree_update({"etag": etag, "tree_updated": tree_updated or None}) or {})
+    r["checked_on"] = _d.today().isoformat()      # cached with it: when it really ran
+    return r
+
+
+def _checked_when(chk: dict) -> str:
+    """'today' / '8 Oct 2026': when the (cached, once a day) online check ran."""
+    from datetime import date as _d
+    x = chk.get("checked_on")
+    return "today" if not x or x == _d.today().isoformat() else _fmt_day(x)
 
 
 def _fmt_day(d) -> str:
@@ -85,19 +95,23 @@ def _render_tree_info() -> None:
     from api.pango_loader import (tree_info, download_pango_summary,
                                   PANGO_SUMMARY_CACHE)
     t = tree_info()
-    when = (f"tree of {_fmt_day(t['tree_updated'])}" if t.get("tree_updated")
-            else "tree date unknown")
-    where = "updated here" if t["where"] == "update" else "shipped with the app"
+    # The date is when Nextclade BUILT the tree (its meta.updated), not when
+    # it was downloaded; worded so a month-old date doesn't read as outdated
+    built = (f"built {_fmt_day(t['tree_updated'])}" if t.get("tree_updated")
+             else "build date unknown")
     chk = _cached_tree_check(t["id"], t.get("etag") or "", t.get("tree_updated") or "")
-    line = f"Pango tree: Nextclade, {when} ({where})"
     # "newer" only when our date is known; else just say what's online
     if chk.get("newer") and t.get("tree_updated"):
-        line += f" · newer tree online ({_fmt_day(chk.get('online_updated'))})"
+        line = (f"Pango tree: Nextclade, {built} · a newer tree is online "
+                f"(built {_fmt_day(chk.get('online_updated'))})")
+    elif chk.get("checked") and t.get("tree_updated"):
+        line = f"Pango tree: Nextclade's latest ({built}) · checked {_checked_when(chk)}"
     elif chk.get("checked"):
-        line += " · up to date" if t.get("tree_updated") else (
-            f" · online: {_fmt_day(chk.get('online_updated'))}")
-    elif chk.get("error"):
-        line += " · couldn't check for updates"
+        line = (f"Pango tree: Nextclade, {built} · online: built "
+                f"{_fmt_day(chk.get('online_updated'))}")
+    else:
+        line = f"Pango tree: Nextclade, {built}" + (
+            " · couldn't check for updates" if chk.get("error") else "")
     st.caption(line)
     if chk.get("newer") or (chk.get("checked") and not t.get("tree_updated")):
         if st.button("Update tree", key="acooc_update_tree",
@@ -229,7 +243,6 @@ def _panel_verdicts(cooc_res: dict, variants: list) -> dict:
     from process.variant_explorer import check_in_data
     pc = (cooc_res or {}).get("panel_check", {}) or {}
     _dates = [str(d)[:10] for d in ((cooc_res or {}).get("dates") or [])]
-    _RECENT = int(get_cooc_setting("check.recent_samples", default=5))
     sym = {"present": "✓", "absent": "✗", "unmeasured": "?"}
     out = {}
     for v in variants:
@@ -238,12 +251,11 @@ def _panel_verdicts(cooc_res: dict, variants: list) -> dict:
             out[v] = {"state": "no_data", "reason": "no check data — re-run the scan",
                       "n_present": 0, "n_measured": 0, "n_markers": 0}
             continue
-        # the vote uses the last RECENT covered samples ("is it there now?",
-        # 2026-10-02); the timeline covers the window
-        _cid = check_in_data(ci.get("markers") or [], ci.get("per_date") or {}, _dates,
-                             recent=_RECENT)
-        _pdr = {d: (ci.get("per_date") or {}).get(d, {}) for d in _cid["recent_dates"]}
-        res = check_verdicts(ci.get("markers") or [], _pdr)
+        # the vote adds up the reads of ALL samples in the run's dates
+        # (2026-10-09; from 2 Oct it used the last 5 covered samples only, which
+        # ignored the chosen window); the calendar shows the samples one by one
+        _cid = check_in_data(ci.get("markers") or [], ci.get("per_date") or {}, _dates)
+        res = check_verdicts(ci.get("markers") or [], ci.get("per_date") or {})
         nd, np_, nm = res["n_markers"], res["n_present"], res["n_measured"]
         mk = [f"{k} {(m['freq'] or 0) * 100:.0f}% {sym[m['status']]}"
               if m["cov"] else f"{k} no reads ?" for k, m in res["markers"].items()]
@@ -259,7 +271,8 @@ def _panel_verdicts(cooc_res: dict, variants: list) -> dict:
         out[v] = {"state": state, "reason": reason,
                   "n_present": np_, "n_measured": nm, "n_markers": nd,
                   # one mark per sampling day, for the Evidence calendar
-                  "timeline": _cid["timeline"], "recent_dates": _cid["recent_dates"]}
+                  "timeline": _cid["timeline"],
+                  "day_detail": _cid.get("day_detail") or {}}
     return out
 
 
@@ -2119,8 +2132,7 @@ def app():
                         if not _pv:
                             return None
                         return _cid(_pv.get("markers") or [], _pv.get("per_date") or {},
-                                    _fc.get("dates") or [],
-                                    recent=int(get_cooc_setting("check.recent_samples", default=5)))
+                                    _fc.get("dates") or [])
 
                     def _xcheck(_loc, _node):
                         """Phase 3: the ★ marker check of a lineage named in another
@@ -2130,8 +2142,7 @@ def app():
                         if not _pv or not _pv.get("markers"):
                             return None
                         return _cid(_pv.get("markers") or [], _pv.get("per_date") or {},
-                                    _x.get("dates") or [],
-                                    recent=int(get_cooc_setting("check.recent_samples", default=5)))
+                                    _x.get("dates") or [])
 
                     def _ingest_clade(_c, _loc, _bucket=None):
                         # Route one finding (top-level OR a promoted sub-finding) into
@@ -2267,10 +2278,15 @@ def app():
                                "re-run to apply.")
                     # the chosen city (click a city code in the table header)
                     if st.session_state.get("acooc_tree_city") not in _ready_locs:
-                        st.session_state["acooc_tree_city"] = _ready_locs[0]
+                        st.session_state["acooc_tree_city"] = min(
+                            _ready_locs, key=lambda l: _vt.city_name(l).lower())
                     _tcity = st.session_state["acooc_tree_city"]
-                    _cities_all = [l for l in location_names
-                                   if l in _verdicts_by_city or l in _scan_res_all]
+                    # columns in a fixed order, by city name (2026-10-09): in the
+                    # order picked, a city moved between runs and its cells were
+                    # easy to compare with the wrong city
+                    _cities_all = sorted((l for l in location_names
+                                          if l in _verdicts_by_city or l in _scan_res_all),
+                                         key=lambda l: _vt.city_name(l).lower())
 
                     # ---- findings not in the panel ----
                     _conf = sorted(list(_agg_new.values()) + list(_agg_sub.values()),

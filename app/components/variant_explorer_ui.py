@@ -14,7 +14,7 @@ from process.variant_explorer import check_in_data, investigate_variant, marker_
 _STATE = {
     "present":     ("#dcfce7", "#166534", "present"),
     "absent":      ("#f3f4f6", "#4b5563", "absent"),
-    "mixed":       ("#fef3c7", "#92400e", "mixed"),
+    "mixed":       ("#d1d5db", "#111827", "mixed"),
     "not_covered": ("#ffffff", "#6b7280", "not covered"),
     "no_marker":   ("#f3f4f6", "#6b7280", "no ★ marker"),
 }
@@ -206,7 +206,8 @@ def _check_section(variant, panel, cities, start_date, end_date, celery_app, key
                     f"present ≥ {c['present_freq'] * 100:g} % · absent &lt; "
                     f"{c['absent_freq'] * 100:g} % · ≥ {c['min_cov']} reads · link ≥ "
                     f"{c['link_min'] * 100:g} % of ≥ {c['min_link']} reads · verdict: present "
-                    f"if ≥ {c['confirm_share'] * 100:g} % of measurable markers are present, "
+                    f"if ≥ {c['confirm_share'] * 100:g} % of measurable markers are present "
+                    f"and at least {c['min_present']}, "
                     f"absent if ≤ {c['notfound_share'] * 100:g} % · ⚠ = just missed a rule"
                     f"</div>", unsafe_allow_html=True)
                 for city in cities:
