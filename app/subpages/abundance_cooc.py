@@ -291,10 +291,13 @@ def _run_scope(selected_locations, all_selected_variants, start_date, end_date) 
 
 # Result tabs, grouped in the order results arrive (2026-10-08): panel and
 # abundance (is the panel good enough for a deconvolution? then the
-# deconvolution), the deep scan (lineages, signal over time), and the look-up.
+# deconvolution), the deep scan (lineages), and the look-ups (signal over
+# time, investigate a variant; moved 2026-10-09: neither needs the deep scan).
 _SECTION_GROUPS = [("Panel and abundance", ["Panel check", "Deconvolution"]),
-                   ("Deep scan", ["Lineages", "Signal over time"]),
-                   ("Look-up", ["Investigate a variant"])]
+                   ("Deep scan", ["Lineages"]),
+                   # per-lineage tools: they work without the deep scan and use
+                   # it when it's there (Signal over time needs a run's cities)
+                   ("Look-up", ["Signal over time", "Investigate a variant"])]
 
 
 def _render_section_tabs(marks: dict) -> str:
@@ -1732,8 +1735,7 @@ def app():
 
             if _active_section == "Deconvolution":
               st.markdown("#### Deconvolution")
-              st.caption("Variant shares over time per location, with LolliPop and the "
-                         "settings of step 4.")
+              st.caption("Variant shares over time per location, with LolliPop.")
               _dc1, _dc2, _dc3 = st.columns(3)
               with _dc1:
                   _btn_deconv()
