@@ -181,6 +181,11 @@ def _pl(n, word):
 #                 the wastewater
 # (Until 2026-10-09 a gradient by the share present, on two different scales
 # for panel and found rows, so the same 2/5 had two colours.)
+# Present in the sum, but clearly present in fewer than evidence.min_days
+# samples on their own (2026-10-09): a light fill with a thin solid edge of
+# the same hue (XFZ in Lugano: 2/2 from one sample, 24 Aug).
+S_PRESENT_LIGHT = "background:#e8f7ed;color:#14532d;box-shadow:inset 0 0 0 1.5px #16a34a;"
+S_FOUND_LIGHT = "background:#fdecec;color:#7f1d1d;box-shadow:inset 0 0 0 1.5px #dc2626;"
 MIXED_BG, PALE_BG, PALE_FG = "#b4bac3", "#f3f4f6", "#6b7280"
 S_MIXED = _fill(MIXED_BG, "#111827")
 S_PALE = _fill(PALE_BG, PALE_FG) + "box-shadow:inset 0 0 0 1px #e5e7eb;"
@@ -202,6 +207,32 @@ def _state(d):
     return "absent" if p / (p + a) <= lo else "mixed"
 
 
+def _clear_samples(d):
+    """Samples where the lineage is clearly present on its own (the
+    calendar's present squares); None for results without a calendar."""
+    tl = d.get("timeline")
+    if tl is None:
+        return None
+    return [x for x, mk in tl if mk == "present"]
+
+
+def _few_clear(d):
+    """Present in the sum, but clear in fewer than evidence.min_days samples."""
+    c = _clear_samples(d)
+    return c is not None and len(c) < _num()["ed"]
+
+
+def _clear_note(d):
+    """Hover words for a light cell: on which sample(s) it was clear."""
+    if _state(d) != "present" or not _few_clear(d):
+        return ""
+    c = _clear_samples(d) or []
+    when = (f"only {len(c)} {_pl(len(c), 'sample')} on its own ("
+            + ", ".join(_short_date(x) for x in c) + ")") if c else "no sample on its own"
+    return (f" — clearly present in {when}; the sum of the samples says present, the "
+            "single samples were too thin, mixed or absent")
+
+
 def _scale(d, found=False):
     """(cell style, label, dot colour, name colour, share present or None)
     for one city's check result. found: a lineage not in the panel."""
@@ -214,6 +245,9 @@ def _scale(d, found=False):
     share, st = p / m, _state(d)
     if st == "present":
         col = RED if found else GREEN
+        if _few_clear(d):
+            return ((S_FOUND_LIGHT if found else S_PRESENT_LIGHT), f"{p}/{m}",
+                    ("#fca5a5" if found else "#86efac"), (RED if found else "#15803d"), share)
         return _fill(col, "#fff"), f"{p}/{m}", col, (RED if found else "#15803d"), share
     if st == "absent" and not found:
         return S_NOTFOUND, f"{p}/{m}", AMBER, AMBER_T, share
@@ -232,7 +266,7 @@ def _panel_cells(v, per_city, cities, sel):
         style, label, _dot, _ink, share = _scale(d)
         out.append(_cell(label, style, f"{v} · {city_name(c)}: "
                          + (_breakdown(d, v, html=False) if d.get("n_markers") else _vote_text(d))
-                         + _marker_details(d, v), c == sel))
+                         + _clear_note(d) + _marker_details(d, v), c == sel))
     return "".join(out)
 
 
@@ -498,7 +532,7 @@ def _finding_cells(v, f, cities, sel):
             style += "border:1.5px dashed #b91c1c;"
             fi = ", ".join(city_name(x) for x in d.get("found_in") or [])
             out.append(_cell(label, style, f"{v} · {city_name(c)}, all samples "
-                             f"in the chosen dates: {_vote_text(chk)} · not named by this city's "
+                             f"in the chosen dates: {_vote_text(chk)}{_clear_note(chk)} · not named by this city's "
                              f"scan (its reads here may carry only one mutation beyond your "
                              f"panel); checked because it was found in {fi}", c == sel))
             continue
@@ -506,7 +540,7 @@ def _finding_cells(v, f, cities, sel):
             # the same measure as the panel: ★ markers present / measurable
             style, label, _dot, _ink, _share = _scale(chk, found=True)
             out.append(_cell(label, style, f"{v} · {city_name(c)}, all samples "
-                             f"in the chosen dates: {_vote_text(chk)} · the scanner counted "
+                             f"in the chosen dates: {_vote_text(chk)}{_clear_note(chk)} · the scanner counted "
                              f"{n} {_pl(n, 'sample')} of evidence in the window", c == sel))
             continue
         if n == 0:
@@ -990,12 +1024,17 @@ _LEGEND_ROWS = (
     "<div class='row'><span class='t'>★ check</span>"
     "<span class='i'>markers present / measured, in your panel:"
     + _lc({"n_markers": 4, "n_measured": 4, "n_present": 4}) + "present"
+    + _lc({"n_markers": 2, "n_measured": 2, "n_present": 2,
+           "timeline": [["2026-01-01", "present"]]})
+    + f"present in the sum, clear in fewer than {_num()['ed']} samples on their own"
     + _lc({"n_markers": 5, "n_measured": 5, "n_present": 2}) + "mixed"
     + _lc({"n_markers": 4, "n_measured": 4, "n_present": 0})
     + "absent — in your panel but not in the wastewater</span>"
     + "<span class='i'>not in your panel:"
     + _lc({"n_markers": 3, "n_measured": 3, "n_present": 3}, True)
     + "present — missing from your panel"
+    + _lc({"n_markers": 2, "n_measured": 2, "n_present": 2,
+           "timeline": [["2026-01-01", "present"]]}, True) + "the same, clear in 1 sample"
     + _lc({"n_markers": 5, "n_measured": 5, "n_present": 2}, True) + "mixed"
     + _lc({"n_markers": 3, "n_measured": 3, "n_present": 0}, True) + "absent</span>"
     + f"<span class='i'>present = ≥ {_shares()[0] * 100:g} % of the measured markers and "
