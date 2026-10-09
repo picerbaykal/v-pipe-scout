@@ -13,12 +13,26 @@ PANGO_DATA_DIR = Path(__file__).parent.parent / "data"
 PANGO_SUMMARY_DEFAULT = PANGO_DATA_DIR / "pango_summary.json"
 PANGO_SUMMARY_CACHE = Path("/app/.cache/pango/pango_summary.json")  # Docker runtime path
 
+_VALID_MEMO: dict = {}
+
+
 def _cache_is_valid(path: Path) -> bool:
     """A cache is valid only if it has no ORPHANED lineages — lineages with an
     empty parent whose naming-parent exists in the file. Orphans (introduced by
     an old merge step) break clade traversal and corrupt scanner resolution, so
     a cache containing them must be rejected in favour of the clean checked-in
-    file. Cheap check: scan parents once."""
+    file. The answer is remembered until the file changes (2026-10-09: it read
+    the whole 12.9 MB file on every tree load, in both containers)."""
+    try:
+        key = (str(path), path.stat().st_mtime)
+    except OSError:
+        return False
+    if key not in _VALID_MEMO:
+        _VALID_MEMO[key] = _cache_is_valid_uncached(path)
+    return _VALID_MEMO[key]
+
+
+def _cache_is_valid_uncached(path: Path) -> bool:
     try:
         with path.open("r", encoding="utf-8") as f:
             d = json.load(f)
@@ -32,19 +46,62 @@ def _cache_is_valid(path: Path) -> bool:
         return False
 
 
+def meta_path(summary_path: str | Path) -> Path:
+    """The side file of a tree: pango_summary.json -> pango_summary.meta.json
+    (2026-10-09). The summary itself can't hold a date: every key is a
+    lineage."""
+    p = Path(summary_path)
+    return p.with_name(p.name.replace(".json", "") + ".meta.json")
+
+
+def read_tree_meta(summary_path: str | Path) -> dict:
+    """{source, tree_updated, etag, downloaded} of a tree, {} without side file."""
+    try:
+        with meta_path(summary_path).open("r", encoding="utf-8") as f:
+            m = json.load(f)
+        return m if isinstance(m, dict) else {}
+    except Exception:
+        return {}
+
+
 def get_pango_summary_path() -> Path:
     """
     Return the path to the best available pango_summary.json.
 
-    Prefers the runtime cache ONLY if it passes validation (no orphaned
-    lineages). A corrupted cache (orphans from an old merge) is rejected and the
-    clean checked-in default is used instead. This prevents a stale/corrupted
-    cache — which can survive volume/container resets — from breaking clade-level
-    scanner detection.
+    The runtime cache (written by "Update tree") is used when it passes
+    validation (no orphaned lineages) AND is newer than the checked-in file:
+    2026-10-09, newest wins. A tree with a side file (pango_summary.meta.json:
+    the Nextclade tree's own date) beats one without; between two with side
+    files, the later tree date. A cache without a side file is from before the
+    side files and counts as older than the checked-in tree. A corrupted cache
+    (orphans from an old merge) is never used.
     """
-    if PANGO_SUMMARY_CACHE.exists() and _cache_is_valid(PANGO_SUMMARY_CACHE):
+    cache_ok = PANGO_SUMMARY_CACHE.exists() and _cache_is_valid(PANGO_SUMMARY_CACHE)
+    if not cache_ok:
+        return PANGO_SUMMARY_DEFAULT
+    cm, dm = read_tree_meta(PANGO_SUMMARY_CACHE), read_tree_meta(PANGO_SUMMARY_DEFAULT)
+    if not cm.get("tree_updated"):
+        return PANGO_SUMMARY_DEFAULT
+    if not dm.get("tree_updated"):
         return PANGO_SUMMARY_CACHE
-    return PANGO_SUMMARY_DEFAULT
+    return (PANGO_SUMMARY_CACHE if str(cm["tree_updated"]) >= str(dm["tree_updated"])
+            else PANGO_SUMMARY_DEFAULT)
+
+
+def tree_info(summary_path: str | Path | None = None) -> dict:
+    """What the page shows and the worker records (2026-10-09): {id, file,
+    where, source, tree_updated, etag, mtime}. id changes whenever the tree
+    file changes (name + modification time), so app and worker can compare."""
+    p = Path(summary_path) if summary_path else get_pango_summary_path()
+    try:
+        mtime = p.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    m = read_tree_meta(p)
+    return {"id": f"{p.name}@{int(mtime)}", "file": str(p),
+            "where": "update" if p == PANGO_SUMMARY_CACHE else "checked in",
+            "source": m.get("source", "nextclade"), "tree_updated": m.get("tree_updated"),
+            "etag": m.get("etag"), "mtime": mtime}
 
 class PangoLoader:
     """
@@ -463,38 +520,79 @@ def build_summary_from_tree(tree: dict, existing_dates: dict | None = None) -> d
     return out
 
 
+def check_tree_update(current: dict | None = None, timeout: int = 20) -> dict:
+    """Is there a newer Nextclade tree online? (2026-10-09)
+
+    Asks GitHub for the tree file's ETag (a fingerprint of its content; a HEAD
+    request, nothing downloaded). Same ETag as the tree in use -> up to date.
+    Otherwise the file is fetched (6 MB) to read its own date (meta.updated).
+    Returns {checked, newer, online_updated, online_etag, error}; never raises.
+    current = tree_info() of the tree in use."""
+    current = current or tree_info()
+    out = {"checked": False, "newer": False, "online_updated": None,
+           "online_etag": None, "error": None}
+    try:
+        req = urllib.request.Request(NEXTCLADE_TREE_URL, method="HEAD")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            etag = (resp.headers.get("ETag") or "").strip('"')
+        out["online_etag"] = etag
+        if etag and etag == (current.get("etag") or ""):
+            out["checked"] = True
+            out["online_updated"] = current.get("tree_updated")
+            return out
+        with urllib.request.urlopen(NEXTCLADE_TREE_URL, timeout=max(timeout, 60)) as resp:
+            tree = json.loads(resp.read())
+        upd = str((tree.get("meta") or {}).get("updated") or "") or None
+        out["online_updated"] = upd
+        mine = current.get("tree_updated")
+        out["newer"] = bool(upd) and (not mine or str(upd) > str(mine))
+        out["checked"] = True
+    except Exception as exc:
+        out["error"] = str(exc)
+    return out
+
+
 def download_pango_summary(local_path: str | Path) -> dict:
     """
     Fetch the Nextclade reference tree and write it to local_path as a
     pango_summary-compatible file. Replaces the corneliusroemer download
     (upstream frozen since 2025-06, no PJ.2+) and the old UShER/Freyja merge
     (which introduced orphaned lineages that quarantined the cache).
-    designationDate is carried over from the file already at local_path.
+    designationDate is carried over from the file already at local_path, or
+    from the tree in use. 2026-10-09: also writes the side file
+    (pango_summary.meta.json) with the tree's own date and its ETag.
 
     Returns:
-        {success, new_variants, old_variants, added, error}
+        {success, new_variants, old_variants, added, tree_updated, error}
     """
     local = Path(local_path)
 
     old_variants: set[str] = set()
     existing_dates: dict[str, str] = {}
-    if local.exists():
+    # designation dates (the tree has none): from the file being replaced and
+    # from the checked-in tree, the replaced file's first; even a rejected
+    # cache still has good dates (2026-10-09)
+    for i, src in enumerate([local, PANGO_SUMMARY_DEFAULT]):
+        if not src.exists():
+            continue
         try:
-            with local.open("r", encoding="utf-8") as f:
+            with src.open("r", encoding="utf-8") as f:
                 cur = json.load(f)
-            old_variants = set(cur)
-            existing_dates = {
-                lin: entry.get("designationDate")
-                for lin, entry in cur.items()
-                if isinstance(entry.get("designationDate"), str)
-            }
+            if i == 0:
+                old_variants = set(cur)
+            for lin, entry in cur.items():
+                d = entry.get("designationDate") if isinstance(entry, dict) else None
+                if isinstance(d, str) and lin not in existing_dates:
+                    existing_dates[lin] = d
         except Exception:
             pass
 
     logging.info("pango_loader: fetching Nextclade reference tree -> pango_summary")
     try:
         with urllib.request.urlopen(NEXTCLADE_TREE_URL, timeout=60) as resp:
+            etag = (resp.headers.get("ETag") or "").strip('"')
             tree = json.loads(resp.read())
+        tree_updated = str((tree.get("meta") or {}).get("updated") or "") or None
 
         new_data = build_summary_from_tree(tree, existing_dates)
         new_variants = set(new_data)
@@ -503,6 +601,15 @@ def download_pango_summary(local_path: str | Path) -> dict:
         tmp = local.with_suffix(".tmp")
         with tmp.open("w", encoding="utf-8") as f:
             json.dump(new_data, f)
+        # side file first, then the tree: a reader that sees the new tree
+        # also sees its date
+        from datetime import datetime, timezone
+        mtmp = meta_path(local).with_suffix(".tmp")
+        with mtmp.open("w", encoding="utf-8") as f:
+            json.dump({"source": "nextclade", "tree_updated": tree_updated, "etag": etag,
+                       "downloaded": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                       "url": NEXTCLADE_TREE_URL}, f)
+        shutil.move(str(mtmp), str(meta_path(local)))
         shutil.move(str(tmp), str(local))
 
         return {
@@ -510,6 +617,7 @@ def download_pango_summary(local_path: str | Path) -> dict:
             "new_variants": len(new_variants),
             "old_variants": len(old_variants),
             "added": sorted(new_variants - old_variants),
+            "tree_updated": tree_updated,
             "error": None,
         }
 
@@ -519,5 +627,6 @@ def download_pango_summary(local_path: str | Path) -> dict:
             "new_variants": 0,
             "old_variants": len(old_variants),
             "added": [],
+            "tree_updated": None,
             "error": str(exc),
         }

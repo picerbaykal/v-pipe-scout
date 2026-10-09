@@ -121,10 +121,30 @@ def _load_panel_parent_map() -> dict:
 
 _ALL_LINEAGE_SIGNATURES = None
 _PANEL_PARENT_MAP = None
+# the tree file these were loaded from (pango_loader.tree_info()["id"]): when
+# the file in use changes ("Update tree"), everything is loaded again, so the
+# worker never keeps an older tree than the app (2026-10-09)
+_LOADED_TREE_ID = None
+
+
+def _follow_tree_file() -> None:
+    global _ALL_LINEAGE_SIGNATURES, _PANEL_PARENT_MAP, _LOADED_TREE_ID
+    global _CHILDREN_MAP
+    from api.pango_loader import tree_info
+    tid = tree_info()["id"]
+    if tid != _LOADED_TREE_ID:
+        if _LOADED_TREE_ID is not None:
+            logger.info(f"Pango tree changed ({_LOADED_TREE_ID} -> {tid}): reloading")
+        _ALL_LINEAGE_SIGNATURES = None
+        _PANEL_PARENT_MAP = None
+        _CHILDREN_MAP = None
+        _IN_TREE_CACHE.clear()
+        _LOADED_TREE_ID = tid
 
 
 def get_all_lineage_signatures() -> dict:
     global _ALL_LINEAGE_SIGNATURES
+    _follow_tree_file()
     if _ALL_LINEAGE_SIGNATURES is None:
         _ALL_LINEAGE_SIGNATURES = _load_all_lineage_signatures()
     return _ALL_LINEAGE_SIGNATURES
@@ -132,6 +152,7 @@ def get_all_lineage_signatures() -> dict:
 
 def get_panel_parent_map() -> dict:
     global _PANEL_PARENT_MAP
+    _follow_tree_file()
     if _PANEL_PARENT_MAP is None:
         _PANEL_PARENT_MAP = _load_panel_parent_map()
     return _PANEL_PARENT_MAP
@@ -139,6 +160,16 @@ def get_panel_parent_map() -> dict:
 
 _CHILDREN_MAP = None
 _IN_TREE_CACHE: Dict[tuple, bool] = {}
+
+
+def _tree_used() -> dict:
+    """{id, tree_updated, where} of the tree file in use (pango_loader.tree_info)."""
+    try:
+        from api.pango_loader import tree_info
+        t = tree_info()
+        return {k: t.get(k) for k in ("id", "tree_updated", "where")}
+    except Exception:
+        return {}
 
 
 def in_tree(variant: str, sign: str, mut: str) -> bool:
@@ -671,6 +702,7 @@ def run_cooc_panel_completeness(
             "unexplained_patterns": [],
             "panel_check": panel_check,
             "position_coverage": position_coverage,
+            "pango_tree": _tree_used(),
         }
 
     combined = pd.concat(per_batch_results, ignore_index=True)
@@ -697,4 +729,6 @@ def run_cooc_panel_completeness(
         "panel_check": panel_check,
         # {date: {position: reads covering it}} — see _query_all_batches
         "position_coverage": position_coverage,
+        # which pango tree this result used (the page compares it, 2026-10-09)
+        "pango_tree": _tree_used(),
     }

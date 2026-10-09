@@ -48,8 +48,71 @@ wiseLoculus = WiseLoculusLapis(wise_server_ip)
 
 
 @st.cache_resource
+def _pango_loader_for(tree_id: str, path: str) -> PangoLoader:
+    return PangoLoader(path)
+
+
 def cached_get_pango_loader() -> PangoLoader:
-    return PangoLoader(get_pango_summary_path())
+    """The pango tree, loaded once per tree FILE (2026-10-09): keyed by
+    tree_info()["id"] (file name + modification time), so after "Update tree"
+    the page loads the new tree instead of keeping the old one in memory."""
+    from api.pango_loader import tree_info
+    t = tree_info()
+    return _pango_loader_for(t["id"], t["file"])
+
+
+@st.cache_data(ttl=24 * 3600, show_spinner=False)
+def _cached_tree_check(tree_id: str, etag: str, tree_updated: str) -> dict:
+    """The online check for a newer Nextclade tree, at most once a day per
+    tree in use (pango_loader.check_tree_update)."""
+    from api.pango_loader import check_tree_update
+    return check_tree_update({"etag": etag, "tree_updated": tree_updated or None})
+
+
+def _fmt_day(d) -> str:
+    try:
+        from datetime import date as _d
+        x = _d.fromisoformat(str(d)[:10])
+        return f"{x.day} {x.strftime('%b')} {x.year}"
+    except Exception:
+        return str(d) if d else ""
+
+
+def _render_tree_info() -> None:
+    """Under the variant tree (2026-10-09): which pango tree is in use, whether
+    a newer one is online, and the Update tree button (never automatic: a new
+    tree can change ★ markers and names under existing results)."""
+    from api.pango_loader import (tree_info, download_pango_summary,
+                                  PANGO_SUMMARY_CACHE)
+    t = tree_info()
+    when = (f"tree of {_fmt_day(t['tree_updated'])}" if t.get("tree_updated")
+            else "tree date unknown")
+    where = "updated here" if t["where"] == "update" else "shipped with the app"
+    chk = _cached_tree_check(t["id"], t.get("etag") or "", t.get("tree_updated") or "")
+    line = f"Pango tree: Nextclade, {when} ({where})"
+    # "newer" only when our date is known; else just say what's online
+    if chk.get("newer") and t.get("tree_updated"):
+        line += f" · newer tree online ({_fmt_day(chk.get('online_updated'))})"
+    elif chk.get("checked"):
+        line += " · up to date" if t.get("tree_updated") else (
+            f" · online: {_fmt_day(chk.get('online_updated'))}")
+    elif chk.get("error"):
+        line += " · couldn't check for updates"
+    st.caption(line)
+    if chk.get("newer") or (chk.get("checked") and not t.get("tree_updated")):
+        if st.button("Update tree", key="acooc_update_tree",
+                     help="Downloads the Nextclade tree for both the page and the "
+                          "worker. Results already on the page keep the tree they "
+                          "were made with; the next ▶ Run uses the new one."):
+            with st.spinner("Downloading the Nextclade tree…"):
+                r = download_pango_summary(PANGO_SUMMARY_CACHE)
+            if r.get("success"):
+                _cached_tree_check.clear()
+                st.success(f"Tree updated ({_fmt_day(r.get('tree_updated'))}): "
+                           f"{r.get('new_variants')} lineages, {len(r.get('added') or [])} new.")
+                st.rerun()
+            else:
+                st.error(f"Update failed: {r.get('error')}")
 
 
 @st.cache_data
@@ -659,6 +722,7 @@ def app():
             pango_loader=cached_get_pango_loader(),
             variant_status={},
         )
+        _render_tree_info()
 
         st.markdown("---")
 
@@ -998,6 +1062,21 @@ def app():
             if _scope["new_locs"]:
                 _tags.append(", ".join(_sh(l) for l in _scope["new_locs"]) + " not in the run yet")
             _tags += _scope["reasons"]
+            # the pango tree the run's panel checks used (worker) vs the tree in
+            # use now (2026-10-09)
+            try:
+                from api.pango_loader import tree_info as _ti
+                _now_tree = _ti()
+                _used = {(r or {}).get("pango_tree", {}).get("id"): (r or {}).get("pango_tree", {})
+                         for r in (st.session_state.get("acooc_cooc_results") or {}).values()
+                         if (r or {}).get("pango_tree")}
+                _other = [t for i, t in _used.items() if i and i != _now_tree["id"]]
+                if _other:
+                    _tags.append("run used another pango tree ("
+                                 + (_fmt_day(_other[0].get("tree_updated")) or "older")
+                                 + "): re-run to use the current one")
+            except Exception:
+                pass
             st.markdown(
                 "<div style='display:flex;flex-wrap:wrap;gap:8px;align-items:center;"
                 "font-size:13px;background:#F6F5F1;border-radius:8px;padding:6px 10px;"
