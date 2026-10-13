@@ -341,18 +341,69 @@ def _summary(d):
     return txt + (f" · {g} {words}" if g in ("↑", "↓") else "")
 
 
+# hover symbols (2026-10-13): short tips instead of sentences; the legend
+# explains them once
+SYM = {"present": "✓", "absent": "✗", "between": "~", "low": "?", "nofit": "≠"}
+
+
+def _marker_syms(d, n_max=6):
+    """'4214C 50 % ✓ · 8350C 0 % ✗ · 1148T 40 reads ?' from a check's detail."""
+    out = []
+    for x in d.get("detail") or []:
+        reads = x.get("cov_raw", x.get("cov", 0)) or 0
+        f, st, why = x.get("freq"), x.get("status"), x.get("why") or ""
+        if not reads:
+            out.append(f"{x['marker']} no reads ?")
+            continue
+        sym = ("✓" if st == "present" else "✗" if st == "absent"
+               else "?" if why.startswith("under") else "≠" if ("link" in why or "unlike" in why
+                                                                 or "look like" in why) else "~")
+        out.append(f"{x['marker']} {100 * (f or 0):.0f} % {sym}" if sym != "?"
+                   else f"{x['marker']} {reads} reads ?")
+    more = f" · +{len(out) - n_max}" if len(out) > n_max else ""
+    return " · ".join(out[:n_max]) + more
+
+
+def _cell_tip(v, city, d, extra=""):
+    """'XFG · Basel — mixed (1 ✓ 1 ✗ of 2 ★) · 2 well-covered samples · 4214C
+    50 % ✓ · 8350C 0 % ✗' (+ trend, + why it was checked)."""
+    n_mk, p, a, u = _vote_counts(d)
+    if n_mk == 0:
+        return f"{v} · {city} — no ★ marker"
+    word = {"present": "present", "absent": "absent", "mixed": "mixed"}.get(_state(d), "too few reads")
+    counts = f"{p} ✓ {a} ✗" + (f" {u} ?" if u else "") + f" of {n_mk} ★"
+    samples, basis = _basis_samples(d)
+    base = (f"{len(samples)} well-covered {_pl(len(samples), 'sample')}" if basis == "well"
+            else "weak: no well-covered sample (all counted, ≤ "
+                 f"{_cap_reads():,} reads each)")
+    g, words = _trend(d)
+    ms = _marker_syms(d)
+    return (f"{v} · {city} — {word} ({counts}) · {base}"
+            + (f" · {g} {words}" if g in ("↑", "↓") else "")
+            + (f" · {ms}" if ms else "") + extra)
+
+
 def _det_link(gid):
     return f"<span class='det' data-grp='{gid}'>details <span class='arr'>▸</span></span>"
 
 
+_SHORT = {"present": "✓ present", "absent": "✗ absent", "mixed": "◐ mixed",
+          "thin": "? too few reads", "uncovered": "? no reads at its markers"}
+
+
 def _square(x, m, mk, detail, quality):
-    style, meaning = mk.get(m, mk["unknown"])
-    extra, qtxt = _qual_bits(quality, x)
+    """'27 Aug · ✓ well covered (depth 9,212 · 84 % ≥ 100×) · ✗ absent —
+    4214C 0 % of 12,480 reads ✗ · …'"""
+    style, _meaning = mk.get(m, mk["unknown"])
+    extra, _qtxt = _qual_bits(quality, x)
+    q = (quality or {}).get(x)
+    head = ""
+    if q:
+        num = f"(depth {q.get('median', 0):,.0f} · {100 * q.get('share_100', 0):.0f} % ≥ 100×)"
+        head = ("▧ low coverage " if extra is None else "✓ well covered ") + num + " · "
     if extra is None:                  # low coverage: stripes over its colour
         extra = _LOWQ_EMPTY if m in ("thin", "uncovered") else _LOWQ
-        qtxt += (" — the sample is there, but each part of the genome comes from "
-                 "few virus molecules, so its shares are snapshots, not the city's mix")
-    tip = (_short_date(x) + ": " + (qtxt + " · " if qtxt else "") + meaning
+    tip = (_short_date(x) + " · " + head + _SHORT.get(m, m)
            + (" — " + detail[x] if (detail or {}).get(x) else ""))
     return f"<i style='{style}{extra}' data-tip='{_e(tip)}'></i>"
 
@@ -366,12 +417,18 @@ def _cal_line(d, top, low=None):
     n = _cal_max()
     mk = _day_marks(top, low)
     det, q = d.get("day_detail") or {}, d.get("quality") or {}
-    older = [(x, m) for x, m in tl[:-n] if m == "present"]
+    try:
+        from process.sample_qc import well_covered
+    except Exception:
+        well_covered = lambda _q: False                      # noqa: E731
+    # older samples that matter: where it was present, and the well-covered
+    # ones (the cell may rest on them)
+    older = [(x, m) for x, m in tl[:-n] if m == "present" or well_covered(q.get(x))]
     head = "".join(_square(x, m, mk, det, q) for x, m in older)
     if older:
         hidden = len(tl) - n - len(older)
         head += (f"<span class='gap' data-tip='{hidden} older {_pl(hidden, 'sample')} "
-                 f"without it not shown'>⋯</span>")
+                 f"not shown (low coverage, without it)'>⋯</span>")
     return ("<span class='cal' style='margin-left:0'>" + head
             + "".join(_square(x, m, mk, det, q) for x, m in tl[-n:]) + "</span>")
 
@@ -407,7 +464,7 @@ def _detail_row(gid, v, per_city, cities, sel, n_cols, found=False):
               "<th></th><th>median share, all cities</th></tr>" + "".join(mk_rows) + "</table>")
     body = ("<div class='dim' style='font-size:12px'>Samples per city, newest right · striped = "
             "low coverage (counted only when a city has no well-covered sample) · ⋯ = older "
-            "samples without it</div>" + "".join(lines) + mk
+            "low-coverage samples without it, not shown</div>" + "".join(lines) + mk
             + "<div class='dim' style='font-size:12px;margin-top:4px'>Each mutation per week: "
               "Signal over time (Look-up)</div>")
     return f"<tr class='dt g-{gid} hid'><td colspan='{n_cols}'>{body}</td></tr>"
@@ -422,10 +479,8 @@ def _panel_cells(v, per_city, cities, sel):
             continue
         style, label, _dot, _ink, share = _scale(d)
         g, words = _trend(d)
-        out.append(_cell(label + (f" {g}" if g in ("↑", "↓") else ""), style, f"{v} · {city_name(c)}: "
-                         + (_breakdown(d, v, html=False) if d.get("n_markers") else _vote_text(d))
-                         + _clear_note(d) + _well_note(d)
-                         + (f" · {g} {words}" if g else "") + _marker_details(d, v), c == sel))
+        out.append(_cell(label + (f" {g}" if g in ("↑", "↓") else ""), style,
+                         _cell_tip(v, city_name(c), d), c == sel))
     return "".join(out)
 
 
@@ -693,8 +748,7 @@ def _panel_evidence(per_city, sel, v="", gid=""):
     n_mk, p, a, u = _vote_counts(d)
     if n_mk == 0:
         return f"<span class='dim'>{_vote_text(d)}</span>"
-    tip = (f"{v} · present / (present + absent) = {p}/{p + a} — "
-           + _breakdown(d, v, html=False) + _well_note(d) + _marker_details(d, v))
+    tip = _cell_tip(v, city_name(sel), d)
     return (f"<span data-tip='{_e(tip)}'>{_e(_summary(d))}</span>"
             + (_det_link(gid) if gid and d.get("timeline") else ""))
 
@@ -726,19 +780,17 @@ def _finding_cells(v, f, cities, sel):
             g, words = _trend(chk)
             label += f" {g}" if g in ("↑", "↓") else ""
             fi = ", ".join(city_name(x) for x in d.get("found_in") or [])
-            out.append(_cell(label, style, f"{v} · {city_name(c)}, all samples "
-                             f"in the chosen dates: {_vote_text(chk)}{_clear_note(chk)}{_well_note(chk)} · not named by this city's "
-                             f"scan (its reads here may carry only one mutation beyond your "
-                             f"panel); checked because it was found in {fi}", c == sel))
+            out.append(_cell(label, style, _cell_tip(
+                v, city_name(c), chk, f" · checked here because found in {fi}"), c == sel))
             continue
         if chk and n > 0:
             # the same measure as the panel: ★ markers present / measurable
             style, label, _dot, _ink, _share = _scale(chk, found=True)
             g, words = _trend(chk)
             label += f" {g}" if g in ("↑", "↓") else ""
-            out.append(_cell(label, style, f"{v} · {city_name(c)}, all samples "
-                             f"in the chosen dates: {_vote_text(chk)}{_clear_note(chk)}{_well_note(chk)} · the scanner counted "
-                             f"{n} {_pl(n, 'sample')} of evidence in the window", c == sel))
+            out.append(_cell(label, style, _cell_tip(
+                v, city_name(c), chk, f" · deep scan: evidence on {n} {_pl(n, 'sample')}"),
+                c == sel))
             continue
         if n == 0:
             out.append(_cell("0", S_NAMED, f"{v} · {city_name(c)}: named only — reads point to "
@@ -1062,14 +1114,12 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
             pc = {c: verdicts[c][v] for c in cities if v in verdicts.get(c, {})}
             dsel = pc.get(sel) or {}
             _st, _lb, dcol, ncol, share = _scale(dsel) if dsel else (None, "", GREY, "#6b7280", None)
-            tip = (f"{v} · {sname}: " + ((_breakdown(dsel, v, html=False)
-                                          if dsel.get("n_markers") else _vote_text(dsel))
-                                         if dsel else "no result"))
+            tip = _cell_tip(v, sname, dsel) if dsel else f"{v} · {sname}: no result"
             name = f"<span class='nm' style='color:{ncol}'>{_e(v)}</span>{chips}"
             no_meas = share is None and dsel.get("n_markers", 0) > 0
             tc = _tree_cell(r, dcol, "dashed" if (no_meas or not dsel) else "filled", name, tip)
             tint = _panel_tint(pc, sel)
-            dgid = f"det{len(body)}"
+            dgid = "det-" + re.sub(r"[^A-Za-z0-9]", "_", v)
             cells, ev = _panel_cells(v, pc, cities, sel), _panel_evidence(pc, sel, v, dgid)
             drow = (_detail_row(dgid, v, pc, cities, sel, n_cols)
                     if any((x or {}).get("timeline") for x in pc.values()) else "")
@@ -1092,7 +1142,7 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
             name = (f"<span class='nm' style='color:{col}'>{_e(v)}</span>{chips}{btn}")
             tc = _tree_cell(r, col, dk, name, tip)
             tint = RED if f.get("status") == "confirmed" else None
-            dgid = f"det{len(body)}"
+            dgid = "det-" + re.sub(r"[^A-Za-z0-9]", "_", v)
             _chk = {c: p_["check"] for c, p_ in (f.get("per_city") or {}).items()
                     if (p_ or {}).get("check")}
             cells = _finding_cells(v, f, cities, sel)
@@ -1107,7 +1157,7 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
         bg = f" style='background:{tint}{'22' if kind in ('panel', 'panel_ot') else '14'}'" if tint else ""
         nch = near.get(v) if kind in ("panel", "panel_ot") else None
         if nch:
-            gid = f"near{len(body)}"
+            gid = "near-" + re.sub(r"[^A-Za-z0-9]", "_", v)
             # the tag follows the chosen city, like the Evidence column
             nch = sorted(nch, key=lambda c: -c["per_city"].get(sel, 0))
             here = [c for c in nch if c["per_city"].get(sel)]
@@ -1269,6 +1319,9 @@ _LEGEND_ROWS = (
     + _li(S_NODATA, "?", "too few reads")
     + "<span class='i'>n/m under a city code = samples well covered · details ▸ = samples "
       "per city and the markers' reads</span>"
+    + "<span class='i'>in hovers: ✓ present (≥ " + f"{_num()['pf']}" + " %) · ✗ absent (< "
+    + f"{_num()['af']}" + " %) · ~ in between · ? too few reads · ≠ on reads unlike it · "
+      "▧ low-coverage sample</span>"
     + "</div><div class='row'><span class='t'>Found</span>"
     + _li(S_FOUND, "5", "older results: days with evidence")
     + _li(S_NAMED, "0", "named only (shared mutations)")
@@ -1400,11 +1453,37 @@ window.vtClick = function (e, send, sendHeight) {
     document.querySelectorAll(".g-" + id).forEach(function (r) {
       open = r.classList.toggle("hid") === false;
     });
-    var arr = g.querySelector(".arr");
-    if (arr) arr.textContent = open ? "▾" : "▸";
+    document.querySelectorAll("[data-grp='" + id + "'] .arr").forEach(function (a) {
+      a.textContent = open ? "▾" : "▸";
+    });
+    window.vtOpen[id] = open;
     sendHeight();
   }
 };
+
+// open details / groups stay open when the table is redrawn (a city click
+// sends new html, which replaces the whole table) — 2026-10-13
+window.vtOpen = window.vtOpen || {};
+window.vtReopen = function () {
+  Object.keys(window.vtOpen).forEach(function (id) {
+    var open = window.vtOpen[id];
+    document.querySelectorAll(".g-" + id).forEach(function (r) {
+      r.classList.toggle("hid", !open);
+    });
+    document.querySelectorAll("[data-grp='" + id + "'] .arr").forEach(function (a) {
+      a.textContent = open ? "▾" : "▸";
+    });
+  });
+  if (typeof window.sendHeight === "function") window.sendHeight();
+};
+if (!window.vtObs) {
+  var root = document.getElementById("root") || document.body;
+  window.vtObs = new MutationObserver(function (muts) {
+    if (muts.some(function (m) { return m.target === root; })) window.vtReopen();
+  });
+  window.vtObs.observe(root, {childList: true});
+}
+window.vtReopen();
 """
 
 
