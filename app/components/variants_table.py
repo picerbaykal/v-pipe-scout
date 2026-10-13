@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import html
 import re
+from urllib.parse import quote_plus
 from pathlib import Path
 
 # one palette for cells, tree dots and legend
@@ -442,6 +443,31 @@ def _cal_line(d, top, low=None):
             + "".join(_square(x, m, mk, det, q) for x, m in tl[-n:]) + "</span>")
 
 
+# Outside links (2026-10-13): the lineage's wastewater page on GenSpectrum
+# (mutation heatmaps, chosen city) and its ★ markers in clinical sequences on
+# CoV-Spectrum (which lineages carry them, alone or together).
+GENSPECTRUM_WW = ("https://genspectrum.org/swiss-wastewater/covid?locationName={city}"
+                  "&samplingDate=Most+recent+30+days&granularity=day&analysisMode=variant"
+                  "&sequenceType=nucleotide&signatureType=computed&variant={lineage}*"
+                  "&minProportion=0.8&minCount=15&minJaccard=0.75&timeFrame=6months")
+COVSPECTRUM_MUTS = ("https://cov-spectrum.org/explore/World/AllSamples/Past6M/variants"
+                    "?nucMutations={muts}")
+
+
+def _ext(url, text, tip=""):
+    t = f" data-tip='{_e(tip)}'" if tip else ""
+    return (f"<a href='{_e(url)}' target='_blank' rel='noopener'{t} "
+            f"style='color:#2563eb;text-decoration:none'>{_e(text)} ↗</a>")
+
+
+def _ww_link(v, city):
+    return GENSPECTRUM_WW.format(city=quote_plus(city), lineage=quote_plus(v))
+
+
+def _clin_link(muts):
+    return COVSPECTRUM_MUTS.format(muts=quote_plus(",".join(muts)))
+
+
 def _detail_row(gid, v, per_city, cities, sel, n_cols, found=False):
     """The row's details (hidden until 'details ▸'): one calendar line per
     city, the markers with their real reads in the selected city, and their
@@ -464,7 +490,7 @@ def _detail_row(gid, v, per_city, cities, sel, n_cols, found=False):
         med = f"{100 * statistics.median(shares):.0f} %" if shares else "–"
         reads = x.get("cov_raw", x.get("cov", 0)) or 0
         share = f"{100 * x['freq']:.1f} % of {reads:,} reads" if x.get("freq") is not None and reads else "no reads"
-        mk_rows.append(f"<tr><td class='mono'>{_e(m)}</td><td>{_e(share)}</td>"
+        mk_rows.append(f"<tr><td class='mono'>{_ext(_clin_link([m]), m, 'which lineages carry it in clinical sequences (CoV-Spectrum)')}</td><td>{_e(share)}</td>"
                        f"<td>{_e(x.get('why') or '')}</td><td>{med}</td></tr>")
     mk = ""
     if mk_rows:
@@ -474,8 +500,14 @@ def _detail_row(gid, v, per_city, cities, sel, n_cols, found=False):
     body = ("<div class='dim' style='font-size:12px'>Samples per city, newest right · striped = "
             "low coverage (counted only when a city has no well-covered sample) · ⋯ = older "
             "low-coverage samples without it, not shown</div>" + "".join(lines) + mk
-            + "<div class='dim' style='font-size:12px;margin-top:4px'>Each mutation per week: "
-              "Signal over time (Look-up)</div>")
+            + "<div style='font-size:12.5px;margin-top:6px'>"
+            + _ext(_ww_link(v, sel), f"{v} in {city_name(sel)} wastewater (GenSpectrum)",
+                   "mutation heatmaps of the lineage and its sublineages")
+            + ((" · " + _ext(_clin_link([x['marker'] for x in ds.get('detail') or []]),
+                             "its ★ markers together in clinical data (CoV-Spectrum)",
+                             "sequences carrying all of them: which lineages"))
+               if ds.get("detail") else "")
+            + "<span class='dim'> · each mutation per week: Signal over time (Look-up)</span></div>")
     return f"<tr class='dt g-{gid} hid'><td colspan='{n_cols}'>{body}</td></tr>"
 
 
