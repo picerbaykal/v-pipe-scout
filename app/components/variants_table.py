@@ -795,7 +795,8 @@ def _finding_cells(v, f, cities, sel):
             g, words = _trend(chk)
             label += f" {g}" if g in ("↑", "↓") else ""
             out.append(_cell(label, style, _cell_tip(
-                v, city_name(c), chk, f" · deep scan: evidence on {n} {_pl(n, 'sample')}"),
+                v, city_name(c), chk,
+                f" · deep scan: evidence on {n} {_pl(n, 'sample')}{_ev_quality(d)}"),
                 c == sel))
             continue
         if n == 0:
@@ -880,6 +881,25 @@ _REGION_TIP = ("genome regions = separate stretches of the genome where evidence
                "PCR artefact or one convergent mutation is unlikely.")
 
 
+def _ev_quality(d):
+    """', all low coverage' / ' (1 well covered)' / '' for the deep scan's
+    evidence samples in a city (2026-10-13): evidence only from low-coverage
+    samples can come from few virus molecules (PQ.16.1.1 in Basel)."""
+    dates = d.get("ev_dates") or []
+    q = (d.get("check") or {}).get("quality") or {}
+    known = [x for x in dates if x in q]
+    if not known:
+        return ""
+    try:
+        from process.sample_qc import well_covered
+    except Exception:
+        return ""
+    k = sum(1 for x in known if well_covered(q[x]))
+    if k == 0:
+        return ", all low coverage" if len(known) == len(dates) else ""
+    return f" ({k} well covered)"
+
+
 def _finding_evidence(f, sel, gid=""):
     pc = f.get("per_city", {}) or {}
     d = pc.get(sel)
@@ -914,7 +934,7 @@ def _finding_evidence(f, sel, gid=""):
                     + ". " + _REGION_TIP)
         txt = (f"<span>{_e(_summary(d.get('check') or {}))}</span>"
                f" <span class='dim' data-tip='{_e(scan_tip)}'>· deep scan: evidence on "
-               f"{n} {_pl(n, 'sample')}</span>")
+               f"{n} {_pl(n, 'sample')}{_e(_ev_quality(d))}</span>")
     else:                                        # results from before 2026-10-02
         txt = (f"{n} {_pl(n, 'sample')} · "
                + (f"{len(stars)} ★ {_pl(len(stars), 'marker')}" if stars else "combinations only")

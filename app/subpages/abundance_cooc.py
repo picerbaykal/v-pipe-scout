@@ -2240,6 +2240,10 @@ def app():
                             "car": {_m: _pc_out.get(_m, _pc_car.get(_m)) for _m in _pc_star},
                             # days with ★ evidence in this city (shown on the chip)
                             "days": len(_c.get("counted_days", []) or []),
+                            # which samples: the table says whether they are
+                            # well covered (2026-10-13)
+                            "ev_dates": sorted(str(_x)[:10] for _x in
+                                               (_c.get("counted_days", []) or [])),
                             # facts for the table (scanner _add_notes)
                             "evidence_days": dict(_c.get("evidence_days", {}) or {}),
                             "regions": list(_c.get("evidence_regions", []) or []),
@@ -2342,7 +2346,7 @@ def app():
                         else:
                             _pc = {c: {"days": p.get("days", 0), "stars": p.get("star", []),
                                        "regions": p.get("regions", []), "after": p.get("after"),
-                                       "check": p.get("check")}
+                                       "check": p.get("check"), "ev_dates": p.get("ev_dates", [])}
                                    for c, p in (_slot.get("per_city") or {}).items()}
                             # phase 3: the other cities, by the cross-check
                             _fin = (st.session_state.get("acooc_xcheck_found_in") or {}).get(

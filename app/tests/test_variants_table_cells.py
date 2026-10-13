@@ -69,3 +69,16 @@ def test_weak_basis_is_light():
     assert vt._scale(d)[0] == vt.S_NOTFOUND_LIGHT
     d["basis"] = "well"
     assert vt._scale(d)[0] == vt.S_NOTFOUND
+
+
+def test_deep_scan_evidence_says_when_samples_are_low_coverage():
+    from components.variants_table import _ev_quality
+    from process.sample_qc import PROBES, summarize
+    good = summarize({p: 9000 for p in PROBES})
+    bad = summarize({p: (200000 if i < 15 else 1) for i, p in enumerate(PROBES)})
+    q = {"2026-08-01": bad, "2026-08-05": bad, "2026-08-09": good}
+    d = {"ev_dates": ["2026-08-01", "2026-08-05"], "check": {"quality": q}}
+    assert _ev_quality(d) == ", all low coverage"
+    d["ev_dates"].append("2026-08-09")
+    assert _ev_quality(d) == " (1 well covered)"
+    assert _ev_quality({"ev_dates": ["2026-08-01"], "check": {}}) == ""
