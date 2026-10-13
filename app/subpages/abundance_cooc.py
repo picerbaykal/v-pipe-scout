@@ -177,7 +177,7 @@ def _render_composition(cooc_result: dict, scanner_result: dict, key: str = "",
     dates = [r["date"] for r in rows]
     layers = [
         ("explained by panel", "explained_pct", "#0F6E56", "rgba(15,110,86,0.85)"),
-        ("panel variant + 1 change", "near_pct", "#4ade80", "rgba(134,239,172,0.85)"),
+        ("panel variant ± 1 change", "near_pct", "#4ade80", "rgba(134,239,172,0.85)"),
         ("found, not in panel", "addable_pct", "#dc2626", "rgba(220,38,38,0.55)"),
         ("unexplained, not attributed", "noise_pct", "#9ca3af", "rgba(156,163,175,0.40)"),
     ]
@@ -270,7 +270,7 @@ def _panel_verdicts(cooc_res: dict, variants: list) -> dict:
     for v in variants:
         ci = pc.get(v)
         if ci is None:
-            out[v] = {"state": "no_data", "reason": "no check data — re-run the scan",
+            out[v] = {"state": "no_data", "reason": "no check data — run the panel check again",
                       "n_present": 0, "n_measured": 0, "n_markers": 0}
             continue
         # one vote per city (process.variant_explorer.check_in_data, 2026-10-13):
@@ -290,7 +290,7 @@ def _panel_verdicts(cooc_res: dict, variants: list) -> dict:
             state, reason = "no_data", f"too few reads on its markers — {mtxt}"
         else:
             state = _cid["state"] if _cid["state"] in ("present", "absent", "mixed") else "no_data"
-            reason = f"{np_} of {nm} measurable markers present — {mtxt}"
+            reason = f"{np_} of {nm} covered markers present — {mtxt}"
         out[v] = {"state": state, "reason": reason,
                   "n_present": np_, "n_measured": nm, "n_markers": nd,
                   # one mark per sampling day, for the Evidence calendar
@@ -516,9 +516,9 @@ def _render_covvfit(r: dict, color_map: dict = None, checked: list = None) -> No
     locs = list(r.get("locations") or [])
     _short = lambda l: l.split("(")[0].strip()
     st.caption(
-        f"Fitted on {len(locs)} location(s), {r.get('date_min', '')} – {r.get('date_max', '')}, "
+        f"Fitted on {len(locs)} {'city' if len(locs) == 1 else 'cities'}, {r.get('date_min', '')} – {r.get('date_max', '')}, "
         f"predicted {r.get('horizon', '')} days ahead. One growth advantage per variant, "
-        f"shared by all locations. Panel check covered: "
+        f"shared by all cities. Panel check covered: "
         f"{', '.join(_short(l) for l in checked) or 'none'}.")
     for _l, _why in (r.get("skipped") or {}).items():
         st.warning(f"Left out: {_l} ({_why})")
@@ -564,7 +564,7 @@ def _render_covvfit(r: dict, color_map: dict = None, checked: list = None) -> No
             st.markdown(
                 "<div style='display:flex;justify-content:space-between;align-items:center;"
                 "flex-wrap:wrap;margin-top:8px;'><span style='font-size:13px;font-weight:600;'>"
-                "Fitted curves per location</span><span style='font-size:12px;color:#5F5E5A;'>"
+                "Fitted curves per city</span><span style='font-size:12px;color:#5F5E5A;'>"
                 + "".join(f"<span style='display:inline-block;width:16px;height:3px;"
                           f"border-radius:2px;background:{color_map[v]};margin:0 5px 3px 12px;'>"
                           f"</span>{v}" for v in used)
@@ -667,7 +667,7 @@ def app():
                    ("cross-check", "acooc_xcheck_tasks", "acooc_xcheck_results"),
                    ("covvfit", "acooc_covvfit_tasks", "acooc_covvfit_results")]
     _STOPPED = "stopped"
-    _ALL = "all locations"
+    _ALL = "all cities"
 
     # ── Header ───────────────────────────────────────────────────────────────
     st.title("Abundance & Co-occurrence")
@@ -678,7 +678,7 @@ def app():
     )
     st.caption(
         "Build a custom variant panel and run on-demand deconvolution across one or "
-        "more sampling locations. The panel check and the deep scan guide you "
+        "more cities. The panel check and the deep scan guide you "
         "to a complete panel iteratively — follow the numbered steps."
     )
     st.markdown("---")
@@ -708,9 +708,9 @@ def app():
 
         col_add_ot, col_clear = st.columns(2)
         with col_add_ot:
-            if st.button("+ Add surveillance panel",
+            if st.button("+ Add officially tracked (OT)",
                          key="acooc_add_all_ot", use_container_width=True,
-                         help="Add the officially-tracked surveillance panel "
+                         help="Add the officially tracked (OT) variants "
                               f"({len(curated_variants)} variants)"):
                 _cur = st.session_state.get("acooc_panel", [])
                 st.session_state["acooc_panel"] = list(dict.fromkeys(_cur + curated_variants))
@@ -734,8 +734,8 @@ def app():
             "Variant panel",
             options=_panel_options,
             default=None,
-            help="Add any pango lineage. Use “Add surveillance panel” to load the "
-                 "officially-tracked variants; the tree marks them “OT”. Scanner "
+            help="Add any pango lineage. Use “Add officially tracked (OT)” to load the "
+                 "officially tracked variants; the tree marks them “OT”. Deep scan "
                  "findings you add appear here too.",
             key="acooc_panel",
             placeholder="Search any pango lineage (e.g. KP.2.3, XFG)…",
@@ -768,12 +768,12 @@ def app():
         st.markdown("---")
 
         # ── Step 3: Locations ─────────────────────────────────────────────────
-        _step_label(3, "Locations", done=has_locations)
+        _step_label(3, "Cities", done=has_locations)
         available_locations = cached_fetch_locations()
         # guard: if the fetch transiently returned empty, fall back to whatever
         # the user already selected so their choice isn't silently dropped
         if not available_locations:
-            st.warning("Could not fetch locations from the API; using your current selection.")
+            st.warning("Could not fetch cities from the API; using your current selection.")
             available_locations = st.session_state.get("acooc_location_multiselect", [])
         col_loc_all, col_loc_clear = st.columns(2)
         with col_loc_all:
@@ -783,9 +783,9 @@ def app():
             if st.button("Clear", key="acooc_loc_clear", use_container_width=True):
                 st.session_state["acooc_location_multiselect"] = []
         selected_locations = st.multiselect(
-            "Select sampling locations",
+            "Select cities",
             options=available_locations,
-            placeholder="Select one or more locations...",
+            placeholder="Select one or more cities...",
             key="acooc_location_multiselect",
             label_visibility="collapsed",
         )
@@ -905,24 +905,24 @@ def app():
             if _total_s <= 45:
                 st.caption(
                     f"⏱ Estimated run time: ~{_total_s:.0f}s "
-                    f"({_n_dates} sampling dates × {_n_locs} location(s))"
+                    f"({_n_dates} sampling dates × {_n_locs} {'city' if _n_locs == 1 else 'cities'})"
                 )
             elif _total_s <= 120:
                 st.info(
-                    f"⏱ ~{_total_min:.1f} min — {_n_dates} dates × {_n_locs} location(s). "
+                    f"⏱ ~{_total_min:.1f} min — {_n_dates} dates × {_n_locs} {'city' if _n_locs == 1 else 'cities'}. "
                     "Runs in the background; you can keep working."
                 )
             elif _total_s <= 300:
                 st.warning(
                     f"⏱ ~{_total_min:.0f} min — this is a large query "
-                    f"({_n_dates} dates × {_n_locs} locations). "
-                    "Consider fewer locations or a shorter date range for faster results."
+                    f"({_n_dates} dates × {_n_locs} cities). "
+                    "Consider fewer cities or a shorter date range for faster results."
                 )
             else:
                 st.error(
                     f"⏱ ~{_total_min:.0f} min — very large query "
-                    f"({_n_dates} dates × {_n_locs} locations). "
-                    "Strongly consider narrowing the date range or selecting fewer locations."
+                    f"({_n_dates} dates × {_n_locs} cities). "
+                    "Strongly consider narrowing the date range or selecting fewer cities."
                 )
 
         _step_label(5, "Run analysis", done=has_run, active=not has_run and can_run)
@@ -934,12 +934,12 @@ def app():
         if _scope["mode"] == "add":
             _nl = _scope["new_locs"]
             _run_label = ("▶ Add " + " and ".join(_short(l) for l in _nl) + " to the run"
-                          if len(_nl) <= 2 else f"▶ Add {len(_nl)} locations to the run")
+                          if len(_nl) <= 2 else f"▶ Add {len(_nl)} cities to the run")
             _run_note = "keeps the current results"
         elif _scope["mode"] == "new":
             _run_label, _run_note = "▶ Start a new run", "asks before clearing the current results"
         else:
-            _run_label, _run_note = "▶ Run analysis", "panel check for all locations"
+            _run_label, _run_note = "▶ Run analysis", "panel check for all cities"
         # one highlighted button at a time (2026-10-09): Run is it when there
         # is no run yet or the left side changed, and nothing is running
         _run_next = (_scope["mode"] == "first" or _scope["pending"]) and not _busy
@@ -1012,7 +1012,7 @@ def app():
                 ["deep scan"] if _had_scan else [])
             _ss["acooc_notice"] = (
                 f"{_names} added to the run: " + ", ".join(_parts) + " running"
-                + ("; the cross-check will be redone for all locations once every deep "
+                + ("; the cross-check will be redone for all cities once every deep "
                    "scan is in" if _had_scan else "") + ".")
             logger.info(f"Added to the run: {_add}")
 
@@ -1190,7 +1190,7 @@ def app():
                              type="primary" if _next else "secondary",
                              disabled=bool(_open) or _scope["pending"],
                              help=("Running…" if _open else
-                                   f"LolliPop per location ({bootstraps} bootstraps, "
+                                   f"LolliPop per city ({bootstraps} bootstraps, "
                                    f"bandwidth {bandwidth})."))
                 st.caption(_why)
                 with st.expander("Deconvolution settings", expanded=False, icon=_SETTINGS_ICON):
@@ -1276,12 +1276,12 @@ def app():
                 elif _changed_cvf:
                     _why = "Settings changed since the last CovvFit: re-run to apply"
                 elif not _cv_locs:
-                    _why = "Choose locations in the settings below"
+                    _why = "Choose cities in the settings below"
                 elif _done:
                     _why = (f"Done · {len((st.session_state.get('acooc_covvfit_results') or {}).get(_ALL, {}).get('locations') or [])}"
-                            f" location(s)")
+                            f" city/cities")
                 else:
-                    _why = f"{len(_cv_locs)} location(s), {_past} days back"
+                    _why = f"{len(_cv_locs)} {'city' if len(_cv_locs) == 1 else 'cities'}, {_past} days back"
                 if st.button("Re-run CovvFit" if _done else "Run CovvFit",
                              key="acooc_btn_covvfit", use_container_width=True,
                              type=("primary" if _changed_cvf and not _scope["pending"]
@@ -1290,10 +1290,10 @@ def app():
                                        or _scope["pending"]),
                              help=("Running…" if _open else
                                    "Available once the deconvolution is done." if not _ready else
-                                   "Choose at least one location in CovvFit settings."
+                                   "Choose at least one city in CovvFit settings."
                                    if not _cv_locs else
                                    f"Growth advantage of each panel variant, shared by "
-                                   f"{len(_cv_locs)} location(s); "
+                                   f"{len(_cv_locs)} {'city' if len(_cv_locs) == 1 else 'cities'}; "
                                    f"fits {_cv_d0} – {str(_run_d1)[:10]}, predicts "
                                    f"{_h} days ahead.")):
                     _tid = celery_app.send_task(
@@ -1310,10 +1310,10 @@ def app():
                     st.rerun()
                 st.caption(_why)
                 with st.expander("CovvFit settings", expanded=False, icon=_SETTINGS_ICON):
-                    _kept("multiselect", "Locations", "acooc_covvfit_locs", list(_all_locs),
+                    _kept("multiselect", "Cities", "acooc_covvfit_locs", list(_all_locs),
                                    options=_all_locs,
                                    help="covvfit fits one growth advantage per variant, "
-                                        "shared by these locations: more locations, "
+                                        "shared by these cities: more cities, "
                                         "narrower ranges. Each takes its own "
                                         "deconvolution over the period below.")
                     _unchecked = [l for l in _cv_locs if l not in location_names]
@@ -1321,7 +1321,7 @@ def app():
                         st.caption(
                             "The panel check covered only "
                             + ", ".join(l.split("(")[0].strip() for l in location_names)
-                            + ". A location where the panel misses a variant biases the "
+                            + ". A city where the panel misses a variant biases the "
                             "shared advantages: check the others first, or leave them out.")
                     _kept("slider", "Days of past data to fit", "acooc_covvfit_past", 180,
                               min_value=30, max_value=365, step=1,
@@ -1346,7 +1346,7 @@ def app():
                 if _scope["pending"]:
                     _why = _scope["block"]
                 elif _wait_graph:
-                    _why = "Waits for the panel check of every location"
+                    _why = "Waits for the panel check of every city"
                 elif _resume:
                     _why = "Stopped: resumes the stopped locations, then the cross-check"
                 elif _scan_req and _done:
@@ -1356,17 +1356,17 @@ def app():
                     _why = ("Running: the lineages it finds appear when the cross-check "
                             "ends (progress above)")
                 else:
-                    _why = "Looks outside your panel in every location"
+                    _why = "Looks outside your panel in every city"
                 if st.button("Resume deep scan" if _resume else "Run deep scan",
                              key="acooc_btn_scan", use_container_width=True,
                              disabled=(_wait_graph or (_scan_req and not _resume)
                                        or _scope["pending"]),
-                             help=("Waits for the panel check of every location."
+                             help=("Waits for the panel check of every city."
                                    if _wait_graph else
                                    ("Done for these results; press ▶ Run for new ones."
-                                    if _done else "Running: every location, then the cross-check.")
+                                    if _done else "Running: every city, then the cross-check.")
                                    if _scan_req and not _resume else
-                                   "Looks for variants outside your panel in every location; "
+                                   "Looks for variants outside your panel in every city; "
                                    "the cross-check follows.")):
                     # after a Stop: the stopped locations scan again; the
                     # cross-check (it needs every scan) starts over
@@ -1855,7 +1855,7 @@ def app():
 
             if _active_section == "Deconvolution":
               st.markdown("#### Deconvolution")
-              st.caption("Variant shares over time per location, with LolliPop.")
+              st.caption("Variant shares over time per city, with LolliPop.")
               _dc1, _dc2, _dc3 = st.columns(3)
               with _dc1:
                   _btn_deconv()
@@ -2005,7 +2005,7 @@ def app():
               _graph_locs = [l for l in location_names if _cr_all.get(l) is not None]
               if _graph_locs and _active_section == "Panel check":
                   st.markdown("#### Is your panel good enough for deconvolution?")
-                  st.caption("Share of each location's reads your panel variants explain. "
+                  st.caption("Share of each city's reads your panel variants explain. "
                              "Mostly green = the deconvolution can split the signal "
                              "between them.")
                   if _until_short:
@@ -2016,15 +2016,15 @@ def app():
                           "no samples yet.")
                   st.caption("How much of each city's co-occurrence signal your panel "
                              "explains (green) vs the rest. Light green = a panel variant with one "
-                             "change (hover for which) · red = a lineage the deep scan named · "
-                             "grey = unexplained, not attributed (novel patterns: Variants table).")
+                             "change (hover for which) · red = a lineage the deep scan found · "
+                             "grey = unexplained, not attributed (unassigned patterns: Lineages table).")
                   # One shared legend ABOVE the grid; every plot has
                   # show_legend=False and the same fixed height, so all plot areas
                   # are identical. (Previously the legend went on the first plot
                   # only and ate into its fixed height, making it shorter.)
                   _comp_leg = [
                       ("#0F6E56", "explained by panel"),
-                      ("#4ade80", "panel variant + 1 change"),
+                      ("#4ade80", "panel variant ± 1 change"),
                       ("#dc2626", "found, not in panel"),
                       ("#9ca3af", "unexplained, not attributed"),
                   ]
@@ -2096,7 +2096,7 @@ def app():
                 st.markdown("#### Lineages")
                 st.caption("Which lineages are really there. Your panel rows have their ★ "
                            "check now; the deep scan adds what's outside your panel, then the "
-                           "cross-check checks them in every location.")
+                           "cross-check checks them in every city.")
                 _ls1, _ls2 = st.columns([1, 2])
                 with _ls1:
                     _btn_scan()

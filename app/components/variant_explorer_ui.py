@@ -168,7 +168,7 @@ def _check_section(variant, panel, cities, start_date, end_date, celery_app, key
                 bg, fg, word = _STATE[r["state"]]
                 _low = r["n_markers"] - r["n_measured"]
                 cnt = (f"<span style='color:#6b7280;'>{r['n_present']} of {r['n_measured']} "
-                       f"measurable ★ present"
+                       f"covered ★ present"
                        + (f" ({_low} with too few reads)" if _low > 0 else "")
                        + "</span>" if r["n_measured"] else "")
                 right = (_pill(bg, fg, word, "#d1d5db" if bg == "#ffffff" else None)
@@ -206,7 +206,7 @@ def _check_section(variant, panel, cities, start_date, end_date, celery_app, key
                     f"present ≥ {c['present_freq'] * 100:g} % · absent &lt; "
                     f"{c['absent_freq'] * 100:g} % · ≥ {c['min_cov']} reads · link ≥ "
                     f"{c['link_min'] * 100:g} % of ≥ {c['min_link']} reads · verdict: present "
-                    f"if ≥ {c['confirm_share'] * 100:g} % of measurable markers are present "
+                    f"if ≥ {c['confirm_share'] * 100:g} % of covered markers are present "
                     f"and at least {c['min_present']}, "
                     f"absent if ≤ {c['notfound_share'] * 100:g} % · ⚠ = just missed a rule"
                     f"</div>", unsafe_allow_html=True)

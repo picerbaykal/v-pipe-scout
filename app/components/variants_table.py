@@ -800,13 +800,13 @@ def _finding_cells(v, f, cities, sel):
                 c == sel))
             continue
         if n == 0:
-            out.append(_cell("0", S_NAMED, f"{v} · {city_name(c)}: named only — reads point to "
+            out.append(_cell("0", S_NAMED, f"{v} · {city_name(c)}: not confirmed — reads point to "
                              f"{v}, but they also fit related lineages, so no sample has evidence "
                              f"specific to {v}", c == sel))
             continue
         tip = (f"{v} · {city_name(c)}: evidence on {n} {_pl(n, 'sample')} · "
                + (f"{len(stars)} ★ {_pl(len(stars), 'marker')} ({', '.join(stars[:5])})"
-                  if stars else "no ★ marker (combinations only)")
+                  if stars else "no ★ marker")
                + (f" · {len(regs)} genome {_pl(len(regs), 'region')}: "
                   + ", ".join(f"{lo:,}–{hi:,}" for lo, hi in regs[:5]) if regs else ""))
         if n == 1 and d.get("after"):
@@ -916,11 +916,11 @@ def _finding_evidence(f, sel, gid=""):
         return (f"<span data-tip='{_e(why)}'>{_e(_summary(chk))}</span>"
                 + (_det_link(gid) if gid and chk.get("timeline") else ""))
     if n == 0:
-        return ("<span class='dim'>named only — reads point to it but also fit related "
+        return ("<span class='dim'>not confirmed — reads point to it but also fit related "
                 "lineages; no sample with specific evidence</span>")
     stars, regs = d.get("stars") or [], d.get("regions") or []
-    facts = (f"scanner: {n} {_pl(n, 'sample')} · "
-             + (f"{len(stars)} ★ {_pl(len(stars), 'marker')}" if stars else "combinations only")
+    facts = (f"deep scan: {n} {_pl(n, 'sample')} · "
+             + (f"{len(stars)} ★ {_pl(len(stars), 'marker')}" if stars else "no ★ marker")
              + f" · {len(regs)} genome {_pl(len(regs), 'region')}"
              + (" · 1 day " + _after_text(d["after"], html=False)
                 if n == 1 and d.get("after") else ""))
@@ -937,7 +937,7 @@ def _finding_evidence(f, sel, gid=""):
                f"{n} {_pl(n, 'sample')}{_e(_ev_quality(d))}</span>")
     else:                                        # results from before 2026-10-02
         txt = (f"{n} {_pl(n, 'sample')} · "
-               + (f"{len(stars)} ★ {_pl(len(stars), 'marker')}" if stars else "combinations only")
+               + (f"{len(stars)} ★ {_pl(len(stars), 'marker')}" if stars else "no ★ marker")
                + f" · <span data-tip='{_e(_REGION_TIP)}'>{len(regs)} genome "
                f"{_pl(len(regs), 'region')}</span>")
         if n == 1 and d.get("after"):
@@ -1159,11 +1159,11 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
             if _dsel.get("xcheck"):
                 dk = "dashed" if (_dsel.get("check") or {}).get("state") == "present" else "ring"
             tip = (f"{v}: not in your panel · {sname}: "
-                   + ("named only" if named else f"evidence on {n_sel} {_pl(n_sel, 'sample')}"
+                   + ("not confirmed" if named else f"evidence on {n_sel} {_pl(n_sel, 'sample')}"
                       if n_sel else "not seen here"))
             btn = ""
             if f.get("addable"):
-                btn = ("<span class='added'>added · re-run</span>" if v in current_panel
+                btn = ("<span class='added'>added · re-run needed</span>" if v in current_panel
                        else f"<button class='add' data-add='{_e(v)}'>+ Add</button>")
             name = (f"<span class='nm' style='color:{col}'>{_e(v)}</span>{chips}{btn}")
             tc = _tree_cell(r, col, dk, name, tip)
@@ -1219,7 +1219,7 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
     if named_hidden:
         n_named = sum(1 for f in findings.values() if f.get("status") == "named")
         body.append(f"<tr class='note'><td colspan='{n_cols}'>"
-                    f"Named-only lineages: showing {n_named} of {n_named + named_hidden}"
+                    f"Not confirmed lineages: showing {n_named} of {n_named + named_hidden}"
                     "</td></tr>")
 
     # ── unnamed signal ──
@@ -1228,7 +1228,7 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
     one = [(m, d) for m, d in novel if 0 < max(d.values(), default=0) < ed]
     low = [(m, d) for m, d in novel if max(d.values(), default=0) == 0]
     if novel or broad or novel_rest or novel_hotspot:
-        body.append(f"<tr class='sec'><td colspan='{n_cols}'>Unnamed signal</td></tr>")
+        body.append(f"<tr class='sec'><td colspan='{n_cols}'>Unassigned patterns</td></tr>")
         novel_info = novel_info or {}
 
         def nov_ev_for(m, d):
@@ -1239,22 +1239,23 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
                         + (f" · in {n_other} other {_pl(n_other, 'city')}" if n_other else "")
                         + "</span>")
             return _novel_evidence(m, info)
-        body += _group("nrec", f"<b style='color:{BLUE}'>Novel, recurring ({len(rec)})</b> "
-                       f"<span class='dim'>· on ≥ {ed} days in a city</span>", n_cols,
+        body += _group("nrec", f"<b style='color:{BLUE}'>Unassigned, recurring ({len(rec)})</b> "
+                       f"<span class='dim'>· on ≥ {ed} days in a city — check the trend: possible new variant</span>", n_cols,
                        [_pattern_row(m, d, cities, sel, S_NOVEL, S_NOVEL1, BLUE, nov_ev_for(m, d), "seen")
                         for m, d in rec], open_=True)
         one_lab = "1 day" if ed == 2 else f"1–{ed - 1} days"
-        body += _group("none", f"<b style='color:{BLUE}'>Novel, {one_lab} ({len(one)})</b>", n_cols,
+        body += _group("none", f"<b style='color:{BLUE}'>Unassigned, {one_lab} ({len(one)})</b> "
+                       "<span class='dim'>· watch</span>", n_cols,
                        [_pattern_row(m, d, cities, sel, S_NOVEL, S_NOVEL1, BLUE, nov_ev_for(m, d), "seen")
                         for m, d in one])
-        body += _group("nlow", f"<b style='color:{BLUE}'>Novel, below the day rule ({len(low)})</b> "
+        body += _group("nlow", f"<b style='color:{BLUE}'>Unassigned, no evidence day ({len(low)})</b> "
                        f"<span class='dim'>· never {nn['er']} reads and {nn['es']} % of a day</span>",
                        n_cols,
                        [_pattern_row(m, d, cities, sel, S_NOVEL, S_NOVEL1, BLUE, nov_ev_for(m, d), "seen")
                         for m, d in low])
         n_broad = (f"showing {len(broad)} of {broad_total}"
                    if broad_total and broad_total > len(broad) else f"{len(broad)}")
-        body += _group("broad", f"<b style='color:{SLATE}'>Too broad to name ({n_broad})</b> "
+        body += _group("broad", f"<b style='color:{SLATE}'>Fits too many lineages ({n_broad})</b> "
                        "<span class='dim'>· the combination fits many unrelated lineages</span>",
                        n_cols,
                        [_pattern_row(m, d, cities, sel, S_BROAD, _dashed(SLATE), SLATE,
@@ -1264,14 +1265,14 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
         if novel_hotspot:
             _tip = ("A position where the city's data shows two or more different new bases "
                     f"(each on ≥ {nn['af']} % of ≥ {nn['mc']} reads) is an error hotspot — a virus has one. "
-                    "A mutation there that no pango lineage carries is left out of novel "
+                    "A mutation there that no pango lineage carries is left out of unassigned "
                     "patterns; a pattern left with one mutation, or one a lineage carries, "
-                    "is not novel. Lineage mutations are always kept.")
+                    "is not unassigned. Lineage mutations are always kept.")
             body.append(f"<tr class='note'><td colspan='{n_cols}'><span data-tip='{_e(_tip)}'>"
                         f"{novel_hotspot[0]:,} patterns ({novel_hotspot[1]} reads) at error-hotspot "
                         "positions — left out ⓘ</span></td></tr>")
         if novel_rest:
-            body.append(f"<tr class='note'><td colspan='{n_cols}'>+ more small novel patterns "
+            body.append(f"<tr class='note'><td colspan='{n_cols}'>+ more small unassigned patterns "
                         f"({novel_rest} reads, summed over cities and days) — not listed</td></tr>")
 
     return (CSS + f"<table class='vt'><thead>{head}</thead><tbody>{''.join(body)}</tbody></table>"
@@ -1327,7 +1328,7 @@ def _lc(d, found=False, extra=""):
 _LEGEND_ROWS = (
     ""
     "<div class='row'><span class='t'>★ check</span>"
-    "<span class='i'>markers present / measured — in your panel:"
+    "<span class='i'>markers present / covered — in your panel:"
     + _lc({"n_markers": 4, "n_measured": 4, "n_present": 4}) + "present"
     + _lc({"n_markers": 5, "n_measured": 5, "n_present": 2}) + "mixed"
     + _lc({"n_markers": 4, "n_measured": 4, "n_present": 0}) + "absent</span>"
@@ -1350,9 +1351,9 @@ _LEGEND_ROWS = (
       "▧ low-coverage sample</span>"
     + "</div><div class='row'><span class='t'>Found</span>"
     + _li(S_FOUND, "5", "older results: days with evidence")
-    + _li(S_NAMED, "0", "named only (shared mutations)")
-    + _li(S_NOVEL, "3", "novel · days")
-    + _li(S_BROAD, "2", "too broad to name · days")
+    + _li(S_NAMED, "0", "not confirmed (reads also fit related lineages)")
+    + _li(S_NOVEL, "3", "unassigned · days")
+    + _li(S_BROAD, "2", "fits too many lineages · days")
     + _li(S_NEAR, "3", "◆ panel variant ± 1 change · days (a hint)")
     + "</div><div class='row'><span class='t'>Tree</span>"
     + _ld(f"background:{RED}", "found in this city")
