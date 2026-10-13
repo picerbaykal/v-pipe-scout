@@ -1948,7 +1948,8 @@ def app():
                   st.info("Deconvolution hasn't run for these results yet: press "
                           "Run deconvolution.")
               elif _dset:
-                  st.caption(f"LolliPop: {_dset[0]} bootstraps, bandwidth {_dset[1]}.")
+                  st.caption(f"Plots below: LolliPop with {_dset[0]} bootstraps (the shaded "
+                             f"ranges) and smoothing over {_dset[1]} days.")
               # ── per-city TABS: each tab is one city's full-size deconvolution
               #    plot (with confidence bands). ──
               _dtabs = st.tabs([loc for loc in location_names])
