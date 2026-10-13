@@ -95,3 +95,20 @@ lists:
   named_only_max: 25
   broad_max: 25
   near_changes_max: 8
+
+# ── "How to read this page" (ⓘ button above the tabs) ──────────────────────
+# Why each rule exists and whether it was checked, shown next to its value in
+# the "Rules and thresholds" tab (UI only: a streamlit restart is enough).
+# After a sensitivity test or a check on real data, update its "tested".
+rules:
+  min_cov:        {why: "fewer reads give unstable shares", tested: "not yet"}
+  present_freq:   {why: "above sequencing noise", tested: "not yet"}
+  link:           {why: "the marker's reads must look like the lineage, not an error or another lineage", tested: "share-alone case: NB.1.8.1, 13 Oct"}
+  absent_freq:    {why: "below sequencing noise", tested: "not yet"}
+  confirm_share:  {why: "one marker alone can come from an unrelated lineage", tested: "LP.8 / XFZ, 9 Oct"}
+  notfound_share: {why: "", tested: "not yet"}
+  cap_reads:      {why: "one sample with a few huge amplicons can't outvote the others", tested: "Lugano, 13 Oct"}
+  quality:        {why: "a low-virus sample comes from few molecules: its shares are snapshots", tested: "summer vs winter samples, 13 Oct"}
+  calendar:       {why: "", tested: ""}
+  evidence_day:   {why: "", tested: "not yet"}
+  min_days:       {why: "one day alone can be a jackpot", tested: "not yet"}

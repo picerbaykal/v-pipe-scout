@@ -418,6 +418,7 @@ def _render_section_tabs(marks: dict) -> str:
         if gi:
             spec.append(0.06)                          # separator
         spec += [1.15 if x == "Investigate a variant" else 1 for x in xs]
+    spec += [0.06, 1.15]                           # ⓘ How to read this page
     sep = ("<div style='border-left:1px solid rgba(0,0,0,.18);height:{h}px;"
            "width:0;margin:0 auto;'></div>")
     lab_cols, btn_cols = st.columns(spec), st.columns(spec)
@@ -438,6 +439,15 @@ def _render_section_tabs(marks: dict) -> str:
                     st.session_state["acooc_section"] = snm
                     st.rerun()
             ci += 1
+    # "ⓘ How to read this page" (2026-10-13): colours, rules and thresholds,
+    # one click away from every tab
+    lab_cols[ci].markdown(sep.format(h=16), unsafe_allow_html=True)
+    btn_cols[ci].markdown(sep.format(h=38), unsafe_allow_html=True)
+    lab_cols[ci + 1].markdown("<div style='font-size:11px;color:#898781;'>Help</div>",
+                              unsafe_allow_html=True)
+    with btn_cols[ci + 1]:
+        from components.how_to_read import render_how_to_read
+        render_how_to_read()
     return st.session_state["acooc_section"]
 
 

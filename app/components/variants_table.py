@@ -113,6 +113,9 @@ CSS = """
 .lg .c { font-style:normal; display:inline-flex; align-items:center; justify-content:center; width:24px; height:19px;
          border-radius:4px; font-size:12px; font-weight:700; box-sizing:border-box; }
 .lg .d { display:inline-block; width:11px; height:11px; border-radius:50%; box-sizing:border-box; }
+.lg.lgs { margin:0 0 6px; padding:4px 8px; border:1px solid #e5e7eb; border-radius:8px; background:#f8fafc; font-size:12.5px; line-height:1.7; }
+.lg.lgs .row { gap:2px 14px; }
+.lg .cal { display:inline-flex; }
 </style>
 """
 
@@ -1275,8 +1278,8 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
             body.append(f"<tr class='note'><td colspan='{n_cols}'>+ more small unassigned patterns "
                         f"({novel_rest} reads, summed over cities and days) — not listed</td></tr>")
 
-    return (CSS + f"<table class='vt'><thead>{head}</thead><tbody>{''.join(body)}</tbody></table>"
-            + LEGEND)
+    return (CSS + SHORT_LEGEND
+            + f"<table class='vt'><thead>{head}</thead><tbody>{''.join(body)}</tbody></table>")
 
 
 def _novel_evidence(muts, info):
@@ -1363,10 +1366,29 @@ _LEGEND_ROWS = (
     + "<span class='i'>panel dots = the cell colours · hover anything for details · click a "
       "city's code or any of its cells to colour the tree</span></div>")
 
-LEGEND = ("<div class='lg'><div class='row'><span class='lgt' data-grp='legend'>"
-          "<span class='arr'>▸</span> How to read the colours</span>"
-          "<span class='dim'>· or hover anything to see what it means</span></div>"
-          "<div class='g-legend hid'>" + _LEGEND_ROWS + "</div></div>")
+# The full legend now lives behind "ⓘ How to read this page" above the tabs
+# (components.how_to_read, 2026-10-13); the table keeps one short line on top,
+# always in view, with the cell colours you need while reading the tree.
+SHORT_LEGEND = (
+    "<div class='lg lgs'><div class='row'>"
+    + "<span class='i'>" + _lc({"n_markers": 2, "n_measured": 2, "n_present": 2})
+    + _lc({"n_markers": 3, "n_measured": 3, "n_present": 3}, True) + "present</span>"
+    + "<span class='i'>" + _lc({"n_markers": 2, "n_measured": 2, "n_present": 1}) + "mixed</span>"
+    + "<span class='i'>" + _lc({"n_markers": 2, "n_measured": 2, "n_present": 0})
+    + _lc({"n_markers": 2, "n_measured": 2, "n_present": 0}, True) + "absent</span>"
+    + "<span class='i'>" + _lc({"n_markers": 2, "n_measured": 2, "n_present": 2, "basis": "all"})
+    + "light = weak</span>"
+    + "<span class='i'><span class='cal'><i style='background:" + GREEN + ";" + _LOWQ
+    + "'></i></span>low coverage</span>"
+    + "<span class='i'><b>↑ ↓</b> new / gone</span>"
+    + _ld(f"background:{RED}", "found (not in panel)")
+    + "<span class='dim'>ⓘ more: “How to read this page” above the tabs</span>"
+    + "</div></div>")
+
+
+def legend_full_html() -> str:
+    """Every colour and symbol of the table, for "How to read this page"."""
+    return CSS + "<div class='lg'>" + _LEGEND_ROWS + "</div>"
 
 
 # ── the structural tree (left column): same rows and look, no evidence ──
