@@ -150,7 +150,7 @@ def devconvolve(
             logger.error(f"Error running gawk command: {e}")
             if e.stderr:
                 logger.error(e.stderr)
-            exit(1)
+            raise RuntimeError(f"Deconvolution input: gawk failed ({e.stderr or e})") from e
 
         # # add the  above-update matrix to the mutation counts+coverage table
         # xsv join --left mutation  /tmp/mutation_counts_coverage.csv  Mutation /tmp/mutation_variant_matrix2.csv |
@@ -159,24 +159,6 @@ def devconvolve(
 
         # Create output filename with descriptive suffix
         tallymut_file = output_dir / (mutation_counts.stem + "_tallymut.tsv")
-
-        # do head in the terminal
-        head_command = ["head", "-n", "5", str(mutation_counts_fp)]
-        try:
-            subprocess.run(
-                head_command,
-                check=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Error running head command: {e}")
-            if e.stderr:
-                logger.error(e.stderr)
-            exit(1)
-
-
 
         try:
             # First subprocess: xsv join
@@ -304,8 +286,8 @@ def devconvolve(
                         logger.error(f"Error reading file: {read_err}")
                 else:
                     logger.error(f"File does not exist: {file_path}")
-                    
-            exit(1)
+
+            raise RuntimeError(f"Deconvolution input: building the tallymut failed ({e.stderr or e})") from e
 
         ##################### run deconvolute - run Lollipop
         # lollipop deconvolute --output /tmp/deconvolved.csv --out-json /tmp/deconvolved.json \
@@ -348,10 +330,6 @@ def devconvolve(
             with open(output_json_fp, "r") as f:
                 deconvolved_data = json.loads(f.read())
 
-            # DEBUG
-            import shutil
-            shutil.copy(output_json_fp, "/tmp/abundance_deconvolved.json")
-
             # Write back with proper indentation
             with open(output_json_fp, "w") as f:
                 json.dump(deconvolved_data, f, indent=4)
@@ -361,7 +339,7 @@ def devconvolve(
             logger.error(f"Error running lollipop command: {e}")
             if e.stderr:
                 logger.error(e.stderr)
-            exit(1)
+            raise RuntimeError(f"LolliPop deconvolute failed ({e.stderr or e})") from e
 
         ###################################
         # read in the deconvoluted.json file
