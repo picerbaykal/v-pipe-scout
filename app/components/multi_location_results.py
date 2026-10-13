@@ -479,40 +479,22 @@ def create_variant_plot(variants_data: Dict[str, Any], location: str,
 
 
 def get_rgba_color(color: str, alpha: float) -> str:
-    """
-    Convert a color to RGBA format with specified alpha.
+    """'#rrggbb' or 'rgb(r, g, b)' -> 'rgba(r, g, b, alpha)'.
 
-    Args:
-        color: Color string (hex, rgb, or named color)
-        alpha: Alpha value (0-1)
-
-    Returns:
-        RGBA color string
-    """
+    Channels stay 0-255, as browsers read them (until 2026-10-13 they were
+    written as 0-1, e.g. rgba(0.498, 0.235, 0.553, 0.2), which a browser reads
+    as almost black: every confidence band looked grey)."""
     try:
-        if color.startswith('#'):
-            # Convert hex to rgb
-            r = int(color[1:3], 16) / 255
-            g = int(color[3:5], 16) / 255
-            b = int(color[5:7], 16) / 255
-            return f'rgba({r:.3f}, {g:.3f}, {b:.3f}, {alpha})'
-        elif color.startswith('rgb'):
-            # Extract RGB values from the string
-            rgb_values = color.replace('rgb(', '').replace('rgba(', '').replace(')', '').split(',')
-            if len(rgb_values) >= 3:
-                r = float(rgb_values[0].strip()) / 255 if float(rgb_values[0].strip()) > 1 else float(
-                    rgb_values[0].strip())
-                g = float(rgb_values[1].strip()) / 255 if float(rgb_values[1].strip()) > 1 else float(
-                    rgb_values[1].strip())
-                b = float(rgb_values[2].strip()) / 255 if float(rgb_values[2].strip()) > 1 else float(
-                    rgb_values[2].strip())
-                return f'rgba({r:.3f}, {g:.3f}, {b:.3f}, {alpha})'
-
-        # Fallback for unknown color formats
-        return f'rgba(0.5, 0.5, 0.5, {alpha})'
+        c = str(color).strip()
+        if c.startswith("#") and len(c) >= 7:
+            r, g, b = int(c[1:3], 16), int(c[3:5], 16), int(c[5:7], 16)
+        elif c.startswith("rgb"):
+            r, g, b = [int(round(float(x))) for x in c[c.index("(") + 1:c.index(")")].split(",")[:3]]
+        else:
+            raise ValueError(c)
+        return f"rgba({r}, {g}, {b}, {alpha})"
     except Exception:
-        # Safe fallback
-        return f'rgba(0.5, 0.5, 0.5, {alpha})'
+        return f"rgba(128, 128, 128, {alpha})"
 
 
 def render_download_options(location: str, variants_data: Dict[str, Any]) -> None:
