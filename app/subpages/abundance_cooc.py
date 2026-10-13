@@ -1855,7 +1855,9 @@ def app():
 
             if _active_section == "Deconvolution":
               st.markdown("#### Deconvolution")
-              st.caption("Variant shares over time per city, with LolliPop.")
+              st.caption("Variant shares over time per city, with LolliPop. "
+                         "Undetermined = the share no panel variant can take; a low "
+                         "value doesn't prove the panel is complete.")
               _dc1, _dc2, _dc3 = st.columns(3)
               with _dc1:
                   _btn_deconv()
@@ -1884,7 +1886,9 @@ def app():
                   # render_location_grid; here only when show_deconv is set.
                   if show_deconv:
                       st.markdown("#### Variant deconvolution")
-                      st.caption("Primary output — estimated variant proportions over time.")
+                      st.caption("Primary output — estimated variant proportions over time. "
+                                 "Undetermined = the share no panel variant can take; a low "
+                                 "value doesn't prove the panel is complete.")
                       if location in st.session_state.location_results:
                           # one colour per variant in every location, the same
                           # colours CovvFit gets (2026-10-09; was by position)
