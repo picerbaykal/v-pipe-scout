@@ -352,14 +352,19 @@ def _marker_syms(d, n_max=6):
     for x in d.get("detail") or []:
         reads = x.get("cov_raw", x.get("cov", 0)) or 0
         f, st, why = x.get("freq"), x.get("status"), x.get("why") or ""
+        m = x["marker"]
         if not reads:
-            out.append(f"{x['marker']} no reads ?")
-            continue
-        sym = ("✓" if st == "present" else "✗" if st == "absent"
-               else "?" if why.startswith("under") else "≠" if ("link" in why or "unlike" in why
-                                                                 or "look like" in why) else "~")
-        out.append(f"{x['marker']} {100 * (f or 0):.0f} % {sym}" if sym != "?"
-                   else f"{x['marker']} {reads} reads ?")
+            out.append(f"{m} no reads ?")
+        elif why.startswith("under"):                 # too few reads at the marker
+            out.append(f"{m} {reads} reads ?")
+        elif "cover a neighbour" in why:              # share fine, too few reads to test the link
+            out.append(f"{m} {100 * (f or 0):.0f} % ({x.get('link_n', 0)} linked reads) ?")
+        elif "look like" in why:                      # its reads look like another lineage
+            out.append(f"{m} {100 * (f or 0):.0f} % ≠")
+        else:
+            sym = ("✓" if st == "present" or why == "present" else "✗" if why.startswith("absent")
+                   else "~")
+            out.append(f"{m} {100 * (f or 0):.0f} % {sym}")
     more = f" · +{len(out) - n_max}" if len(out) > n_max else ""
     return " · ".join(out[:n_max]) + more
 
@@ -1320,7 +1325,7 @@ _LEGEND_ROWS = (
     + "<span class='i'>n/m under a city code = samples well covered · details ▸ = samples "
       "per city and the markers' reads</span>"
     + "<span class='i'>in hovers: ✓ present (≥ " + f"{_num()['pf']}" + " %) · ✗ absent (< "
-    + f"{_num()['af']}" + " %) · ~ in between · ? too few reads · ≠ on reads unlike it · "
+    + f"{_num()['af']}" + " %) · ~ in between · ? too few reads (or too few linked reads) · ≠ on reads unlike it · "
       "▧ low-coverage sample</span>"
     + "</div><div class='row'><span class='t'>Found</span>"
     + _li(S_FOUND, "5", "older results: days with evidence")
