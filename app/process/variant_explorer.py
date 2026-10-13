@@ -248,6 +248,8 @@ def check_in_data(markers: List[str], per_date: Dict[str, Dict[str, list]],
             if x:
                 link[m][0] += x[2]
                 link[m][1] += x[3]
+    # markers with no neighbour in reach, decided on the whole window
+    no_link = set(check_verdicts(markers, per_date or {}, c)["no_link"])
     need = min(2, len(markers))
     for d in sorted(set(dates or []) | set(per_date or {})):
         cells = (per_date or {}).get(d, {})
@@ -257,7 +259,7 @@ def check_in_data(markers: List[str], per_date: Dict[str, Dict[str, list]],
         # this day's reads, the window's link
         day = {m: [x[0], x[1], link[m][0], link[m][1]]
                for m, x in cells.items() if m in link and x}
-        r = check_verdicts(markers, {d: day}, c)
+        r = check_verdicts(markers, {d: day}, c, no_link)
         if r["n_measured"] < need:
             mark = "present" if r["verdict"] == "present" else "thin"
         else:
@@ -275,11 +277,11 @@ def check_in_data(markers: List[str], per_date: Dict[str, Dict[str, list]],
     res, pd_, basis = None, pd_all, "all"
     if good:
         pd_good = {d: pd_all[d] for d in good if d in pd_all}
-        r_good = check_verdicts(markers, pd_good)
+        r_good = check_verdicts(markers, pd_good, None, no_link)
         if r_good["n_measured"] > 0:
             res, pd_, basis = r_good, pd_good, "well"
     if res is None:
-        res = check_verdicts(markers, pd_all)
+        res = check_verdicts(markers, pd_all, None, no_link)
     n_well = len(good)
     state = res["verdict"]          # present / absent / mixed / not_covered
     return {"state": state, "n_present": res["n_present"], "n_measured": res["n_measured"],
@@ -338,6 +340,8 @@ def _marker_detail(markers, per_date, res, c) -> List[Dict]:
             why = f"between {c['absent_freq'] * 100:g} and {c['present_freq'] * 100:g} %"
             if f >= 0.8 * c["present_freq"]:
                 near = f"{f * 100:.1f} %, present needs {c['present_freq'] * 100:g} %"
+        elif r.get("no_link"):
+            why = "present (no neighbour in reach: share only)"
         elif link_n < c["min_link"]:
             why = f"only {link_n} reads cover a neighbour (needs {c['min_link']})"
             if link_n >= 0.8 * c["min_link"]:

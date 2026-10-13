@@ -362,9 +362,10 @@ def _marker_syms(d, n_max=6):
         elif "look like" in why:                      # its reads look like another lineage
             out.append(f"{m} {100 * (f or 0):.0f} % ≠")
         else:
-            sym = ("✓" if st == "present" or why == "present" else "✗" if why.startswith("absent")
-                   else "~")
-            out.append(f"{m} {100 * (f or 0):.0f} % {sym}")
+            sym = ("✓" if st == "present" or why.startswith("present")
+                   else "✗" if why.startswith("absent") else "~")
+            out.append(f"{m} {100 * (f or 0):.0f} % {sym}"
+                       + (" (share only)" if "share only" in why else ""))
     more = f" · +{len(out) - n_max}" if len(out) > n_max else ""
     return " · ".join(out[:n_max]) + more
 

@@ -577,7 +577,8 @@ def accumulate_check_stats(rows: List[dict],
 
 def check_verdicts(markers: List[str],
                    per_date: Dict[str, Dict[str, List[int]]],
-                   cfg: Optional[dict] = None) -> dict:
+                   cfg: Optional[dict] = None,
+                   no_link: Optional[set] = None) -> dict:
     """Verdict for one variant in one city: a vote among its specific markers.
 
     Counts are pooled over all dates in the window (the heatmaps show dates),
@@ -587,6 +588,12 @@ def check_verdicts(markers: List[str],
                   match the variant at neighbouring positions (link >= link_min)
       absent      <  absent_freq of covering reads carry it
       unmeasured  fewer than min_cov covering reads, or anything in between
+    A marker with no neighbour in reach (no_link: at least min_link reads carry
+    it, and not one of them covers another position of the variant — its
+    nearest mutation is further than a read, e.g. NB.1.8.1's 2095A, 695 bases)
+    can't take the link test; it is judged on its share alone (2026-10-13;
+    before, it could never be present). Computed from the reads unless given
+    (check_in_data passes the window's set to each day).
     Verdict from present / (present + absent):
       present >= confirm_share AND at least min_present markers present
       absent <= notfound_share · else mixed (also a single present marker:
@@ -612,6 +619,9 @@ def check_verdicts(markers: List[str],
                 k = cap / cell[0] if cap and cell[0] > cap else 1.0
                 for i in range(4):
                     pooled[m][i] += cell[i] * k
+    if no_link is None:
+        no_link = {m for m in markers
+                   if pooled[m][2] == 0 and pooled[m][1] >= c["min_link"]}
     out, n_p, n_a = {}, 0, 0
     for m in markers:
         cov, hit, lk_n, lk_ok = pooled[m]
@@ -621,15 +631,15 @@ def check_verdicts(markers: List[str],
             st = "unmeasured"
         elif f < c["absent_freq"]:
             st = "absent"
-        elif (f >= c["present_freq"] and lk_n >= c["min_link"]
-              and link >= c["link_min"]):
+        elif f >= c["present_freq"] and (m in no_link or (lk_n >= c["min_link"]
+                                                          and link >= c["link_min"])):
             st = "present"
         else:
             st = "unmeasured"
         n_p += st == "present"
         n_a += st == "absent"
         out[m] = {"cov": int(round(cov)), "cov_raw": raw[m], "freq": f, "link": link,
-                  "status": st}
+                  "status": st, "no_link": m in no_link}
     n_meas = n_p + n_a
     if n_meas == 0:
         verdict = "not_covered"
@@ -640,4 +650,4 @@ def check_verdicts(markers: List[str],
     else:
         verdict = "mixed"
     return {"verdict": verdict, "n_markers": len(markers), "n_present": n_p,
-            "n_measured": n_meas, "markers": out}
+            "n_measured": n_meas, "markers": out, "no_link": sorted(no_link)}

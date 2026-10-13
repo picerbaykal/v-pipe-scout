@@ -205,3 +205,30 @@ def test_one_huge_sample_cannot_outvote_the_others():
     assert summed["freq"] < 0.001 and summed["status"] == "absent"
     assert 0.07 < capped["freq"] < 0.09 and capped["status"] == "present"
     assert (capped["cov"], capped["cov_raw"]) == (1176, 724443)
+
+
+def test_marker_with_no_neighbour_in_reach_is_judged_on_its_share():
+    # NB.1.8.1's 2095A: nearest own mutation 695 bases away, so no read can
+    # take the link test (link_n 0 with 120 carriers) -> share alone
+    pd_ = {"d1": {"2095A": [1000, 120, 0, 0], "823T": [1000, 360, 300, 290]}}
+    out = check_verdicts(["2095A", "823T"], pd_, CFG)
+    assert out["no_link"] == ["2095A"]
+    assert out["markers"]["2095A"]["status"] == "present"
+    assert out["verdict"] == "present"
+    # some reads do reach a neighbour, too few: still undecided
+    pd_ = {"d1": {"2095A": [1000, 120, 5, 5], "823T": [1000, 360, 300, 290]}}
+    assert check_verdicts(["2095A", "823T"], pd_, CFG)["markers"]["2095A"]["status"] == "unmeasured"
+    # too few carriers to tell: undecided
+    pd_ = {"d1": {"2095A": [1000, 10, 0, 0]}}
+    assert check_verdicts(["2095A"], pd_, CFG)["no_link"] == []
+
+
+def test_day_squares_use_the_windows_no_neighbour_markers():
+    from process.variant_explorer import check_in_data
+    mk = ["2095A", "823T"]
+    pd_ = {"2026-09-01": {"2095A": [1000, 120, 0, 0], "823T": [1000, 360, 300, 290]},
+           # this day alone has only 12 carriers, the window decides
+           "2026-09-05": {"2095A": [100, 12, 0, 0], "823T": [1000, 360, 300, 290]}}
+    r = check_in_data(mk, pd_, sorted(pd_))
+    assert dict(r["timeline"]) == {"2026-09-01": "present", "2026-09-05": "present"}
+    assert any("share only" in x["why"] for x in r["detail"])
