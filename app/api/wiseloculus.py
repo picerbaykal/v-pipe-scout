@@ -172,170 +172,6 @@ class WiseLoculusLapis(Lapis):
             logging.error(f"Error fetching mutations: {e}")
             return pd.DataFrame()
 
-    async def _fetch_mutation_counts_for_date(
-            self,
-            session: aiohttp.ClientSession,
-            locationName: str,
-            date_str: str,
-            positions: set,
-    ) -> List[dict]:
-        """
-        Fetch mutation counts for a single sampling date via
-        /sample/nucleotideMutations, for specific positions only.
-
-        NOT USED by get_tallymut since 2026-10-08: with minProportion 0.01 it
-        never returns absent mutations (count 0), which deconvolution needs.
-        Kept until no other caller is left (grep before deleting).
-
-        Targeted fetch — only keeps positions from the selected variants'
-        pango signatures. No noise filtering needed since we ask for
-        specific known positions, not everything circulating.
-
-        Args:
-            session: Shared aiohttp session — reused across all dates
-                so connection pooling limits apply correctly.
-            locationName: Location name e.g. "Lugano (TI)"
-            date_str: ISO date string e.g. "2026-01-20"
-            positions: Set of integer positions from selected variants'
-                pango signatures. Only mutations at these positions
-                are kept from the LAPIS response.
-
-        Returns:
-            List of dicts with keys: date, pos, cov, var
-        """
-        params = {
-            "locationName": locationName,
-            "samplingDateFrom": date_str,
-            "samplingDateTo": date_str,
-            "minProportion": 0.01,
-            "limit": 50000,
-        }
-
-        try:
-            async with session.get(
-                    f'{self.server_ip}/sample/nucleotideMutations',
-                    params=params,
-                    headers={'accept': 'application/json'}
-            ) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    raise APIError(
-                        f"nucleotideMutations failed for {date_str}: "
-                        f"status {response.status}",
-                        status_code=response.status,
-                        details=error_text,
-                        payload=params
-                    )
-                data = await response.json()
-        except APIError:
-            raise
-        except Exception as e:
-            raise APIError(
-                f"Error fetching mutations for {date_str}: {str(e)}",
-                details=str(e)
-            )
-
-        rows = []
-        for entry in data.get("data", []):
-            # API returns either a 'mutation' field ("C241T") or separate fields
-            mutation_str = entry.get("mutation") or ""
-            if not mutation_str:
-                # reconstruct from separate fields
-                mfrom = entry.get("mutationFrom", "")
-                mto = entry.get("mutationTo", "")
-                position = entry.get("position")
-                if position and mto:
-                    mutation_str = f"{mfrom}{position}{mto}"
-            pos = lapis_mutation_to_pos(mutation_str)
-            if not pos:
-                continue
-            m = re.match(r"^(\d+)", pos)
-            if not m or int(m.group(1)) not in positions:
-                continue
-            coverage = entry.get("coverage", 0)
-            if coverage == 0:
-                continue
-            rows.append({
-                "date": date_str,
-                "pos": pos,
-                "cov": int(coverage),
-                "var": int(entry.get("count", 0)),
-            })
-        return rows
-
-    async def _fetch_mutations_per_date(
-            self,
-            locationName: str,
-            date_range: Tuple[datetime, datetime],
-            positions: set,
-    ) -> List[dict]:
-        """
-        Fetch mutation counts across all sampling dates, concurrently.
-
-        First fetches real sampling dates for the location/range (wastewater
-        is sampled ~2x/week, not daily), then queries each date in parallel
-        using a shared connection-pooled session.
-
-        Args:
-            locationName: Location name e.g. "Lugano (TI)"
-            date_range: Tuple of (start_date, end_date)
-            positions: Set of integer positions from selected variants'
-                pango signatures — passed through to each date's fetch.
-
-        Returns:
-            List of row dicts {date, pos, cov, var} across all dates.
-            Dates that fail are logged and skipped, not fatal.
-        """
-        dates = await self._get_sampling_dates(locationName, date_range)
-        if not dates:
-            logging.warning(
-                f"No sampling dates found for {locationName} "
-                f"{date_range[0].strftime('%Y-%m-%d')} → "
-                f"{date_range[1].strftime('%Y-%m-%d')}"
-            )
-            return []
-
-        connector = aiohttp.TCPConnector(
-            limit=MAX_CONCURRENT_CONNECTIONS,
-            limit_per_host=MAX_CONNECTIONS_PER_HOST
-        )
-        timeout = aiohttp.ClientTimeout(total=60)
-
-        async with aiohttp.ClientSession(
-                timeout=timeout,
-                connector=connector
-        ) as session:
-            tasks = [
-                self._fetch_mutation_counts_for_date(
-                    session, locationName, date_str, positions
-                )
-                for date_str in dates
-            ]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        all_rows: List[dict] = []
-        failed_dates = []
-        for date_str, result in zip(dates, results):
-            if isinstance(result, Exception):
-                logging.error(
-                    f"Failed to fetch mutations for {date_str}: {result}"
-                )
-                failed_dates.append(date_str)
-                continue
-            all_rows.extend(result)
-
-        if failed_dates:
-            logging.warning(
-                f"Mutation fetch failed for {len(failed_dates)}/{len(dates)} "
-                f"sampling dates: {failed_dates}"
-            )
-
-        logging.info(
-            f"Fetched {len(all_rows)} mutation×date rows across "
-            f"{len(dates) - len(failed_dates)}/{len(dates)} sampling dates"
-        )
-        return all_rows
-
     @staticmethod
     def _rows_to_tallymut(
             rows: List[dict],
@@ -346,7 +182,7 @@ class WiseLoculusLapis(Lapis):
 
         Args:
             rows: List of dicts {date, pos, cov, var} from
-                _fetch_mutations_per_date.
+                _component_to_rows.
             locationName: Location name — added as a column since
                 LolliPop expects it in the tallymut.
 
@@ -1454,8 +1290,8 @@ class WiseLoculusLapis(Lapis):
     #
     # Used by the Abundance & Co-occurrence tab to source LolliPop deconvolution
     # input directly from LAPIS instead of a pre-built tallymut.tsv file.
-    # Wastewater is sampled ~2x/week, we fetch real sampling dates
-    # first, then query /sample/nucleotideMutations once per date.
+    # Wastewater is sampled ~2x/week: get_tallymut fetches the real sampling
+    # dates first, then asks /component/nucleotideMutationsOverTime for them.
 
     async def _get_sampling_dates(
         self,
