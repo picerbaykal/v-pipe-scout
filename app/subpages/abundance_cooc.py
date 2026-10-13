@@ -184,15 +184,37 @@ def _render_composition(cooc_result: dict, scanner_result: dict, key: str = "",
     fig = go.Figure()
     _near_txt = ["<br>".join(f"{_l} ({_n:,} reads)" for _l, _n in r.get("near_top", []))
                  for r in rows]
+    # what each date rests on (2026-10-09): 1,000 reads and 500,000 look alike
+    _tot = [int(r.get("total", 0) or 0) for r in rows]
     for name, _fld, line_c, fill_c in layers:
         _is_near = _fld == "near_pct"
+        # no edge lines (2026-10-09): a band at 0 % still drew its 0.5 px edge
+        # on top of the green, a hairline of red / grey where there was none
         fig.add_trace(go.Scatter(
             x=dates, y=[r.get(_fld, 0) for r in rows], name=name, mode="lines",
-            stackgroup="one", line=dict(width=0.5, color=line_c), fillcolor=fill_c,
-            customdata=_near_txt if _is_near else None,
-            hovertemplate=("%{x|%Y-%m-%d}<br>" + name + " %{y:.1%}"
-                           + ("<br>%{customdata}" if _is_near else "")
+            stackgroup="one", line=dict(width=0, color=line_c), fillcolor=fill_c,
+            customdata=[[t, n] for t, n in zip(_tot, _near_txt)],
+            hovertemplate=("%{x|%Y-%m-%d}<br>" + name + " %{y:.1%} of %{customdata[0]:,} reads"
+                           + ("<br>%{customdata[1]}" if _is_near else "")
                            + "<extra></extra>")))
+    # the axis ends at the last sample, which gets its own tick (2026-10-09:
+    # ticks every two weeks stopped at e.g. 23 Aug with data until 4 Sep)
+    try:
+        import pandas as _pd
+        _dt = sorted(_pd.to_datetime(dates))
+        _span = (_dt[-1] - _dt[0]).days or 1
+        # ticks evenly spaced in TIME (not by sample count), then the last
+        # sample itself; a tick closer than ~1/8 of the span to it is dropped
+        _step = max(7, round(_span / 5 / 7) * 7)
+        _ticks = list(_pd.date_range(_dt[0], _dt[-1], freq=f"{_step}D"))
+        _ticks = [t for t in _ticks if (_dt[-1] - t).days >= _span / 8] + [_dt[-1]]
+        # a little room on the right, so the last label isn't cut off
+        _pad = _pd.Timedelta(days=max(1, round(_span * 0.03)))
+        fig.update_xaxes(range=[_dt[0] - _pad, _dt[-1] + _pad], tickmode="array",
+                         tickvals=_ticks,
+                         ticktext=[f"{d.day} {d.strftime('%b')}" for d in _ticks])
+    except Exception:
+        pass
     fig.update_layout(
         height=234, margin=dict(t=18, b=26, l=46, r=12),
         template="plotly_white",
@@ -251,14 +273,15 @@ def _panel_verdicts(cooc_res: dict, variants: list) -> dict:
             out[v] = {"state": "no_data", "reason": "no check data — re-run the scan",
                       "n_present": 0, "n_measured": 0, "n_markers": 0}
             continue
-        # the vote adds up the reads of ALL samples in the run's dates
-        # (2026-10-09; from 2 Oct it used the last 5 covered samples only, which
-        # ignored the chosen window); the calendar shows the samples one by one
-        _cid = check_in_data(ci.get("markers") or [], ci.get("per_date") or {}, _dates)
-        res = check_verdicts(ci.get("markers") or [], ci.get("per_date") or {})
-        nd, np_, nm = res["n_markers"], res["n_present"], res["n_measured"]
-        mk = [f"{k} {(m['freq'] or 0) * 100:.0f}% {sym[m['status']]}"
-              if m["cov"] else f"{k} no reads ?" for k, m in res["markers"].items()]
+        # one vote per city (process.variant_explorer.check_in_data, 2026-10-13):
+        # the well-covered samples decide when the city has any, otherwise all
+        # samples in the run's dates, each counting at most check.cap_reads reads
+        _cid = check_in_data(ci.get("markers") or [], ci.get("per_date") or {}, _dates,
+                             quality=(cooc_res or {}).get("sample_qc"))
+        nd, np_, nm = _cid["n_markers"], _cid["n_present"], _cid["n_measured"]
+        _sym = {"present": "✓", "absent": "✗"}
+        mk = [f"{x['marker']} {(x['freq'] or 0) * 100:.0f}% {_sym.get(x['status'], '?')}"
+              if x.get("cov") else f"{x['marker']} no reads ?" for x in (_cid.get("detail") or [])]
         mtxt = " · ".join(mk[:6]) + (f" · +{len(mk) - 6} more" if len(mk) > 6 else "")
         if nd == 0:
             state, reason = "no_marker", ("every mutation is shared with another panel "
@@ -266,12 +289,17 @@ def _panel_verdicts(cooc_res: dict, variants: list) -> dict:
         elif nm == 0:
             state, reason = "no_data", f"too few reads on its markers — {mtxt}"
         else:
-            state = res["verdict"] if res["verdict"] in ("present", "absent", "mixed") else "no_data"
+            state = _cid["state"] if _cid["state"] in ("present", "absent", "mixed") else "no_data"
             reason = f"{np_} of {nm} measurable markers present — {mtxt}"
         out[v] = {"state": state, "reason": reason,
                   "n_present": np_, "n_measured": nm, "n_markers": nd,
                   # one mark per sampling day, for the Evidence calendar
                   "timeline": _cid["timeline"],
+                  # coverage quality of the samples (2026-10-13)
+                  "quality": _cid.get("quality") or {}, "n_well": _cid.get("n_well"),
+                  "n_samples": _cid.get("n_samples"), "basis": _cid.get("basis"),
+                  # each marker's numbers, for the row's details (2026-10-13)
+                  "detail": _cid.get("detail") or [],
                   "day_detail": _cid.get("day_detail") or {}}
     return out
 
@@ -2132,7 +2160,8 @@ def app():
                         if not _pv:
                             return None
                         return _cid(_pv.get("markers") or [], _pv.get("per_date") or {},
-                                    _fc.get("dates") or [])
+                                    _fc.get("dates") or [],
+                                    quality=(_cr_all.get(_loc) or {}).get("sample_qc"))
 
                     def _xcheck(_loc, _node):
                         """Phase 3: the ★ marker check of a lineage named in another
@@ -2142,7 +2171,8 @@ def app():
                         if not _pv or not _pv.get("markers"):
                             return None
                         return _cid(_pv.get("markers") or [], _pv.get("per_date") or {},
-                                    _x.get("dates") or [])
+                                    _x.get("dates") or [],
+                                    quality=(_cr_all.get(_loc) or {}).get("sample_qc"))
 
                     def _ingest_clade(_c, _loc, _bucket=None):
                         # Route one finding (top-level OR a promoted sub-finding) into
@@ -2415,7 +2445,15 @@ def app():
                                 _ch["where"] = where_in_tree(
                                     _v, _ch["sign"], _ch["mut"], _sigs_n,
                                     st.session_state["acooc_pango_children"])
+                    # samples well covered per city (2026-10-13), under each city code
+                    from process.sample_qc import well_covered as _wc
+                    _qual = {}
+                    for _c in _cities_all:
+                        _sq = (_cr_all.get(_c) or {}).get("sample_qc") or {}
+                        if _sq:
+                            _qual[_c] = (sum(1 for _q in _sq.values() if _wc(_q)), len(_sq))
                     _view = _vt.build(_cities_all, _tcity, _rows, _verdicts_by_city, _findings,
+                                      quality=_qual,
                                       current_panel=set(all_selected_variants),
                                       ot=curated_variants, novel=_nov_list, broad=_broad,
                                       novel_hotspot=((_hot_p, _human_reads(_hot_r))

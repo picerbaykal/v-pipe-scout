@@ -392,6 +392,10 @@ CHECK_DEFAULTS = {
                              #     carries it: XFZ carries LP.8's 1954A)
     "notfound_share": 0.25,  # present / measured <= this -> absent
     "calendar_samples": 12,  # Evidence squares shown per row (UI only)
+    "cap_reads": 1000,       # a sample counts at most this many reads per marker
+                             #   (2026-10-13): in low-virus samples a few amplicons
+                             #   reach 100,000s of reads from few molecules and
+                             #   would outvote every other sample
 }
 
 
@@ -576,7 +580,8 @@ def check_verdicts(markers: List[str],
                    cfg: Optional[dict] = None) -> dict:
     """Verdict for one variant in one city: a vote among its specific markers.
 
-    Counts are pooled over all dates in the window (the heatmaps show dates).
+    Counts are pooled over all dates in the window (the heatmaps show dates),
+    each date counting at most cap_reads reads per marker (2026-10-13).
     Each marker is
       present     >= present_freq of covering reads carry it, and those reads
                   match the variant at neighbouring positions (link >= link_min)
@@ -595,13 +600,18 @@ def check_verdicts(markers: List[str],
              "n_present": 0, "n_measured": 0, "markers": {}}
     if not markers:
         return empty
-    pooled = {m: [0, 0, 0, 0] for m in markers}
+    pooled = {m: [0.0, 0.0, 0.0, 0.0] for m in markers}
+    raw = {m: 0 for m in markers}
+    cap = float(c.get("cap_reads") or 0)
     for cells in (per_date or {}).values():
         for m in markers:
             cell = cells.get(m)
             if cell:
+                raw[m] += cell[0]
+                # each sample counts at most `cap` reads, its share unchanged
+                k = cap / cell[0] if cap and cell[0] > cap else 1.0
                 for i in range(4):
-                    pooled[m][i] += cell[i]
+                    pooled[m][i] += cell[i] * k
     out, n_p, n_a = {}, 0, 0
     for m in markers:
         cov, hit, lk_n, lk_ok = pooled[m]
@@ -618,7 +628,8 @@ def check_verdicts(markers: List[str],
             st = "unmeasured"
         n_p += st == "present"
         n_a += st == "absent"
-        out[m] = {"cov": cov, "freq": f, "link": link, "status": st}
+        out[m] = {"cov": int(round(cov)), "cov_raw": raw[m], "freq": f, "link": link,
+                  "status": st}
     n_meas = n_p + n_a
     if n_meas == 0:
         verdict = "not_covered"

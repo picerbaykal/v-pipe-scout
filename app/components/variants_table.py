@@ -78,10 +78,20 @@ CSS = """
            vertical-align:1px; }
 .vt .add:hover { background:#dc2626; color:#fff; }
 .vt .added { font-size:12.5px; margin-left:9px; color:#6b7280; }
-.vt .c { display:inline-flex; align-items:center; justify-content:center; width:28px; height:22px;
+.vt .c { display:inline-flex; align-items:center; justify-content:center; min-width:28px; padding:0 3px; height:22px;
          border-radius:5px; font-size:13px; font-weight:700; box-sizing:border-box; color:#c4c7cd; cursor:default; }
 .vt td.ev { white-space:normal; line-height:1.3; padding-left:12px; font-size:14.5px; }
 .vt .dim { color:#8b8f97; }
+.vt .tr-a { font-size:11px; margin-left:2px; }
+.vt .det { color:#2563eb; font-size:12.5px; cursor:pointer; margin-left:6px; white-space:nowrap; }
+.vt tr.dt td { height:auto; padding:8px 12px 10px; background:#f8fafc; white-space:normal;
+               font-size:13px; line-height:1.55; border-left:3px solid #e2e8f0; }
+.vt .dl { display:flex; align-items:center; gap:10px; margin:2px 0; }
+.vt .dl b { min-width:84px; font-weight:600; }
+.vt .gap { color:#9ca3af; font-size:11px; margin:0 3px; }
+.vt table.mk { border-collapse:collapse; margin-top:6px; }
+.vt table.mk td, .vt table.mk th { height:auto; padding:1px 14px 1px 0; border:0; font-size:12.5px;
+                                   text-transform:none; letter-spacing:0; background:none; }
 .vt tr.sec td { height:auto; padding:16px 8px 6px; font-size:12px; font-weight:700; color:#6b7280;
                 letter-spacing:.03em; text-transform:uppercase; border-bottom:1px solid #e6e8ec; }
 .vt tr.grp td { height:30px; cursor:pointer; color:#31333f; font-size:14px; background:#f7f8fa; }
@@ -185,6 +195,7 @@ def _pl(n, word):
 # samples on their own (2026-10-09): a light fill with a thin solid edge of
 # the same hue (XFZ in Lugano: 2/2 from one sample, 24 Aug).
 S_PRESENT_LIGHT = "background:#e8f7ed;color:#14532d;box-shadow:inset 0 0 0 1.5px #16a34a;"
+S_NOTFOUND_LIGHT = "background:#fef3e2;color:#78350f;box-shadow:inset 0 0 0 1.5px #f59e0b;"
 S_FOUND_LIGHT = "background:#fdecec;color:#7f1d1d;box-shadow:inset 0 0 0 1.5px #dc2626;"
 MIXED_BG, PALE_BG, PALE_FG = "#b4bac3", "#f3f4f6", "#6b7280"
 S_MIXED = _fill(MIXED_BG, "#111827")
@@ -222,6 +233,15 @@ def _few_clear(d):
     return c is not None and len(c) < _num()["ed"]
 
 
+def _well_note(d):
+    """' — 1 of 12 samples well covered: read with care' for cell hovers."""
+    n, k = d.get("n_samples"), d.get("n_well")
+    if not n or k is None:
+        return ""
+    return (f" — {k} of {n} {_pl(n, 'sample')} well covered"
+            + (": read with care" if k * 2 < n else ""))
+
+
 def _clear_note(d):
     """Hover words for a light cell: on which sample(s) it was clear."""
     if _state(d) != "present" or not _few_clear(d):
@@ -243,17 +263,154 @@ def _scale(d, found=False):
     if m == 0:
         return S_NODATA, "?", GREY, "#6b7280", None
     share, st = p / m, _state(d)
+    weak = d.get("basis") == "all"          # no well-covered sample decided it
     if st == "present":
         col = RED if found else GREEN
-        if _few_clear(d):
+        if weak or _few_clear(d):
             return ((S_FOUND_LIGHT if found else S_PRESENT_LIGHT), f"{p}/{m}",
                     ("#fca5a5" if found else "#86efac"), (RED if found else "#15803d"), share)
         return _fill(col, "#fff"), f"{p}/{m}", col, (RED if found else "#15803d"), share
     if st == "absent" and not found:
+        if weak:
+            return S_NOTFOUND_LIGHT, f"{p}/{m}", "#fcd9a3", AMBER_T, share
         return S_NOTFOUND, f"{p}/{m}", AMBER, AMBER_T, share
     if st == "absent":
         return S_PALE, f"{p}/{m}", PALE_BG, RED, share
     return S_MIXED, f"{p}/{m}", MIXED_BG, (RED if found else "#4b5563"), share
+
+
+def _basis_samples(d):
+    """(samples the vote used, as [(date, mark)], 'well' / 'all'): the
+    well-covered ones when they decided, else all (2026-10-13)."""
+    tl = [(x, m) for x, m in (d.get("timeline") or []) if m != "unknown"]
+    if d.get("basis") != "well":
+        return tl, "all"
+    try:
+        from process.sample_qc import well_covered
+    except Exception:
+        return tl, "all"
+    q = d.get("quality") or {}
+    return [(x, m) for x, m in tl if well_covered(q.get(x))], "well"
+
+
+def _trend(d):
+    """(glyph, words) from the latest samples the vote used (2026-10-13):
+    ↑ present on the last >= 2 samples with enough reads and never before in
+    the window · ↓ present earlier, absent on the last >= 2 · → present on
+    the last >= 2 and earlier too · none otherwise."""
+    samples, _b = _basis_samples(d)
+    usable = [(x, m) for x, m in samples if m in ("present", "absent", "mixed")]
+    if len(usable) < 2:
+        return "", ""
+    pres = [m == "present" for _x, m in usable]
+    run = 1
+    while run < len(usable) and usable[-run - 1][1] == usable[-1][1]:
+        run += 1
+    tail = [x for x, _m in usable[-run:]]
+    before = any(pres[:-run])
+    dates = ", ".join(_short_date(x) for x in tail[-4:])
+    if usable[-1][1] == "present" and run >= 2:
+        if run < len(usable) and not before:
+            return "↑", f"new: present on the last {run} samples ({dates}), not before"
+        return "→", f"present on the last {run} samples ({dates})"
+    if usable[-1][1] == "absent" and run >= 2 and before:
+        last_p = [x for x, m in usable if m == "present"][-1]
+        return "↓", f"gone: absent on the last {run} samples ({dates}), last present {_short_date(last_p)}"
+    return "", ""
+
+
+def _summary(d):
+    """One line for the selected city: the answer, what it rests on, and the
+    trend with its dates."""
+    n_mk, p, a, u = _vote_counts(d)
+    if n_mk == 0:
+        return _vote_text(d)
+    st = _state(d)
+    word = {"present": "present", "absent": "absent", "mixed": "mixed"}.get(st, "too few reads")
+    samples, basis = _basis_samples(d)
+    clear = [x for x, m in samples if m == "present"]
+    k = len(samples)
+    if basis == "well":
+        txt = f"{word} on the {k} well-covered {_pl(k, 'sample')}"
+    else:
+        txt = f"{word} · weak: no well-covered sample, all {k} samples counted"
+    if clear:
+        txt += (f" · last {_short_date(clear[-1])}" if basis == "well"
+                else f" · clearly present in {len(clear)}, last {_short_date(clear[-1])}")
+    g, words = _trend(d)
+    return txt + (f" · {g} {words}" if g in ("↑", "↓") else "")
+
+
+def _det_link(gid):
+    return f"<span class='det' data-grp='{gid}'>details <span class='arr'>▸</span></span>"
+
+
+def _square(x, m, mk, detail, quality):
+    style, meaning = mk.get(m, mk["unknown"])
+    extra, qtxt = _qual_bits(quality, x)
+    if extra is None:                  # low coverage: stripes over its colour
+        extra = _LOWQ_EMPTY if m in ("thin", "uncovered") else _LOWQ
+        qtxt += (" — the sample is there, but each part of the genome comes from "
+                 "few virus molecules, so its shares are snapshots, not the city's mix")
+    tip = (_short_date(x) + ": " + (qtxt + " · " if qtxt else "") + meaning
+           + (" — " + detail[x] if (detail or {}).get(x) else ""))
+    return f"<i style='{style}{extra}' data-tip='{_e(tip)}'></i>"
+
+
+def _cal_line(d, top, low=None):
+    """The newest check.calendar_samples samples, and before them, after a
+    small gap, any older sample where it was clearly present (2026-10-13)."""
+    tl = [(x, m) for x, m in (d.get("timeline") or []) if m != "unknown"]
+    if not tl:
+        return ""
+    n = _cal_max()
+    mk = _day_marks(top, low)
+    det, q = d.get("day_detail") or {}, d.get("quality") or {}
+    older = [(x, m) for x, m in tl[:-n] if m == "present"]
+    head = "".join(_square(x, m, mk, det, q) for x, m in older)
+    if older:
+        hidden = len(tl) - n - len(older)
+        head += (f"<span class='gap' data-tip='{hidden} older {_pl(hidden, 'sample')} "
+                 f"without it not shown'>⋯</span>")
+    return ("<span class='cal' style='margin-left:0'>" + head
+            + "".join(_square(x, m, mk, det, q) for x, m in tl[-n:]) + "</span>")
+
+
+def _detail_row(gid, v, per_city, cities, sel, n_cols, found=False):
+    """The row's details (hidden until 'details ▸'): one calendar line per
+    city, the markers with their real reads in the selected city, and their
+    median share across cities."""
+    top, low = (RED, None) if found else (GREEN, AMBER)
+    lines = []
+    for c in cities:
+        d = per_city.get(c)
+        if not d or not d.get("timeline"):
+            continue
+        lines.append(f"<div class='dl'><b>{_e(city_name(c))}</b>{_cal_line(d, top, low)}"
+                     f"<span class='dim'>{_e(_summary(d))}</span></div>")
+    ds = per_city.get(sel) or {}
+    mk_rows = []
+    import statistics
+    for x in ds.get("detail") or []:
+        m = x.get("marker")
+        shares = [y.get("freq") for dd in per_city.values() for y in (dd.get("detail") or [])
+                  if y.get("marker") == m and y.get("freq") is not None]
+        med = f"{100 * statistics.median(shares):.0f} %" if shares else "–"
+        reads = x.get("cov_raw", x.get("cov", 0)) or 0
+        share = f"{100 * x['freq']:.1f} % of {reads:,} reads" if x.get("freq") is not None and reads else "no reads"
+        mk_rows.append(f"<tr><td class='mono'>{_e(m)}</td><td>{_e(share)}</td>"
+                       f"<td>{_e(x.get('why') or '')}</td><td>{med}</td></tr>")
+    mk = ""
+    if mk_rows:
+        basis = "well-covered samples" if ds.get("basis") == "well" else "all samples"
+        mk = (f"<table class='mk'><tr><th>★ marker</th><th>{_e(city_name(sel))}, {basis}</th>"
+              "<th></th><th>median share, all cities</th></tr>" + "".join(mk_rows) + "</table>")
+    body = ("<div class='dim' style='font-size:12px'>Samples per city, newest right · striped = "
+            "low coverage (counted only when a city has no well-covered sample) · ⋯ = older "
+            "samples without it</div>" + "".join(lines) + mk
+            + "<div class='dim' style='font-size:12px;margin-top:4px'>Each mutation per week: "
+              "Signal over time (Look-up)</div>")
+    return f"<tr class='dt g-{gid} hid'><td colspan='{n_cols}'>{body}</td></tr>"
 
 
 def _panel_cells(v, per_city, cities, sel):
@@ -264,9 +421,11 @@ def _panel_cells(v, per_city, cities, sel):
             out.append(_empty(f"{city_name(c)}: no result", c == sel))
             continue
         style, label, _dot, _ink, share = _scale(d)
-        out.append(_cell(label, style, f"{v} · {city_name(c)}: "
+        g, words = _trend(d)
+        out.append(_cell(label + (f" {g}" if g in ("↑", "↓") else ""), style, f"{v} · {city_name(c)}: "
                          + (_breakdown(d, v, html=False) if d.get("n_markers") else _vote_text(d))
-                         + _clear_note(d) + _marker_details(d, v), c == sel))
+                         + _clear_note(d) + _well_note(d)
+                         + (f" · {g} {words}" if g else "") + _marker_details(d, v), c == sel))
     return "".join(out)
 
 
@@ -319,6 +478,15 @@ def _num():
     return {"mc": mc, "pf": _pct(pf), "af": _pct(af), "mp": _min_present(),
             "er": int(EVIDENCE_MIN_READS),
             "es": _pct(float(EVIDENCE_MIN_SHARE) * 100), "ed": int(EVIDENCE_MIN_DAYS)}
+
+
+def _cap_reads():
+    """Reads a sample counts at most per marker (check.cap_reads)."""
+    try:
+        from process.cooc import _check_cfg
+        return int(_check_cfg().get("cap_reads", 1000))
+    except Exception:
+        return 1000
 
 
 def _min_present():
@@ -435,7 +603,28 @@ def _cal_max():
         return 12
 
 
-def _day_cal(tl, top, low=None, detail=None):
+# a low-coverage sample (process.sample_qc, 2026-10-13): its square keeps its
+# colour, crossed by thin diagonal lines — counted, but it weighs little
+_LOWQ = ("background-image:repeating-linear-gradient(135deg,rgba(255,255,255,.85) 0 1.5px,"
+         "transparent 1.5px 3.5px);")
+_LOWQ_EMPTY = ("background-image:repeating-linear-gradient(135deg,#9ca3af 0 1px,"
+               "transparent 1px 3.5px);")
+
+
+def _qual_bits(quality, d):
+    """(extra square style, hover prefix) for one sample's coverage quality."""
+    try:
+        from process.sample_qc import quality_text, well_covered
+    except Exception:
+        return "", ""
+    q = (quality or {}).get(d)
+    ok = well_covered(q)
+    if ok is None:
+        return "", ""
+    return ("" if ok else None), quality_text(q)
+
+
+def _day_cal(tl, top, low=None, detail=None, quality=None):
     """One square per sample in the chosen dates, oldest left, newest right;
     the newest check.calendar_samples when there are more (the text after
     the squares counts all of them).
@@ -447,9 +636,18 @@ def _day_cal(tl, top, low=None, detail=None):
     last = tl[-n:]          # the text after the squares counts all samples
     mk = _day_marks(top, low)
     detail = detail or {}
-    sq = "".join(f"<i style='{mk.get(m, mk['unknown'])[0]}' "
-                 f"data-tip='{_e(_short_date(d) + ': ' + mk.get(m, mk['unknown'])[1] + (' — ' + detail[d] if detail.get(d) else ''))}'></i>"
-                 for d, m in last)
+    sq = []
+    for d, m in last:
+        style, meaning = mk.get(m, mk["unknown"])
+        extra, qtxt = _qual_bits(quality, d)
+        if extra is None:              # low coverage: stripes over its colour
+            extra = _LOWQ_EMPTY if m in ("thin", "uncovered") else _LOWQ
+            qtxt += (" — the sample is there, but each part of the genome comes from "
+                     "few virus molecules, so its shares are snapshots, not the city's mix")
+        tip = (_short_date(d) + ": " + (qtxt + " · " if qtxt else "") + meaning
+               + (" — " + detail[d] if detail.get(d) else ""))
+        sq.append(f"<i style='{style}{extra}' data-tip='{_e(tip)}'></i>")
+    sq = "".join(sq)
     pad = "".join("<i style='background:transparent'></i>" for _ in range(n - len(last)))
     return f"<span class='cal' style='margin-left:0;margin-right:8px'>{pad}{sq}</span>"
 
@@ -486,23 +684,19 @@ def _star_phrase(tl):
     return "★ markers: " + _cal_phrase(tl)
 
 
-def _panel_evidence(per_city, sel, v=""):
+def _panel_evidence(per_city, sel, v="", gid=""):
+    """One line for the selected city (2026-10-13: the per-sample squares
+    moved into the row's details)."""
     d = per_city.get(sel)
     if not d:
         return "<span class='dim'>no result in this city</span>"
     n_mk, p, a, u = _vote_counts(d)
     if n_mk == 0:
         return f"<span class='dim'>{_vote_text(d)}</span>"
-    tip = (f"{v} · the cell adds up the reads of all samples in the chosen dates: "
-           f"present / (present + absent) = {p}/{p + a} — "
-           + _breakdown(d, v, html=False)
-           + ". Markers that are neither present nor absent don't count either way"
-           + _marker_details(d, v))
-    tl = d.get("timeline")
-    if not tl:                                      # results from before 2026-10-02
-        return f"<span data-tip='{_e(tip)}'>{_breakdown(d, v)}</span>"
-    return (f"{_day_cal(tl, GREEN, AMBER, d.get('day_detail'))}<span data-tip='{_e(tip)}'>"
-            f"{_e(_star_phrase(tl))}</span>")
+    tip = (f"{v} · present / (present + absent) = {p}/{p + a} — "
+           + _breakdown(d, v, html=False) + _well_note(d) + _marker_details(d, v))
+    return (f"<span data-tip='{_e(tip)}'>{_e(_summary(d))}</span>"
+            + (_det_link(gid) if gid and d.get("timeline") else ""))
 
 
 def _panel_tint(per_city, sel):
@@ -529,18 +723,21 @@ def _finding_cells(v, f, cities, sel):
             # phase 3: not named by this city's scan, checked because it was
             # named elsewhere — same colours, dashed border
             style, label, _dot, _ink, _share = _scale(chk, found=True)
-            style += "border:1.5px dashed #b91c1c;"
+            g, words = _trend(chk)
+            label += f" {g}" if g in ("↑", "↓") else ""
             fi = ", ".join(city_name(x) for x in d.get("found_in") or [])
             out.append(_cell(label, style, f"{v} · {city_name(c)}, all samples "
-                             f"in the chosen dates: {_vote_text(chk)}{_clear_note(chk)} · not named by this city's "
+                             f"in the chosen dates: {_vote_text(chk)}{_clear_note(chk)}{_well_note(chk)} · not named by this city's "
                              f"scan (its reads here may carry only one mutation beyond your "
                              f"panel); checked because it was found in {fi}", c == sel))
             continue
         if chk and n > 0:
             # the same measure as the panel: ★ markers present / measurable
             style, label, _dot, _ink, _share = _scale(chk, found=True)
+            g, words = _trend(chk)
+            label += f" {g}" if g in ("↑", "↓") else ""
             out.append(_cell(label, style, f"{v} · {city_name(c)}, all samples "
-                             f"in the chosen dates: {_vote_text(chk)}{_clear_note(chk)} · the scanner counted "
+                             f"in the chosen dates: {_vote_text(chk)}{_clear_note(chk)}{_well_note(chk)} · the scanner counted "
                              f"{n} {_pl(n, 'sample')} of evidence in the window", c == sel))
             continue
         if n == 0:
@@ -625,7 +822,7 @@ _REGION_TIP = ("genome regions = separate stretches of the genome where evidence
                "PCR artefact or one convergent mutation is unlikely.")
 
 
-def _finding_evidence(f, sel):
+def _finding_evidence(f, sel, gid=""):
     pc = f.get("per_city", {}) or {}
     d = pc.get(sel)
     n_cities = sum(1 for x in pc.values() if int(x.get("days", 0) or 0) >= 1)
@@ -634,13 +831,12 @@ def _finding_evidence(f, sel):
         return f"<span class='dim'>not seen in this city{where}</span>"
     n = int(d.get("days", 0) or 0)
     if d.get("xcheck"):
-        tl = (d.get("check") or {}).get("timeline")
+        chk = d.get("check") or {}
         fi = ", ".join(city_name(x) for x in d.get("found_in") or [])
-        why = (f"not named by this city's scan; checked because it was found in {fi} — "
-               "its ★ markers one by one, as for panel variants")
-        return (f"{_day_cal(tl, RED, None, (d.get('check') or {}).get('day_detail'))}"
-                f"<span data-tip='{_e(why)}'>{_e(_star_phrase(tl))}"
-                f" <span class='dim'>· cross-check, not named by this city's deep scan</span></span>")
+        why = (f"not named by this city's deep scan; its ★ markers were checked here because "
+               f"it was found in {fi}")
+        return (f"<span data-tip='{_e(why)}'>{_e(_summary(chk))}</span>"
+                + (_det_link(gid) if gid and chk.get("timeline") else ""))
     if n == 0:
         return ("<span class='dim'>named only — reads point to it but also fit related "
                 "lineages; no sample with specific evidence</span>")
@@ -658,8 +854,7 @@ def _finding_evidence(f, sel):
                     f"samples are the ★ check's vote on its specific markers (≥ {nn['mp']} "
                     f"present at ≥ {nn['pf']} %): a different, stricter question. " + facts
                     + ". " + _REGION_TIP)
-        txt = (f"{_day_cal(tl, RED, None, (d.get('check') or {}).get('day_detail'))}"
-               f"<span>{_e(_star_phrase(tl))}</span>"
+        txt = (f"<span>{_e(_summary(d.get('check') or {}))}</span>"
                f" <span class='dim' data-tip='{_e(scan_tip)}'>· deep scan: evidence on "
                f"{n} {_pl(n, 'sample')}</span>")
     else:                                        # results from before 2026-10-02
@@ -676,7 +871,7 @@ def _finding_evidence(f, sel):
         weak.append("one region only")
     if weak and n >= _num()["ed"]:
         txt += f" — <b>weak: {', '.join(weak)}</b>"
-    return txt
+    return txt + (_det_link(gid) if gid and tl else "")
 
 
 def _tree_cell(r, color, dot_kind, name_html, tip):
@@ -788,7 +983,7 @@ def _near_rows(r, v, changes, cities, sel, gid, n_cols):
 def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
           novel=(), broad=(), novel_rest=None, near=None, near_min_days=2,
           novel_hotspot=None, data_until=None, novel_info=None,
-          broad_total=None, named_hidden=0) -> str:
+          broad_total=None, named_hidden=0, quality=None) -> str:
     """cities: city names in column order; sel: the chosen city.
     rows: components.abundance_cooc_tree.tree_rows(...).
     verdicts: {city: {variant: {state, reason, n_present, n_measured, n_markers}}}.
@@ -806,7 +1001,9 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
       on >= near_min_days days) that unfolds them.
     broad_total: patterns too broad to name before the list was cut (broad is
       the cut list); named_hidden: found rows "named only" left out by the cap.
-      Both show as "showing N of M" (lists.* caps in the config)."""
+      Both show as "showing N of M" (lists.* caps in the config).
+    quality: {city: (samples well covered, samples)} in the chosen dates
+      (process.sample_qc), shown under each city code."""
     nn = _num()
     near_max = _list_max("near_changes_max", 8)
     near = near or {}
@@ -814,15 +1011,35 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
     ot = set(ot)
     n_c = len(cities)
     n_cols = n_c + 2
+    quality = quality or {}
+
+    def _qtip(c):
+        if c not in quality:
+            return ""
+        k, n = quality[c]
+        return (f" · {k} of {n} {_pl(n, 'sample')} in the chosen dates well covered "
+                "(median depth and share of the genome at ≥ 100 reads); the others have low "
+                "coverage, typical when little virus is in the water")
+
+    def _qsub(c):
+        if c not in quality:
+            return ""
+        k, n = quality[c]
+        return (f"<span style='display:block;font-size:10px;font-weight:400;"
+                f"letter-spacing:0'>{k}/{n}</span>")
     head = ("<tr><th>Variant</th>"
             + "".join(f"<th class='cc{' sel' if c == sel else ''}'><button data-city='{_e(c)}' "
                       f"data-tip='{_e(city_name(c))}"
                       + (f" · data until {_e(data_until[c])}" if c in data_until else "")
+                      + _e(_qtip(c))
                       + f" — click to colour the tree by this city'>"
-                      f"{_e(city_code(c))}</button></th>" for c in cities)
+                      f"{_e(city_code(c))}{_qsub(c)}</button></th>" for c in cities)
             + f"<th style='padding-left:12px'>Evidence · {_e(city_name(sel))}"
             + (f" <span style='font-weight:400;text-transform:none;letter-spacing:0'>· data until "
                f"{_e(data_until[sel])}</span>" if sel in data_until else "")
+            + (f" <span style='font-weight:400;text-transform:none;letter-spacing:0'>· "
+               f"{quality[sel][0]} of {quality[sel][1]} samples well covered</span>"
+               if sel in quality else "")
             + "</th></tr>")
     body = []
     sname = city_name(sel)
@@ -852,7 +1069,10 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
             no_meas = share is None and dsel.get("n_markers", 0) > 0
             tc = _tree_cell(r, dcol, "dashed" if (no_meas or not dsel) else "filled", name, tip)
             tint = _panel_tint(pc, sel)
-            cells, ev = _panel_cells(v, pc, cities, sel), _panel_evidence(pc, sel, v)
+            dgid = f"det{len(body)}"
+            cells, ev = _panel_cells(v, pc, cities, sel), _panel_evidence(pc, sel, v, dgid)
+            drow = (_detail_row(dgid, v, pc, cities, sel, n_cols)
+                    if any((x or {}).get("timeline") for x in pc.values()) else "")
         elif kind == "finding" and v in findings:
             f = findings[v]
             _dsel = (f.get("per_city") or {}).get(sel) or {}
@@ -872,11 +1092,18 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
             name = (f"<span class='nm' style='color:{col}'>{_e(v)}</span>{chips}{btn}")
             tc = _tree_cell(r, col, dk, name, tip)
             tint = RED if f.get("status") == "confirmed" else None
-            cells, ev = _finding_cells(v, f, cities, sel), _finding_evidence(f, sel)
+            dgid = f"det{len(body)}"
+            _chk = {c: p_["check"] for c, p_ in (f.get("per_city") or {}).items()
+                    if (p_ or {}).get("check")}
+            cells = _finding_cells(v, f, cities, sel)
+            ev = _finding_evidence(f, sel, dgid if _chk else "")
+            drow = (_detail_row(dgid, v, _chk, cities, sel, n_cols, found=True)
+                    if any(x.get("timeline") for x in _chk.values()) else "")
         else:  # tracked, not selected
             name = f"<span style='color:{TRACKED}'>{_e(v)}</span>{chips}"
             tc = _tree_cell(r, TRACKED, "ring", name, f"{v}: officially tracked, not in your panel")
             tint, cells, ev = None, f"<td colspan='{n_c}'></td>", "<span class='dim'>not in the run</span>"
+            drow = ""
         bg = f" style='background:{tint}{'22' if kind in ('panel', 'panel_ot') else '14'}'" if tint else ""
         nch = near.get(v) if kind in ("panel", "panel_ot") else None
         if nch:
@@ -905,6 +1132,8 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
                    f"{label} <span class='arr'>▸</span></span>")
             tc = tc.replace("</span></td>", f"</span>{tag}</td>", 1) if tc.endswith("</span></td>") else tc
         body.append(f"<tr{bg}>{tc}{cells}<td class='ev'>{ev}</td></tr>")
+        if drow:
+            body.append(drow)
         if nch:
             body += _near_rows(r, v, nch[:near_max], cities, sel, gid, n_cols)
             if len(nch) > near_max:
@@ -1022,57 +1251,37 @@ def _lc(d, found=False, extra=""):
 _LEGEND_ROWS = (
     ""
     "<div class='row'><span class='t'>★ check</span>"
-    "<span class='i'>markers present / measured, in your panel:"
+    "<span class='i'>markers present / measured — in your panel:"
     + _lc({"n_markers": 4, "n_measured": 4, "n_present": 4}) + "present"
+    + _lc({"n_markers": 5, "n_measured": 5, "n_present": 2}) + "mixed"
+    + _lc({"n_markers": 4, "n_measured": 4, "n_present": 0}) + "absent</span>"
+    + "<span class='i'>not in your panel:"
+    + _lc({"n_markers": 3, "n_measured": 3, "n_present": 3}, True) + "present"
+    + _lc({"n_markers": 3, "n_measured": 3, "n_present": 0}, True) + "absent</span>"
+    + "<span class='i'>"
     + _lc({"n_markers": 2, "n_measured": 2, "n_present": 2,
            "timeline": [["2026-01-01", "present"]]})
-    + f"present in the sum, clear in fewer than {_num()['ed']} samples on their own"
-    + _lc({"n_markers": 5, "n_measured": 5, "n_present": 2}) + "mixed"
-    + _lc({"n_markers": 4, "n_measured": 4, "n_present": 0})
-    + "absent — in your panel but not in the wastewater</span>"
-    + "<span class='i'>not in your panel:"
-    + _lc({"n_markers": 3, "n_measured": 3, "n_present": 3}, True)
-    + "present — missing from your panel"
-    + _lc({"n_markers": 2, "n_measured": 2, "n_present": 2,
-           "timeline": [["2026-01-01", "present"]]}, True) + "the same, clear in 1 sample"
-    + _lc({"n_markers": 5, "n_measured": 5, "n_present": 2}, True) + "mixed"
-    + _lc({"n_markers": 3, "n_measured": 3, "n_present": 0}, True) + "absent</span>"
-    + f"<span class='i'>present = ≥ {_shares()[0] * 100:g} % of the measured markers and "
-      f"at least {_min_present()} of them; absent = ≤ {_shares()[1] * 100:g} %; "
-      "mixed = in between, or only one marker present</span>"
+    + _lc({"n_markers": 4, "n_measured": 4, "n_present": 0, "basis": "all"})
+    + "light = weak evidence: no well-covered sample in this city, or clearly present in "
+    + f"fewer than {_num()['ed']} samples</span>"
+    + "<span class='i'><b>↑ ↓</b> new · gone on the latest samples (hover for the dates)</span>"
     + _li(S_NOMARK, "·", "no ★ marker")
     + _li(S_NODATA, "?", "too few reads")
-    + "<span class='i'>"
-    + _lc({"n_markers": 3, "n_measured": 3, "n_present": 0}, True,
-          "border:1.5px dashed #b91c1c;")
-    + "dashed = not named by this city's deep scan, checked because found in another city</span>"
+    + "<span class='i'>n/m under a city code = samples well covered · details ▸ = samples "
+      "per city and the markers' reads</span>"
     + "</div><div class='row'><span class='t'>Found</span>"
     + _li(S_FOUND, "5", "older results: days with evidence")
     + _li(S_NAMED, "0", "named only (shared mutations)")
-
     + _li(S_NOVEL, "3", "novel · days")
     + _li(S_BROAD, "2", "too broad to name · days")
     + _li(S_NEAR, "3", "◆ panel variant ± 1 change · days (a hint)")
-    + "</div><div class='row'><span class='t'>Samples</span>"
-    + "<span class='i'>The cell adds up the reads of all samples in the chosen dates. Evidence: "
-      "one square per sample in the chosen city (newest right, at most "
-    + f"{_cal_max()}), the ★ check "
-      "on that sample's reads, same colours as the cells:"
-    + "<span class='cal'>" + "".join(
-        f"<i style='{_day_marks(GREEN, AMBER)[k][0]}'></i>" for k in ("present", "mixed", "absent", "thin"))
-    + "</span> present · mixed · absent · too few reads to tell from that sample "
-      "(hover a square: each marker's reads in it; blue for novel)</span>"
-    + "<span class='i'>deep scan: evidence on N samples = a different count: samples with ≥ "
-    + f"{_num()['er']} reads and ≥ {_num()['es']} % of the sample's reads carrying the "
-      "lineage's mutations</span>"
     + "</div><div class='row'><span class='t'>Tree</span>"
     + _ld(f"background:{RED}", "found in this city")
     + _ld(f"border:1.8px dashed {RED}", "1 day here")
     + _ld(f"border:2px solid {RED}", "not seen here")
     + _ld(f"border:2px solid {TRACKED}", "tracked, not selected")
-    + "<span class='i'>panel dots = the cell colours</span>"
-    + "<span class='i'>weak = no ★ marker or one genome region only · hover anything for details · "
-      "click a city's code or any of its cells to colour the tree</span></div>")
+    + "<span class='i'>panel dots = the cell colours · hover anything for details · click a "
+      "city's code or any of its cells to colour the tree</span></div>")
 
 LEGEND = ("<div class='lg'><div class='row'><span class='lgt' data-grp='legend'>"
           "<span class='arr'>▸</span> How to read the colours</span>"

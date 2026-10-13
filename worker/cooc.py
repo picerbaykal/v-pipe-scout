@@ -3,11 +3,14 @@
 Given a location, date range, and panel variants, computes per-date panel
 completeness by:
 1. Building amp_dict + variant_signatures from panel variants.
-2. Loading amplicons from BED, grouping panel positions by amplicon → query
-   batches (one batch per amplicon; positions within an amplicon co-occur).
-3. For each batch, calling LAPIS /aggregated for read-level co-occurrence.
+2. Splitting the panel positions into chunks of at most 500 positions, sorted
+   by position (no BED file since 2026-10: a read only spans its own stretch
+   of genome, so one query per chunk and date is enough).
+3. For each chunk and sampling date, one LAPIS /sample/aggregated query for
+   read-level co-occurrence (the `[position]` bracket fields).
 4. Annotating results (confirmed_present/absent/classification).
-5. Aggregating matched vs unexplained counts per date across batches.
+5. Aggregating matched vs unexplained counts per date across chunks.
+6. Measuring each sample's coverage quality (process.sample_qc, 2026-10-13).
 
 Returns a dict shaped for JSON serialization back through Celery.
 
@@ -690,6 +693,19 @@ def run_cooc_panel_completeness(
         for v in variants
     }
 
+    # coverage quality of each sample (2026-10-13): median depth and share of
+    # the genome covered, from reads at 119 positions (process.sample_qc).
+    # Never breaks the panel check: on failure the page shows no quality.
+    try:
+        from process.sample_qc import sample_quality
+        sample_qc = sample_quality(client, location, (start_date, end_date))
+        _n_ok = sum(1 for q in sample_qc.values() if q.get("well_covered"))
+        logger.info(f"[cooc][{location}] sample quality: {_n_ok} of {len(sample_qc)} "
+                    f"samples well covered")
+    except Exception as e:
+        logger.warning(f"[cooc][{location}] sample quality failed: {e}")
+        sample_qc = {}
+
     _progress(4, "Aggregating across batches")
     if not per_batch_results:
         logger.warning(f"[cooc][{location}] No batches returned data")
@@ -702,6 +718,7 @@ def run_cooc_panel_completeness(
             "unexplained_patterns": [],
             "panel_check": panel_check,
             "position_coverage": position_coverage,
+            "sample_qc": sample_qc,
             "pango_tree": _tree_used(),
         }
 
@@ -729,6 +746,8 @@ def run_cooc_panel_completeness(
         "panel_check": panel_check,
         # {date: {position: reads covering it}} — see _query_all_batches
         "position_coverage": position_coverage,
+        # {date: {median, share_100, …, well_covered}} — process.sample_qc
+        "sample_qc": sample_qc,
         # which pango tree this result used (the page compares it, 2026-10-09)
         "pango_tree": _tree_used(),
     }

@@ -42,6 +42,15 @@ check:
   notfound_share: 0.25  # present / measured <= this -> absent; between -> mixed
   calendar_samples: 12  # Evidence squares shown per row, the newest; the cell always
                         #   adds up ALL samples in the chosen dates
+  cap_reads: 1000       # ... each counting at most this many reads per marker, so a
+                        #   sample with a few huge amplicons can't outvote the others
+
+# ── Sample quality: coverage of each sample (process.sample_qc) ────────────
+# Read at 119 positions (one every 250 bases) by the panel check (worker:
+# changing the positions needs a re-run; the thresholds apply in the UI).
+quality:
+  min_median_depth: 20  # well covered: median depth over the 119 positions >= this
+  min_share_100x: 0.4   #   ... and >= this share of them with >= 100 reads
 
 # ── Scanner: names co-occurrence signal the panel doesn't explain ──────────
 # Worker settings: changing them needs a worker restart + re-scan.

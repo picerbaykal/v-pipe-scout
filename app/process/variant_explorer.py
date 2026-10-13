@@ -198,7 +198,7 @@ def investigate_variant(variant: str, pango_loader,
 
 
 def check_in_data(markers: List[str], per_date: Dict[str, Dict[str, list]],
-                  dates: List[str]) -> Dict:
+                  dates: List[str], quality: Optional[Dict[str, dict]] = None) -> Dict:
     """One city's answer from the worker's counts.
 
     per_date: {date: {marker: [cov, hit, link_n, link_ok]}} (accumulate_check_stats)
@@ -207,7 +207,14 @@ def check_in_data(markers: List[str], per_date: Dict[str, Dict[str, list]],
     The vote (state, n_present, n_measured) adds up the reads of every date
     (2026-10-09: the chosen window; from 2 Oct to 9 Oct the last 5 samples).
 
-    Returns {state, n_present, n_measured, n_markers, timeline, day_detail}
+    quality:  {date: process.sample_qc summary} — passed through for the
+              calendar (low-coverage squares) and counted: n_well / n_samples.
+
+    Returns {state, n_present, n_measured, n_markers, timeline, day_detail,
+             quality, n_well, n_samples, basis}
+      basis: "well" = voted on the well-covered samples only; "all" = no
+             well-covered sample with reads at the markers, every sample
+             counted (capped) — weak evidence
       state: present / absent / mixed / not_covered / no_marker
              (the check's own vote, process.cooc.check_verdicts)
       timeline: [[date, mark]], one mark per day: the cells' vote on that
@@ -257,12 +264,29 @@ def check_in_data(markers: List[str], per_date: Dict[str, Dict[str, list]],
             mark = r["verdict"] if r["verdict"] in ("present", "absent") else "mixed"
         tl.append([d, mark])
         detail[d] = _day_detail(markers, day, r, c)
-    pd_ = per_date or {}
-    res = check_verdicts(markers, pd_)
+    # the vote (2026-10-13): the well-covered samples decide when the city has
+    # any with reads at the markers; otherwise every sample, each counting at
+    # most check.cap_reads reads (process.cooc.check_verdicts) — basis "all",
+    # shown as weak evidence
+    from process.sample_qc import well_covered
+    q = {d: quality[d] for d in [x for x, _m in tl] if quality and d in quality}
+    good = [d for d in q if well_covered(q[d])]
+    pd_all = per_date or {}
+    res, pd_, basis = None, pd_all, "all"
+    if good:
+        pd_good = {d: pd_all[d] for d in good if d in pd_all}
+        r_good = check_verdicts(markers, pd_good)
+        if r_good["n_measured"] > 0:
+            res, pd_, basis = r_good, pd_good, "well"
+    if res is None:
+        res = check_verdicts(markers, pd_all)
+    n_well = len(good)
     state = res["verdict"]          # present / absent / mixed / not_covered
     return {"state": state, "n_present": res["n_present"], "n_measured": res["n_measured"],
             "n_markers": res["n_markers"], "timeline": tl,
-            "day_detail": detail, "detail": _marker_detail(markers, pd_, res, c)}
+            "day_detail": detail, "detail": _marker_detail(markers, pd_, res, c),
+            "quality": q, "n_well": n_well if q else None, "n_samples": len(tl),
+            "basis": basis}
 
 
 def _day_detail(markers, cells, r, c, n_max=8) -> str:
@@ -275,7 +299,8 @@ def _day_detail(markers, cells, r, c, n_max=8) -> str:
         if not cov:
             out.append(f"{m} no reads")
             continue
-        num = f"{m} {f * 100:.0f} % of {cov:,} reads"
+        # the real read count, not the one capped for the vote (2026-10-13)
+        num = f"{m} {f * 100:.0f} % of {x.get('cov_raw', cov):,} reads"
         if st == "present":
             out.append(num + " ✓")
         elif st == "absent":
@@ -324,6 +349,6 @@ def _marker_detail(markers, per_date, res, c) -> List[Dict]:
                 near = why
         else:
             why = "present"
-        out.append({"marker": m, "cov": cov, "freq": f, "link": link, "link_n": link_n,
-                    "status": st, "why": why, "near": near})
+        out.append({"marker": m, "cov": cov, "cov_raw": r.get("cov_raw", cov), "freq": f,
+                    "link": link, "link_n": link_n, "status": st, "why": why, "near": near})
     return out

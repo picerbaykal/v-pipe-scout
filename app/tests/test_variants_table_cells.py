@@ -38,3 +38,34 @@ def test_mixed_and_absent_keep_their_colours():
 
 def test_one_present_marker_is_never_present():
     assert vt._state(_d(1, 1, 1)) == "mixed"
+
+
+# ── trend arrows and the well-covered basis (2026-10-13) ──────────────────
+def _tl(marks, basis="all", well=()):
+    from process.sample_qc import PROBES, summarize
+    good = summarize({p: 9000 for p in PROBES})
+    bad = summarize({p: 1 for p in PROBES})
+    tl = [[f"2026-08-{10 + i:02d}", m] for i, m in enumerate(marks)]
+    return {"n_present": 2, "n_measured": 2, "n_markers": 2, "state": "present",
+            "timeline": tl, "basis": basis,
+            "quality": {d: (good if i in well else bad) for i, (d, _m) in enumerate(tl)}}
+
+
+def test_trend_new_gone_and_steady():
+    assert vt._trend(_tl(["absent", "absent", "present", "present"]))[0] == "↑"
+    assert vt._trend(_tl(["present", "present", "absent", "absent"]))[0] == "↓"
+    assert vt._trend(_tl(["present", "present", "present"]))[0] == "→"
+    assert vt._trend(_tl(["absent", "present"]))[0] == ""        # one sample is no trend
+
+
+def test_trend_uses_only_well_covered_samples_when_they_decided():
+    d = _tl(["present", "absent", "present", "absent"], basis="well", well=(1, 3))
+    assert vt._basis_samples(d)[0] == [("2026-08-11", "absent"), ("2026-08-13", "absent")]
+    assert vt._trend(d)[0] == ""                                  # absent throughout
+
+
+def test_weak_basis_is_light():
+    d = {"n_present": 0, "n_measured": 2, "n_markers": 2, "state": "absent", "basis": "all"}
+    assert vt._scale(d)[0] == vt.S_NOTFOUND_LIGHT
+    d["basis"] = "well"
+    assert vt._scale(d)[0] == vt.S_NOTFOUND

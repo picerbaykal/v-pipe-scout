@@ -193,3 +193,15 @@ def test_a_one_marker_lineage_can_be_absent_on_a_day():
     from process.variant_explorer import check_in_data
     r = check_in_data(["400T"], {"2026-09-01": {"400T": [500, 0, 0, 0]}}, ["2026-09-01"])
     assert r["timeline"] == [["2026-09-01", "absent"]]
+
+
+# ── a sample counts at most cap_reads reads per marker (2026-10-13) ───────
+def test_one_huge_sample_cannot_outvote_the_others():
+    # Lugano, XFG's 8350C: 51 % of 176 reads on 20 Aug, 0.06 % of 724,267 on 4 Sep
+    pd_ = {"2026-08-20": {"8350C": [176, 90, 90, 90]},
+           "2026-09-04": {"8350C": [724267, 460, 460, 460]}}
+    capped = check_verdicts(["8350C"], pd_, dict(CFG, cap_reads=1000))["markers"]["8350C"]
+    summed = check_verdicts(["8350C"], pd_, dict(CFG, cap_reads=0))["markers"]["8350C"]
+    assert summed["freq"] < 0.001 and summed["status"] == "absent"
+    assert 0.07 < capped["freq"] < 0.09 and capped["status"] == "present"
+    assert (capped["cov"], capped["cov_raw"]) == (1176, 724443)
