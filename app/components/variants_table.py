@@ -977,13 +977,15 @@ def _finding_evidence(f, sel, gid=""):
                f"{_pl(len(regs), 'region')}</span>")
         if n == 1 and d.get("after"):
             txt += _after_cal(d["after"]) or (" — " + _after_text(d["after"]))
+    # the deep scan's own evidence is thin (2026-10-14: was a bold "weak: no ★
+    # marker", which read as if the cells' ★ check had no marker)
     weak = []
     if not stars:
-        weak.append("no ★ marker")
+        weak.append("no mutation specific to it")
     if len(regs) <= 1:
-        weak.append("one region only")
+        weak.append("one genome region only")
     if weak and n >= _num()["ed"]:
-        txt += f" — <b>weak: {', '.join(weak)}</b>"
+        txt += f"<span class='dim'> — deep scan evidence thin: {', '.join(weak)}</span>"
     return txt + (_det_link(gid) if gid and tl else "")
 
 
@@ -1236,7 +1238,9 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
                        + "; ".join(f"{c['label']}" for c in nch[:near_max])
                        + (f"; +{len(nch) - near_max} more" if len(nch) > near_max else ""))
             label = (f"◆ {n_tag} {_pl(n_tag, 'change')}" if n_tag
-                     else f"◆ {len(here)} weak {_pl(len(here), 'change')}" if here
+                     else (f"◆ {len(here)} {_pl(len(here), 'change')} (1 day)" if nn["ed"] == 2
+                           else f"◆ {len(here)} {_pl(len(here), 'change')} (< {nn['ed']} days)")
+                     if here
                      else "◆ elsewhere")
             cls = "near-tag" + ("" if here else " off")
             tag = (f"<span class='{cls}' data-grp='{gid}' data-tip='{_e(tip)}'>"
@@ -1254,8 +1258,12 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
     if named_hidden:
         n_named = sum(1 for f in findings.values() if f.get("status") == "named")
         body.append(f"<tr class='note'><td colspan='{n_cols}'>"
-                    f"Not confirmed lineages: showing {n_named} of {n_named + named_hidden}"
-                    "</td></tr>")
+                    + (f"Not confirmed lineages: showing {n_named} of {n_named + named_hidden}"
+                       if n_named else
+                       f"{named_hidden} not confirmed {_pl(named_hidden, 'lineage')} hidden — the "
+                       "deep scan named them, but their reads also fit related lineages "
+                       "(lists.named_only_max)")
+                    + "</td></tr>")
 
     # ── unnamed signal ──
     ed = nn["ed"]
