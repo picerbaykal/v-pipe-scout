@@ -30,7 +30,7 @@ from pathlib import Path
 GREEN = "#16a34a"          # panel variant present
 AMBER = "#f59e0b"          # panel variant not found (fill / dot)
 AMBER_T = "#b45309"        # … as text
-VIOLET = "#7c3aed"         # mixed markers (panel) · named only (finding)
+VIOLET = "#7c3aed"         # no longer drawn (2026-10-14: one colour = one meaning)
 GREY = "#9ca3af"           # no ★ marker / no data
 RED = "#dc2626"            # found, not in panel
 BLUE = "#2563eb"           # novel
@@ -63,7 +63,7 @@ CSS = """
 .vt .nm { font-weight:600; }
 .vt .spl { color:#9a988f; font-size:12.5px; display:inline-block; max-width:280px; overflow:hidden;
            text-overflow:ellipsis; vertical-align:middle; }
-.vt .par { color:#8a4e82; font-size:12.5px; margin-left:8px; }
+.vt .par { color:#6b7280; font-size:12.5px; margin-left:8px; }
 .vt .near-tag { font-size:12px; font-weight:600; margin-left:9px; padding:0 8px; line-height:19px;
                 border-radius:10px; background:#dcfce7; color:#166534; cursor:pointer; vertical-align:1px; }
 .vt .near-tag:hover { background:#bbf7d0; }
@@ -149,7 +149,7 @@ S_NOMARK = _fill("#e5e7eb", "#4b5563")
 S_NODATA = _dashed(GREY)
 S_FOUND = _fill(RED, "#fff")
 S_ONEDAY = _dashed(RED)
-S_NAMED = _fill("#ede9fe", VIOLET)
+S_NAMED = _fill("#f3f4f6", "#6b7280")   # not confirmed: grey, neither yes nor no
 S_NOVEL = _fill(BLUE, "#fff")
 S_NOVEL1 = _dashed(BLUE)
 S_BROAD = _fill("#e2e8f0", "#334155")
@@ -198,9 +198,9 @@ def _pl(n, word):
 # Present in the sum, but clearly present in fewer than evidence.min_days
 # samples on their own (2026-10-09): a light fill with a thin solid edge of
 # the same hue (XFZ in Lugano: 2/2 from one sample, 24 Aug).
-S_PRESENT_LIGHT = "background:#e8f7ed;color:#14532d;box-shadow:inset 0 0 0 1.5px #16a34a;"
-S_NOTFOUND_LIGHT = "background:#fef3e2;color:#78350f;box-shadow:inset 0 0 0 1.5px #f59e0b;"
-S_FOUND_LIGHT = "background:#fdecec;color:#7f1d1d;box-shadow:inset 0 0 0 1.5px #dc2626;"
+S_PRESENT_LIGHT = "background:#fff;color:#14532d;box-shadow:inset 0 0 0 1.5px #16a34a;"
+S_NOTFOUND_LIGHT = "background:#fff;color:#78350f;box-shadow:inset 0 0 0 1.5px #f59e0b;"
+S_FOUND_LIGHT = "background:#fff;color:#7f1d1d;box-shadow:inset 0 0 0 1.5px #dc2626;"
 MIXED_BG, PALE_BG, PALE_FG = "#b4bac3", "#f3f4f6", "#6b7280"
 S_MIXED = _fill(MIXED_BG, "#111827")
 S_PALE = _fill(PALE_BG, PALE_FG) + "box-shadow:inset 0 0 0 1px #e5e7eb;"
@@ -1189,7 +1189,7 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
             _dsel = (f.get("per_city") or {}).get(sel) or {}
             n_sel = int(_dsel.get("days", 0) or 0)
             named = f.get("status") == "named"
-            col = VIOLET if named else RED
+            col = GREY if named else RED
             dk = ("ring" if named or n_sel == 0 else "filled" if n_sel >= nn["ed"] else "dashed")
             if _dsel.get("xcheck"):
                 dk = "dashed" if (_dsel.get("check") or {}).get("state") == "present" else "ring"
@@ -1385,7 +1385,6 @@ _LEGEND_ROWS = (
     + f"{_num()['af']}" + " %) · ~ in between · ? too few reads (or too few linked reads) · ≠ on reads unlike it · "
       "▧ low-coverage sample</span>"
     + "</div><div class='row'><span class='t'>Found</span>"
-    + _li(S_FOUND, "5", "older results: days with evidence")
     + _li(S_NAMED, "0", "not confirmed (reads also fit related lineages)")
     + _li(S_NOVEL, "3", "unassigned · days")
     + _li(S_BROAD, "2", "fits too many lineages · days")
@@ -1394,7 +1393,7 @@ _LEGEND_ROWS = (
     + _ld(f"background:{RED}", "found in this city")
     + _ld(f"border:1.8px dashed {RED}", "1 day here")
     + _ld(f"border:2px solid {RED}", "not seen here")
-    + _ld(f"border:2px solid {TRACKED}", "tracked, not selected")
+    + _ld(f"border:2px solid {TRACKED}", "OT, not selected")
     + "<span class='i'>panel dots = the cell colours · hover anything for details · click a "
       "city's code or any of its cells to colour the tree</span></div>")
 
@@ -1483,10 +1482,10 @@ def build_tree(rows, ot=()) -> tuple:
             h += 28
         else:
             name = f"<span style='color:{TRACKED}'>{_e(v)}</span>{chips}"
-            body.append(f"<tr>{_tree_cell(r, TRACKED, 'ring', name, f'{v}: officially tracked, not selected')}</tr>")
+            body.append(f"<tr>{_tree_cell(r, TRACKED, 'ring', name, f'{v}: OT, not selected')}</tr>")
             h += 28
     legend = ("<div class='lg'><span class='i'><i class='d' style='background:#1f2430'></i>in your panel</span> · "
-              f"<span class='i'><i class='d' style='border:2px solid {TRACKED}'></i>tracked, not selected</span> · "
+              f"<span class='i'><i class='d' style='border:2px solid {TRACKED}'></i>OT, not selected</span> · "
               "<span class='chip' style='margin:0'>OT</span> officially tracked</div>")
     html_ = (CSS + _TREE_CSS + f"<table class='vt'><tbody>{''.join(body)}</tbody></table>"
              + legend + _TIP_JS)
