@@ -404,6 +404,109 @@ _SECTION_GROUPS = [("Panel and abundance", ["Panel check", "Deconvolution"]),
                    ("Look-up", ["Signal over time", "Investigate a variant"])]
 
 
+def _family_by_jaccard(findings: dict, scan_res_all: dict, cr_all: dict,
+                       panel: list) -> None:
+    """A found lineage whose ★ signal comes from lineages below it
+    (2026-10-14). Its ★ markers are carried by all its descendants, so its ★
+    check measures the whole family (BA.2.86 "present" in Zürich because JN.1
+    and everything after it carry its markers). Per city where X is present:
+
+      1. the nearest lineages below X that will be in the panel: in it
+         already, or found and offered + Add (present, not a family row);
+         a mixed, absent or family lineage is skipped and the walk goes on
+         below it (process.cooc.nearest_below)
+      2. each one's share at its markers that every lineage below it with
+         reads here (not absent) still carries, and X's share at its markers
+         that those carry (process.cooc.kept_markers, lineage_share)
+      3. Jaccard = share of D ÷ share of X;  X itself = 1 − Σ Jaccard
+
+    on the samples the ★ check uses (the well-covered ones when the city has
+    any). "Can't tell" when a share has too few reads or no marker is left.
+    X becomes a "family" row (no + Add) when, in every city where it is
+    present, X itself could be measured and is under the marker present limit
+    (check.present_freq). Lineages lower in the tree are decided first, so a
+    family row below X is skipped in X's walk."""
+    from process.cooc import (_check_cfg, family_jaccard, kept_markers, lineage_share,
+                              nearest_below)
+    from process.sample_qc import well_covered
+    pf = _check_cfg()["present_freq"]
+    panel = list(panel or [])
+    pv_cache: dict = {}
+
+    def _pstate(loc, v):
+        if loc not in pv_cache:
+            pv_cache[loc] = _panel_verdicts(cr_all.get(loc) or {}, panel) if panel else {}
+        return (pv_cache[loc].get(v) or {}).get("state")
+
+    def _fstate(loc, v):
+        return ((((findings.get(v) or {}).get("per_city") or {}).get(loc) or {})
+                .get("check") or {}).get("state")
+
+    # lower lineages first (fewer lineages below them, over all cities)
+    nb = {}
+    for loc in (scan_res_all or {}):
+        for x, ds in (((scan_res_all.get(loc) or {}).get("findings_check") or {})
+                      .get("below_all") or {}).items():
+            nb[x] = max(nb.get(x, 0), len(ds))
+    for x in sorted(findings, key=lambda v: nb.get(v, 0)):
+        fx = findings[x]
+        if fx.get("status") == "named":
+            continue
+        itself, measured, below = {}, [], set()
+        for loc, px in (fx.get("per_city") or {}).items():
+            chk = (px or {}).get("check") or {}
+            if chk.get("state") != "present":
+                continue
+            fc = (scan_res_all.get(loc) or {}).get("findings_check") or {}
+            ball = fc.get("below_all") or {}
+            sigs = {k: set(v) for k, v in (fc.get("sigs") or {}).items()}
+            pvar = fc.get("per_variant") or {}
+            xd = pvar.get(x) or {}
+            if not ball.get(x) or not xd.get("markers"):
+                continue
+            pc = (cr_all.get(loc) or {}).get("panel_check") or {}
+
+            def take(d, loc=loc):
+                if d in panel:
+                    return _pstate(loc, d) == "present"
+                f = findings.get(d) or {}
+                return (_fstate(loc, d) == "present"
+                        and f.get("status") not in ("family", "named"))
+
+            def has_reads(e, loc=loc):
+                stt = _pstate(loc, e) if e in panel else _fstate(loc, e)
+                return stt != "absent"
+
+            ds = nearest_below(x, ball, take)
+            if not ds:
+                continue
+            q = chk.get("quality") or {}
+            dates = ({d for d, v in q.items() if well_covered(v)}
+                     if chk.get("basis") == "well" else None)
+            parts = []
+            for d in ds:
+                below.add(d)
+                dd = pvar.get(d) if d not in panel else pc.get(d)
+                dd = dd or {}
+                dm = kept_markers(dd.get("markers") or [], d, ball, sigs, has_reads)
+                xm = kept_markers(xd.get("markers") or [], d, ball, sigs, has_reads)
+                sd = lineage_share(dm, dd.get("per_date") or {}, dates)
+                sx = lineage_share(xm, xd.get("per_date") or {}, dates)
+                j = family_jaccard(sx, sd)
+                parts.append((d, j, None if j is None else
+                              f"{100 * sd:.0f} % ÷ {100 * sx:.0f} %"))
+            val = (None if any(j is None for _d, j, _k in parts)
+                   else max(0.0, 1.0 - sum(j for _d, j, _k in parts)))
+            itself[loc] = (val, sorted(parts, key=lambda t: -(t[1] or 0)))
+            measured.append(val)
+        if itself:
+            fx["itself"] = itself
+        if measured and all(v is not None and v < pf for v in measured):
+            fx["status"] = "family"
+            fx["addable"] = False
+            fx["descendants"] = sorted(below)
+
+
 def _render_section_tabs(marks: dict) -> str:
     """The tab row (buttons, so the selection survives the autorefresh; st.tabs
     reset to the first tab on each rerun), with a group label above each group
@@ -2383,7 +2486,12 @@ def app():
                                               if (d.get("days") or 0) >= 1) >= 2
                         return {"status": _status if _status != "confirmed" or _ok else "1 day",
                                 "per_city": _pc,
-                                "addable": _status != "named" and _present and _samples}
+                                # a "family" (an ancestor whose own found descendants
+                                # explain its reads, e.g. BA.2.86 over JN.1 over LF.7
+                                # when the panel holds only old lineages) is never
+                                # suggested for the panel (2026-10-14)
+                                "addable": (_status not in ("named", "family")
+                                            and _present and _samples)}
 
                     _findings = {}
                     if not _scan_running:
@@ -2440,6 +2548,7 @@ def app():
                     _rows = tree_rows(_run_panel, curated_variants, cached_get_pango_loader(),
                                       findings=list(_findings),
                                       recomb_parents=st.session_state["acooc_recomb_parents"])
+                    _family_by_jaccard(_findings, _scan_res_all, _cr_all, _run_panel)
                     # ── panel variant ± 1 change (the amber band, per change) ──
                     from process.near_changes import near_changes, where_in_tree
                     from process.scanner import (EVIDENCE_MIN_DAYS, EVIDENCE_MIN_READS,

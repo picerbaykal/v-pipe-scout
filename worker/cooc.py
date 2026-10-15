@@ -59,7 +59,7 @@ from process.amplicons import (
 )
 from process.cooc import (annotate_cooc_dataframe, panel_completeness_by_date,
                           specific_markers, accumulate_check_stats,
-                          aggregate_unexplained)
+                          aggregate_unexplained, lineages_below_all)
 from utils.config import get_wiseloculus_url
 
 logger = logging.getLogger(__name__)
@@ -292,15 +292,24 @@ def lineages_check(location: str, start_date: datetime, end_date: datetime,
     it found, so their table cells show the same measure as the panel's.
 
     Returns {dates, per_variant: {v: {markers, per_date: {date: {marker:
-    [cov, hit, link_n, link_ok]}}}}}."""
+    [cov, hit, link_n, link_ok]}}}}, below_all, sigs}.
+
+    below_all, sigs (2026-10-14): which of `variants` + `panel` lie below
+    which ({X: [D, …]}, process.cooc.lineages_below_all) and their
+    substitutions, so the page can tell how much of a found lineage is itself
+    and not the lineages below it (abundance_cooc._family_by_jaccard). No
+    extra queries: their reads are in this check (found) or the panel check.
+    """
     pango_loader = PangoLoader(get_pango_summary_path())
     all_sigs, parents = get_all_lineage_signatures(), get_panel_parent_map()
     panel = list(panel or [])
-    sigs, markers = {}, {}
+    sigs, markers, panel_sigs = {}, {}, {}
     for v in dict.fromkeys(variants):
         vs = _build_variant_signatures(list(dict.fromkeys(panel + [v])), pango_loader,
                                        _COWWID_VARIANTS)
         sigs[v] = vs.get(v, set())
+        for p in panel:
+            panel_sigs.setdefault(p, vs.get(p, set()))
         try:
             markers[v] = specific_markers(vs, all_sigs, parents).get(v, [])
         except Exception as e:
@@ -310,6 +319,20 @@ def lineages_check(location: str, start_date: datetime, end_date: datetime,
     out = {"dates": [], "per_variant": {v: {"markers": markers[v], "per_date": {}}
                                         for v in markers}}
     todo = [v for v in markers if markers[v]]
+    try:
+        pan = [p for p in panel if p not in markers]
+        pmk = {}
+        if pan:
+            pvs = _build_variant_signatures(panel, pango_loader, _COWWID_VARIANTS)
+            pmk = {p: m for p, m in specific_markers(pvs, all_sigs, parents).items() if p in pan}
+        nodes = list(markers) + pan
+        sig_all = {**panel_sigs, **sigs}
+        out["below_all"] = lineages_below_all(nodes, {**pmk, **markers}, sig_all, parents)
+        out["sigs"] = {n: sorted(m for m in sig_all.get(n, ()) if re.match(r"^\d+[ACGT]$", m))
+                       for n in nodes}
+    except Exception as e:
+        logger.warning(f"[cooc][{location}] lineages below others failed: {e}")
+        out["below_all"], out["sigs"] = {}, {}
 
     async def _run():
         dates = await client._get_sampling_dates(location, (start_date, end_date))
@@ -351,8 +374,11 @@ def lineages_check(location: str, start_date: datetime, end_date: datetime,
             out["per_variant"][v]["per_date"] = stats.get(v, {})
 
     asyncio.run(_run())
+    _fam_txt = "; ".join(
+        f"{x} > " + ", ".join(ds) for x, ds in (out.get("below_all") or {}).items()
+        if ds and x in markers) or "none"
     logger.info(f"[cooc][{location}] lineage check: {len(todo)} of {len(markers)} lineages "
-                f"with markers, {len(out['dates'])} dates")
+                f"with markers, {len(out['dates'])} dates; found below others: {_fam_txt}")
     return out
 
 

@@ -232,3 +232,57 @@ def test_day_squares_use_the_windows_no_neighbour_markers():
     r = check_in_data(mk, pd_, sorted(pd_))
     assert dict(r["timeline"]) == {"2026-09-01": "present", "2026-09-05": "present"}
     assert any("share only" in x["why"] for x in r["detail"])
+
+
+# ── lineages below a found lineage: how much of it is itself (14 Oct) ──
+
+def test_lineages_below_all_uses_the_tree_and_recombinants():
+    from process.cooc import lineages_below_all
+    parents = {"ANC": "", "KID": "ANC", "GRAND": "KID", "XR": "", "XR.1": "XR",
+               "OTHER": ""}
+    markers = {"ANC": ["1000A", "5000T"], "KID": ["1100G"], "GRAND": ["7000C"],
+               "XR": ["9100A"], "XR.1": ["9200G"], "OTHER": ["9000C"]}
+    sigs = {"ANC": {"1000A", "5000T"},
+            "KID": {"1000A", "1100G"},                    # lost 5000T: still below ANC
+            "GRAND": {"1000A", "1100G", "7000C"},
+            "XR": {"1100G", "9100A"},                     # recombinant with KID's part
+            "XR.1": {"1100G", "9100A", "9200G"},
+            "OTHER": {"9000C", "1000A"}}                  # carries 1000A, not in ANC's line
+    b = lineages_below_all(list(parents), markers, sigs, parents)
+    assert set(b["ANC"]) == {"KID", "GRAND"}               # by the tree only
+    assert set(b["KID"]) == {"GRAND", "XR", "XR.1"}        # recombinants carrying 1100G
+    assert b["XR"] == ["XR.1"] and b["OTHER"] == [] and b["GRAND"] == []
+
+
+def test_nearest_below_skips_lineages_not_taken():
+    from process.cooc import nearest_below
+    ball = {"X": ["A", "A1", "A2", "B"], "A": ["A1", "A2"], "A1": ["A2"]}
+    assert nearest_below("X", ball, lambda d: True) == ["A", "B"]
+    # A mixed: the walk goes on below it, to A1 (A2 is inside A1)
+    assert nearest_below("X", ball, lambda d: d != "A") == ["A1", "B"]
+    assert nearest_below("X", ball, lambda d: d == "A2") == ["A2"]
+
+
+def test_kept_markers_drop_markers_lost_below_with_reads():
+    from process.cooc import kept_markers
+    ball = {"JN1": ["A", "B"]}
+    sigs = {"JN1": {"27810C", "3565C", "18894T"},
+            "A": {"27810C", "18894T"},                    # lost 3565C, has reads
+            "B": {"27810C", "3565C"}}                     # lost 18894T, absent here
+    mk = ["27810C", "3565C", "18894T"]
+    assert kept_markers(mk, "JN1", ball, sigs, lambda e: e == "A") == ["27810C", "18894T"]
+    assert kept_markers(mk, "JN1", ball, sigs, lambda e: True) == ["27810C"]
+
+
+def test_lineage_share_and_jaccard():
+    from process.cooc import family_jaccard, lineage_share
+    pd_ = {"2026-09-01": {"1000A": [1000, 960, 0, 0], "5000T": [1000, 950, 0, 0],
+                          "1100G": [1000, 950, 0, 0], "9999C": [50, 50, 0, 0]}}
+    cfg = dict(CFG, cap_reads=0)
+    sx = lineage_share(["1000A", "5000T"], pd_, cfg=cfg)
+    sd = lineage_share(["1100G", "9999C"], pd_, cfg=cfg)  # 9999C: under 100 reads, left out
+    assert abs(sx - 0.955) < 1e-9 and abs(sd - 0.95) < 1e-9
+    assert abs(family_jaccard(sx, sd) - 0.95 / 0.955) < 1e-9   # ANC itself ≈ 0.5 %
+    assert lineage_share(["9999C"], pd_, cfg=cfg) is None
+    assert family_jaccard(None, 0.5) is None and family_jaccard(0.2, 0.3) == 1.0
+    assert lineage_share(["1000A"], pd_, dates={"2026-09-02"}, cfg=cfg) is None

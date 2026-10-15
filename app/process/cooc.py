@@ -651,3 +651,122 @@ def check_verdicts(markers: List[str],
         verdict = "mixed"
     return {"verdict": verdict, "n_markers": len(markers), "n_present": n_p,
             "n_measured": n_meas, "markers": out, "no_link": sorted(no_link)}
+
+# ══ Lineages found below a found lineage: how much of it is itself ═════════
+# (2026-10-14) An ancestor's ★ markers are carried by all its descendants, so
+# its ★ check measures the whole family (BA.2.86 "present" in Zürich because
+# JN.1 and everything after it carry its markers). Per city, for each found
+# lineage X, compare it with the nearest lineages below it that are present
+# and will be in the panel (in the panel already, or found and offered + Add):
+#
+#     Jaccard(X, D) = reads with both / reads with either
+#                   = share of D's family ÷ share of X's markers D carries
+#     X itself      = 1 − Σ Jaccard over those lineages
+#
+# Every read of D's family also has X's markers (D descends from X), so
+# "both" = D's family and "either" = X's. Each share is read at its own
+# positions; the two need not be on one read. (A first version counted both
+# on the same reads; in Zürich a marker of X lay within one read of a
+# mutation of D in 6 of 37 cases only.)
+#
+# A family's share is read only at markers that every lineage below it with
+# reads in the city still carries: descendants lose markers again (JN.1's
+# 3565C is on 58 % of reads in every city, 27810C on 100 %), and the median of
+# all markers would leave a false "itself" (BA.2.86 22 % instead of 0 %).
+#
+# "Below" comes from the Pango tree: X is an ancestor of D. A recombinant (and
+# its descendants) is also below a lineage outside its own line whose ★
+# markers it carries: XFG below LF.7 and LP.8.1.
+
+
+def _ancestors(lin: str, parent_map: Dict[str, str]) -> List[str]:
+    out, x, seen = [], parent_map.get(lin, ""), {lin}
+    while x and x not in seen:
+        out.append(x)
+        seen.add(x)
+        x = parent_map.get(x, "")
+    return out
+
+
+def lineages_below_all(nodes: List[str], markers: Dict[str, List[str]],
+                       sigs: Dict[str, Set[str]],
+                       parent_map: Dict[str, str]) -> Dict[str, List[str]]:
+    """{X: [every lineage of `nodes` below X]}. Pure.
+
+    D is below X when X is a Pango ancestor of D, or when D is (or descends
+    from) a recombinant, X is not in its line, and D carries at least one of
+    X's ★ markers. Two lineages each "below" the other (two recombinants
+    sharing markers) are left unrelated."""
+    nodes = list(dict.fromkeys(nodes))
+    anc = {n: set(_ancestors(n, parent_map)) for n in nodes}
+    rec = {n: _recombinant_root(n, parent_map) is not None for n in nodes}
+
+    def is_below(d, x):
+        if d == x:
+            return False
+        if x in anc[d]:
+            return True
+        sd = sigs.get(d) or set()
+        return (rec[d] and d not in anc[x]
+                and any(m in sd for m in markers.get(x) or []))
+
+    below = {x: [d for d in nodes if is_below(d, x)] for x in nodes}
+    return {x: [d for d in ds if x not in below.get(d, [])] for x, ds in below.items()}
+
+
+def nearest_below(x: str, below_all: Dict[str, List[str]], take) -> List[str]:
+    """The lineages below X for which take(d) is true and with no other such
+    lineage between X and them. Pure."""
+    cand = [d for d in below_all.get(x) or [] if take(d)]
+    return [d for d in cand
+            if not any(o != d and d in (below_all.get(o) or []) for o in cand)]
+
+
+def kept_markers(mks: List[str], d: str, below_all: Dict[str, List[str]],
+                 sigs: Dict[str, Set[str]], has_reads) -> List[str]:
+    """The markers of `mks` that D and every lineage below D with
+    has_reads(e) still carry (by their signatures). Pure."""
+    keep = [m for m in mks or [] if m in (sigs.get(d) or set())]
+    for e in below_all.get(d) or []:
+        if has_reads(e):
+            se = sigs.get(e) or set()
+            keep = [m for m in keep if m in se]
+    return keep
+
+
+def lineage_share(markers: List[str], per_date: Dict[str, Dict[str, List[int]]],
+                  dates=None, cfg: Optional[dict] = None) -> Optional[float]:
+    """Share of reads carrying a lineage's markers in one city: the median,
+    over the markers with ≥ check.min_cov reads, of the share of reads at the
+    marker that carry it. Reads pooled over `dates` (all when None), each date
+    counting at most check.cap_reads reads per marker, as the ★ check does.
+    None when no marker has enough reads."""
+    c = _check_cfg(cfg)
+    cap = float(c.get("cap_reads") or 0)
+    vals = []
+    for m in markers or []:
+        cov = hit = 0.0
+        for dt, cells in (per_date or {}).items():
+            if dates is not None and dt not in dates:
+                continue
+            cell = (cells or {}).get(m)
+            if not cell:
+                continue
+            k = cap / cell[0] if cap and cell[0] > cap else 1.0
+            cov += cell[0] * k
+            hit += cell[1] * k
+        if cov >= c["min_cov"]:
+            vals.append(hit / cov)
+    if not vals:
+        return None
+    vals.sort()
+    n = len(vals)
+    return vals[n // 2] if n % 2 else (vals[n // 2 - 1] + vals[n // 2]) / 2
+
+
+def family_jaccard(share_x: Optional[float], share_d: Optional[float]) -> Optional[float]:
+    """Jaccard(X, D) = share of D ÷ share of X (at the markers D carries),
+    at most 1. None when either share can't be measured or X's is 0."""
+    if share_x is None or share_d is None or share_x <= 0:
+        return None
+    return min(1.0, share_d / share_x)

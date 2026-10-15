@@ -803,8 +803,14 @@ def _panel_tint(per_city, sel):
     return None if share is None else dot
 
 
+# a "family" row (an ancestor found through its descendants): neutral cells,
+# so its ★ check doesn't read as a red "found" lineage (2026-10-14)
+S_FAMILY = "background:#f3f4f6;color:#4b5563;box-shadow:inset 0 0 0 1px #d1d5db;"
+
+
 def _finding_cells(v, f, cities, sel):
     pc = f.get("per_city", {}) or {}
+    fam = f.get("status") == "family"
     out = []
     for c in cities:
         d = pc.get(c)
@@ -818,6 +824,8 @@ def _finding_cells(v, f, cities, sel):
             # phase 3: not named by this city's scan, checked because it was
             # named elsewhere — same colours, dashed border
             style, label, _dot, _ink, _share = _scale(chk, found=True)
+            if fam:
+                style = S_FAMILY
             g, words = _trend(chk)
             label += f" {g}" if g in ("↑", "↓") else ""
             fi = ", ".join(city_name(x) for x in d.get("found_in") or [])
@@ -827,6 +835,8 @@ def _finding_cells(v, f, cities, sel):
         if chk and n > 0:
             # the same measure as the panel: ★ markers present / measurable
             style, label, _dot, _ink, _share = _scale(chk, found=True)
+            if fam:
+                style = S_FAMILY
             g, words = _trend(chk)
             label += f" {g}" if g in ("↑", "↓") else ""
             out.append(_cell(label, style, _cell_tip(
@@ -1191,13 +1201,20 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
             _dsel = (f.get("per_city") or {}).get(sel) or {}
             n_sel = int(_dsel.get("days", 0) or 0)
             named = f.get("status") == "named"
-            col = GREY if named else RED
-            dk = ("ring" if named or n_sel == 0 else "filled" if n_sel >= nn["ed"] else "dashed")
+            family = f.get("status") == "family"
+            col = GREY if (named or family) else RED
+            dk = ("ring" if named or family or n_sel == 0
+                  else "filled" if n_sel >= nn["ed"] else "dashed")
             if _dsel.get("xcheck"):
                 dk = "dashed" if (_dsel.get("check") or {}).get("state") == "present" else "ring"
             tip = (f"{v}: not in your panel · {sname}: "
                    + ("not confirmed" if named else f"evidence on {n_sel} {_pl(n_sel, 'sample')}"
                       if n_sel else "not seen here"))
+            fam_desc = f.get("descendants") or []
+            if family:
+                tip = (f"{v}: family — its ★ markers are carried by the lineages below it "
+                       f"({', '.join(fam_desc[:6])}{' …' if len(fam_desc) > 6 else ''}); "
+                       "add those instead")
             btn = ""
             if f.get("addable"):
                 btn = ("<span class='added'>added · re-run needed</span>" if v in current_panel
@@ -1210,6 +1227,29 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
                     if (p_ or {}).get("check")}
             cells = _finding_cells(v, f, cities, sel)
             ev = _finding_evidence(f, sel, dgid if _chk else "")
+            its = (f.get("itself") or {}).get(sel)
+            if its:
+                # Jaccard with the lineages directly below it (found or in
+                # the panel; abundance_cooc._family_by_jaccard, 2026-10-14)
+                _parts = " · ".join(
+                    f"{d} {'can’t tell' if j is None else f'{j:.2f}'}"
+                    + (f" ({k})" if k else "")
+                    for d, j, k in its[1][:5])
+                _calc = (f"{v} itself = 1 − Σ Jaccard with the nearest lineages below it that "
+                         f"are present and in the panel or offered + Add. Jaccard = their share "
+                         f"÷ {v}’s share, each read at the ★ markers that every lineage below "
+                         f"with reads here still carries: {_parts}")
+                _it = ("can’t tell (too few reads, or no marker kept by all lineages below)"
+                       if its[0] is None
+                       else f"≈ {100 * its[0]:.0f} %")
+            if family:
+                _fd = ", ".join(fam_desc[:4]) + (f" +{len(fam_desc) - 4}" if len(fam_desc) > 4 else "")
+                ev = (f"<span class='dim' data-tip='{_e(_calc if its else tip)}'>family — carried by "
+                      f"lineages below it ({_e(_fd)})"
+                      + (f": itself {_it}" if its else "") + "</span> · " + ev)
+            elif its:
+                ev = (ev + f"<span class='dim' data-tip='{_e(_calc)}'> · itself {_it}, "
+                      "after the lineages below it</span>")
             drow = (_detail_row(dgid, v, _chk, cities, sel, n_cols, found=True)
                     if any(x.get("timeline") for x in _chk.values()) else "")
         else:  # tracked, not selected
@@ -1394,6 +1434,8 @@ _LEGEND_ROWS = (
       "▧ low-coverage sample</span>"
     + "</div><div class='row'><span class='t'>Found</span>"
     + _li(S_NAMED, "0", "not confirmed (reads also fit related lineages)")
+    + "<span class='i'><b style='color:#6b7280'>grey name</b> family: its ★ markers are on "
+      "the reads of lineages below it (itself under the present limit), no + Add</span>"
     + _li(S_NOVEL, "3", "unassigned · days")
     + _li(S_BROAD, "2", "fits too many lineages · days")
     + _li(S_NEAR, "3", "◆ panel variant ± 1 change · days (a hint)")
