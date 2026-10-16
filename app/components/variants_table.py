@@ -309,35 +309,10 @@ def _basis_samples(d):
     return [(x, m) for x, m in tl if well_covered(q.get(x))], "well"
 
 
-def _trend(d):
-    """(glyph, words) from the latest samples the vote used (2026-10-13):
-    ↑ present on the last >= 2 samples with enough reads and never before in
-    the window · ↓ present earlier, absent on the last >= 2 · → present on
-    the last >= 2 and earlier too · none otherwise."""
-    samples, _b = _basis_samples(d)
-    usable = [(x, m) for x, m in samples if m in ("present", "absent", "mixed")]
-    if len(usable) < 2:
-        return "", ""
-    pres = [m == "present" for _x, m in usable]
-    run = 1
-    while run < len(usable) and usable[-run - 1][1] == usable[-1][1]:
-        run += 1
-    tail = [x for x, _m in usable[-run:]]
-    before = any(pres[:-run])
-    dates = ", ".join(_short_date(x) for x in tail[-4:])
-    if usable[-1][1] == "present" and run >= 2:
-        if run < len(usable) and not before:
-            return "↑", f"new: present on the last {run} samples ({dates}), not before"
-        return "→", f"present on the last {run} samples ({dates})"
-    if usable[-1][1] == "absent" and run >= 2 and before:
-        last_p = [x for x, m in usable if m == "present"][-1]
-        return "↓", f"gone: absent on the last {run} samples ({dates}), last present {_short_date(last_p)}"
-    return "", ""
-
-
 def _summary(d):
-    """One line for the selected city: the answer, what it rests on, and the
-    trend with its dates."""
+    """One line for the selected city: the answer, and what it rests on (the
+    trend arrows were removed 2026-10-16: the details calendar shows the
+    samples)."""
     n_mk, p, a, u = _vote_counts(d)
     if n_mk == 0:
         return _vote_text(d)
@@ -357,8 +332,7 @@ def _summary(d):
     if clear:
         txt += (f" · last {_short_date(clear[-1])}" if basis == "well"
                 else f" · clearly present in {len(clear)}, last {_short_date(clear[-1])}")
-    g, words = _trend(d)
-    return txt + (f" · {g} {words}" if g in ("↑", "↓") else "")
+    return txt
 
 
 # hover symbols (2026-10-13): short tips instead of sentences; the legend
@@ -394,7 +368,7 @@ def _marker_syms(d, n_max=6):
 
 def _cell_tip(v, city, d, extra=""):
     """'XFG · Basel — mixed (1 ✓ 1 ✗ of 2 ★) · 2 well-covered samples · 4214C
-    50 % ✓ · 8350C 0 % ✗' (+ trend, + why it was checked)."""
+    50 % ✓ · 8350C 0 % ✗' (+ why it was checked)."""
     n_mk, p, a, u = _vote_counts(d)
     if n_mk == 0:
         return f"{v} · {city} — no ★ marker"
@@ -408,10 +382,8 @@ def _cell_tip(v, city, d, extra=""):
                  f"{_cap_reads():,} reads each)")
     if _state(d) == "few":
         base += f" · only {p} ★ measured, {_min_present()} needed"
-    g, words = _trend(d)
     ms = _marker_syms(d)
     return (f"{v} · {city} — {word} ({counts}) · {base}"
-            + (f" · {g} {words}" if g in ("↑", "↓") else "")
             + (f" · {ms}" if ms else "") + extra)
 
 
@@ -542,8 +514,7 @@ def _panel_cells(v, per_city, cities, sel):
             out.append(_empty(f"{city_name(c)}: no result", c == sel))
             continue
         style, label, _dot, _ink, share = _scale(d)
-        g, words = _trend(d)
-        out.append(_cell(label + (f" {g}" if g in ("↑", "↓") else ""), style,
+        out.append(_cell(label, style,
                          _cell_tip(v, city_name(c), d), c == sel))
     return "".join(out)
 
@@ -862,8 +833,6 @@ def _finding_cells(v, f, cities, sel):
             style, label, _dot, _ink, _share = _scale(chk, found=True)
             if fam:
                 style = S_FAMILY
-            g, words = _trend(chk)
-            label += f" {g}" if g in ("↑", "↓") else ""
             fi = ", ".join(city_name(x) for x in d.get("found_in") or [])
             out.append(_cell(label, style, _cell_tip(
                 v, city_name(c), chk, f" · checked here because found in {fi}"), c == sel))
@@ -873,8 +842,6 @@ def _finding_cells(v, f, cities, sel):
             style, label, _dot, _ink, _share = _scale(chk, found=True)
             if fam:
                 style = S_FAMILY
-            g, words = _trend(chk)
-            label += f" {g}" if g in ("↑", "↓") else ""
             out.append(_cell(label, style, _cell_tip(
                 v, city_name(c), chk,
                 f" · deep scan: evidence on {n} {_pl(n, 'sample')}{_ev_quality(d)}"),
@@ -1460,7 +1427,6 @@ _LEGEND_ROWS = (
     + _lc({"n_markers": 4, "n_measured": 4, "n_present": 0, "basis": "all"})
     + "light = weak evidence: no coverage data for this city, or clearly present in "
     + f"fewer than {_num()['ed']} samples</span>"
-    + "<span class='i'><b>↑ ↓</b> new · gone on the latest samples (hover for the dates)</span>"
     + "<span class='i'>" + _lc({"n_markers": 3, "n_measured": 1, "n_present": 1})
     + f"too few markers measured (present needs {_min_present()})</span>"
     + _li(S_NOMARK, "·", "no ★ marker")
@@ -1499,7 +1465,6 @@ SHORT_LEGEND = (
     + "light = weak</span>"
     + "<span class='i'><span class='cal'><i style='background:" + GREEN + ";" + _LOWQ
     + "'></i></span>low coverage</span>"
-    + "<span class='i'><b>↑ ↓</b> new / gone</span>"
     + _ld(f"background:{RED}", "found (not in panel)")
     + "<span class='dim'>ⓘ more: “How to read this page” above the tabs</span>"
     + "</div></div>")
