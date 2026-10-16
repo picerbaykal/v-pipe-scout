@@ -286,3 +286,80 @@ def test_lineage_share_and_jaccard():
     assert lineage_share(["9999C"], pd_, cfg=cfg) is None
     assert family_jaccard(None, 0.5) is None and family_jaccard(0.2, 0.3) == 1.0
     assert lineage_share(["1000A"], pd_, dates={"2026-09-02"}, cfg=cfg) is None
+
+
+# ── every sample votes, weighted by its coverage (2026-10-16) ─────────────
+def test_sample_cap_follows_median_depth():
+    from process.cooc import sample_cap
+    c = dict(CFG, cap_reads=1000, cov_factor=10)
+    assert sample_cap(c, None, "2026-09-04") == 1000           # no coverage data
+    assert sample_cap(c, {}, "2026-09-04") == 1000             # date not measured
+    assert sample_cap(c, {"2026-09-04": 2.0}, "2026-09-04") == 20
+    assert sample_cap(c, {"2026-09-04": 0.0}, "2026-09-04") == 1   # never 0
+    assert sample_cap(c, {"2026-08-24": 1356.0}, "2026-08-24") == 1000
+
+
+def test_a_jackpot_sample_counts_as_few_reads():
+    # Lugano 4 Sep: median depth 2, 724,266 reads at 8350C, 0 % carry it
+    pd_ = {"2026-08-20": {"8350C": [176, 90, 90, 90]},
+           "2026-09-04": {"8350C": [724266, 0, 0, 0]}}
+    c = dict(CFG, cap_reads=1000, cov_factor=10)
+    flat = check_verdicts(["8350C"], pd_, c)["markers"]["8350C"]
+    wtd = check_verdicts(["8350C"], pd_, c,
+                         depth={"2026-08-20": 22.0, "2026-09-04": 2.0})["markers"]["8350C"]
+    assert flat["cov"] == 1176                     # 176 + 1,000
+    assert wtd["cov"] == 196                       # 176 (under 220) + 20
+    assert abs(wtd["freq"] - 90 / 196) < 1e-9 and wtd["cov_raw"] == 724442
+
+
+# Lugano, 7 Jun – 5 Sep 2026, XFG's two ★ markers (bench_samples.py):
+# {date: (median depth, well covered, (reads, % carrying) at 4214C, at 8350C)}
+_LUGANO = {
+    "2026-06-12": (28, False, (61, 21), (383, 1)),
+    "2026-06-28": (2498, True, None, (9, 22)),
+    "2026-07-07": (37, False, (13, 54), (112, 8)),
+    "2026-07-11": (54, False, (242235, 98), (49, 6)),
+    "2026-08-20": (22, False, (23, 83), (176, 51)),
+    "2026-08-24": (1356, True, (71030, 0), (1, 0)),
+    "2026-09-04": (2, False, (171707, 0), (724266, 0)),
+}
+
+
+def _lugano():
+    per_date, quality = {}, {}
+    for d, (md, well, a, b) in _LUGANO.items():
+        cells = {}
+        for m, x in (("4214C", a), ("8350C", b)):
+            if x:
+                hit = round(x[0] * x[1] / 100)
+                cells[m] = [x[0], hit, hit, hit]          # carriers look like XFG nearby
+        per_date[d] = cells
+        quality[d] = {"median": float(md), "share_100": 0.6 if well else 0.1}
+    return per_date, quality
+
+
+def test_two_well_covered_jackpots_no_longer_decide_alone():
+    # until 16 Oct the 2 well-covered samples decided: 4214C 0 % of 71,030 ->
+    # XFG "absent" in Lugano, while every other sample shows it
+    from process.variant_explorer import check_in_data
+    per_date, quality = _lugano()
+    r = check_in_data(["4214C", "8350C"], per_date, sorted(per_date), quality=quality)
+    assert r["basis"] == "weighted" and r["n_well"] == 2
+    assert (r["state"], r["n_present"], r["n_measured"]) == ("present", 2, 2)
+
+
+def test_without_coverage_data_every_sample_is_capped_flat():
+    from process.variant_explorer import check_in_data
+    per_date, _q = _lugano()
+    r = check_in_data(["4214C", "8350C"], per_date, sorted(per_date), quality=None)
+    assert r["basis"] == "all"
+
+
+def test_lineage_share_uses_the_same_weights():
+    from process.cooc import lineage_share
+    pd_ = {"2026-08-20": {"8350C": [176, 90, 0, 0]},
+           "2026-09-04": {"8350C": [724266, 0, 0, 0]}}
+    c = dict(CFG, cap_reads=1000, cov_factor=10)
+    flat = lineage_share(["8350C"], pd_, cfg=c)
+    wtd = lineage_share(["8350C"], pd_, cfg=c, depth={"2026-08-20": 22.0, "2026-09-04": 2.0})
+    assert abs(flat - 90 / 1176) < 1e-9 and abs(wtd - 90 / 196) < 1e-9

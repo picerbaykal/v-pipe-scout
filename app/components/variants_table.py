@@ -204,22 +204,29 @@ S_FOUND_LIGHT = "background:#fff;color:#7f1d1d;box-shadow:inset 0 0 0 1.5px #dc2
 MIXED_BG, PALE_BG, PALE_FG = "#b4bac3", "#f3f4f6", "#6b7280"
 S_MIXED = _fill(MIXED_BG, "#111827")
 S_PALE = _fill(PALE_BG, PALE_FG) + "box-shadow:inset 0 0 0 1px #e5e7eb;"
+S_FEW = _fill(PALE_BG, "#374151") + "box-shadow:inset 0 0 0 1px #9ca3af;"   # too few markers
 D_PALE = f"background:{PALE_BG};box-shadow:inset 0 0 0 1px #d1d5db;"   # a pale day square
 
 
 def _state(d):
     """The check's answer for one cell: the result's own state, or (for
-    results without one, e.g. the legend) the vote from its counts."""
+    results without one, e.g. the legend) the vote from its counts.
+    "few" (2026-10-16): "mixed" with no marker absent — every measured marker
+    present, but fewer than check.min_present measured: too little data, not
+    markers that disagree."""
     st = d.get("state")
-    if st in ("present", "absent", "mixed"):
-        return st
     n_mk, p, a, u = _vote_counts(d)
-    if p + a == 0:
-        return "not_covered"
-    hi, lo = _shares()
-    if p / (p + a) >= hi and p >= _min_present():
-        return "present"
-    return "absent" if p / (p + a) <= lo else "mixed"
+    if st not in ("present", "absent", "mixed"):
+        if p + a == 0:
+            return "not_covered"
+        hi, lo = _shares()
+        if p / (p + a) >= hi and p >= _min_present():
+            st = "present"
+        else:
+            st = "absent" if p / (p + a) <= lo else "mixed"
+    if st == "mixed" and a == 0 and 0 < p < _min_present():
+        return "few"
+    return st
 
 
 def _clear_samples(d):
@@ -280,13 +287,18 @@ def _scale(d, found=False):
         return S_NOTFOUND, f"{p}/{m}", AMBER, AMBER_T, share
     if st == "absent":
         return S_PALE, f"{p}/{m}", PALE_BG, RED, share
+    if st == "few":
+        return S_FEW, f"{p}/{m}", PALE_BG, (RED if found else "#6b7280"), share
     return S_MIXED, f"{p}/{m}", MIXED_BG, (RED if found else "#4b5563"), share
 
 
 def _basis_samples(d):
-    """(samples the vote used, as [(date, mark)], 'well' / 'all'): the
-    well-covered ones when they decided, else all (2026-10-13)."""
+    """(samples the vote used, as [(date, mark)], 'weighted' / 'well' /
+    'all'): every sample, weighted by coverage (2026-10-16); the well-covered
+    ones for results saved before; all when there's no coverage data."""
     tl = [(x, m) for x, m in (d.get("timeline") or []) if m != "unknown"]
+    if d.get("basis") == "weighted":
+        return tl, "weighted"
     if d.get("basis") != "well":
         return tl, "all"
     try:
@@ -330,11 +342,15 @@ def _summary(d):
     if n_mk == 0:
         return _vote_text(d)
     st = _state(d)
-    word = {"present": "present", "absent": "absent", "mixed": "mixed"}.get(st, "too few reads")
+    word = _WORD.get(st, "too few reads")
     samples, basis = _basis_samples(d)
     clear = [x for x, m in samples if m == "present"]
     k = len(samples)
-    if basis == "well":
+    if basis == "weighted":
+        nw = d.get("n_well")
+        txt = (f"{word} on all {k} {_pl(k, 'sample')}, weighted by coverage"
+               + (f" ({nw} well covered)" if nw is not None else ""))
+    elif basis == "well":
         txt = f"{word} on the {k} well-covered {_pl(k, 'sample')}"
     else:
         txt = f"{word} · weak: no well-covered sample, all {k} samples counted"
@@ -360,7 +376,9 @@ def _marker_syms(d, n_max=6):
         if not reads:
             out.append(f"{m} no reads ?")
         elif why.startswith("under"):                 # too few reads at the marker
-            out.append(f"{m} {reads} reads ?")
+            cnt = x.get("cov", reads) or 0
+            out.append(f"{m} {reads:,} reads ?" if cnt >= reads else
+                       f"{m} {reads:,} reads, count as {cnt:,} ?")   # low-coverage samples
         elif "cover a neighbour" in why:              # share fine, too few reads to test the link
             out.append(f"{m} {100 * (f or 0):.0f} % ({x.get('link_n', 0)} linked reads) ?")
         elif "look like" in why:                      # its reads look like another lineage
@@ -380,12 +398,16 @@ def _cell_tip(v, city, d, extra=""):
     n_mk, p, a, u = _vote_counts(d)
     if n_mk == 0:
         return f"{v} · {city} — no ★ marker"
-    word = {"present": "present", "absent": "absent", "mixed": "mixed"}.get(_state(d), "too few reads")
+    word = _WORD.get(_state(d), "too few reads")
     counts = f"{p} ✓ {a} ✗" + (f" {u} ?" if u else "") + f" of {n_mk} ★"
     samples, basis = _basis_samples(d)
-    base = (f"{len(samples)} well-covered {_pl(len(samples), 'sample')}" if basis == "well"
-            else "weak: no well-covered sample (all counted, ≤ "
+    base = (f"{len(samples)} {_pl(len(samples), 'sample')} weighted by coverage (each ≤ "
+            f"{_cov_factor():g} × its median depth, ≤ {_cap_reads():,} reads)" if basis == "weighted"
+            else f"{len(samples)} well-covered {_pl(len(samples), 'sample')}" if basis == "well"
+            else "weak: no coverage data (all counted, ≤ "
                  f"{_cap_reads():,} reads each)")
+    if _state(d) == "few":
+        base += f" · only {p} ★ measured, {_min_present()} needed"
     g, words = _trend(d)
     ms = _marker_syms(d)
     return (f"{v} · {city} — {word} ({counts}) · {base}"
@@ -494,11 +516,12 @@ def _detail_row(gid, v, per_city, cities, sel, n_cols, found=False):
                        f"<td>{_e(x.get('why') or '')}</td><td>{med}</td></tr>")
     mk = ""
     if mk_rows:
-        basis = "well-covered samples" if ds.get("basis") == "well" else "all samples"
+        basis = {"well": "well-covered samples",
+                 "weighted": "all samples, weighted by coverage"}.get(ds.get("basis"), "all samples")
         mk = (f"<table class='mk'><tr><th>★ marker</th><th>{_e(city_name(sel))}, {basis}</th>"
               "<th></th><th>median share, all cities</th></tr>" + "".join(mk_rows) + "</table>")
     body = ("<div class='dim' style='font-size:12px'>Samples per city, newest right · striped = "
-            "low coverage (counted only when a city has no well-covered sample) · ⋯ = older "
+            "low coverage (counts less in the vote) · ⋯ = older "
             "low-coverage samples without it, not shown</div>" + "".join(lines) + mk
             + "<div style='font-size:12.5px;margin-top:6px'>"
             + _ext(_ww_link(v, sel), f"{v} in {city_name(sel)} wastewater (GenSpectrum)",
@@ -574,6 +597,19 @@ def _num():
     return {"mc": mc, "pf": _pct(pf), "af": _pct(af), "mp": _min_present(),
             "er": int(EVIDENCE_MIN_READS),
             "es": _pct(float(EVIDENCE_MIN_SHARE) * 100), "ed": int(EVIDENCE_MIN_DAYS)}
+
+
+_WORD = {"present": "present", "absent": "absent", "mixed": "mixed",
+         "few": "too few markers measured"}
+
+
+def _cov_factor():
+    """A sample counts at most this × its median depth (check.cov_factor)."""
+    try:
+        from process.cooc import _check_cfg
+        return float(_check_cfg().get("cov_factor", 10))
+    except Exception:
+        return 10.0
 
 
 def _cap_reads():
@@ -1422,9 +1458,11 @@ _LEGEND_ROWS = (
     + _lc({"n_markers": 2, "n_measured": 2, "n_present": 2,
            "timeline": [["2026-01-01", "present"]]})
     + _lc({"n_markers": 4, "n_measured": 4, "n_present": 0, "basis": "all"})
-    + "light = weak evidence: no well-covered sample in this city, or clearly present in "
+    + "light = weak evidence: no coverage data for this city, or clearly present in "
     + f"fewer than {_num()['ed']} samples</span>"
     + "<span class='i'><b>↑ ↓</b> new · gone on the latest samples (hover for the dates)</span>"
+    + "<span class='i'>" + _lc({"n_markers": 3, "n_measured": 1, "n_present": 1})
+    + f"too few markers measured (present needs {_min_present()})</span>"
     + _li(S_NOMARK, "·", "no ★ marker")
     + _li(S_NODATA, "?", "too few reads")
     + "<span class='i'>n/m under a city code = samples well covered · details ▸ = samples "

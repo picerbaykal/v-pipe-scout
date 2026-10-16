@@ -207,14 +207,18 @@ def check_in_data(markers: List[str], per_date: Dict[str, Dict[str, list]],
     The vote (state, n_present, n_measured) adds up the reads of every date
     (2026-10-09: the chosen window; from 2 Oct to 9 Oct the last 5 samples).
 
-    quality:  {date: process.sample_qc summary} — passed through for the
-              calendar (low-coverage squares) and counted: n_well / n_samples.
+    quality:  {date: process.sample_qc summary} — weights the vote (each
+              sample's median depth, 2026-10-16), and is passed through for
+              the calendar (low-coverage squares) and counted: n_well /
+              n_samples.
 
     Returns {state, n_present, n_measured, n_markers, timeline, day_detail,
              quality, n_well, n_samples, basis}
-      basis: "well" = voted on the well-covered samples only; "all" = no
-             well-covered sample with reads at the markers, every sample
-             counted (capped) — weak evidence
+      basis: "weighted" = every sample, each counting at most cov_factor ×
+             its median depth reads (≤ cap_reads); "all" = no coverage data,
+             every sample capped at cap_reads — weak evidence. ("well", the
+             well-covered samples alone, was the rule until 16 Oct; results
+             saved before may still carry it.)
       state: present / absent / mixed / not_covered / no_marker
              (the check's own vote, process.cooc.check_verdicts)
       timeline: [[date, mark]], one mark per day: the cells' vote on that
@@ -266,28 +270,25 @@ def check_in_data(markers: List[str], per_date: Dict[str, Dict[str, list]],
             mark = r["verdict"] if r["verdict"] in ("present", "absent") else "mixed"
         tl.append([d, mark])
         detail[d] = _day_detail(markers, day, r, c)
-    # the vote (2026-10-13): the well-covered samples decide when the city has
-    # any with reads at the markers; otherwise every sample, each counting at
-    # most check.cap_reads reads (process.cooc.check_verdicts) — basis "all",
-    # shown as weak evidence
+    # the vote (2026-10-16): every sample, each counting at most
+    # min(check.cap_reads, check.cov_factor × its median depth) reads per
+    # marker (process.cooc.sample_cap) — basis "weighted". Until 16 Oct the
+    # well-covered samples decided alone when the city had any ("well"), so
+    # 1–2 samples with a jackpot could decide a whole window (XFG "absent" in
+    # Lugano). Without coverage data: every sample, capped at cap_reads only —
+    # basis "all", shown as weak evidence.
     from process.sample_qc import well_covered
     q = {d: quality[d] for d in [x for x, _m in tl] if quality and d in quality}
     good = [d for d in q if well_covered(q[d])]
     pd_all = per_date or {}
-    res, pd_, basis = None, pd_all, "all"
-    if good:
-        pd_good = {d: pd_all[d] for d in good if d in pd_all}
-        r_good = check_verdicts(markers, pd_good, None, no_link)
-        if r_good["n_measured"] > 0:
-            res, pd_, basis = r_good, pd_good, "well"
-    if res is None:
-        res = check_verdicts(markers, pd_all, None, no_link)
-    n_well = len(good)
+    depth = {d: float((v or {}).get("median", 0) or 0) for d, v in q.items()} or None
+    res = check_verdicts(markers, pd_all, None, no_link, depth=depth)
+    basis = "weighted" if depth else "all"
     state = res["verdict"]          # present / absent / mixed / not_covered
     return {"state": state, "n_present": res["n_present"], "n_measured": res["n_measured"],
             "n_markers": res["n_markers"], "timeline": tl,
-            "day_detail": detail, "detail": _marker_detail(markers, pd_, res, c),
-            "quality": q, "n_well": n_well if q else None, "n_samples": len(tl),
+            "day_detail": detail, "detail": _marker_detail(markers, pd_all, res, c),
+            "quality": q, "n_well": len(good) if q else None, "n_samples": len(tl),
             "basis": basis}
 
 
@@ -331,7 +332,10 @@ def _marker_detail(markers, per_date, res, c) -> List[Dict]:
         cov, f, link, st = r.get("cov", 0), r.get("freq"), r.get("link"), r.get("status")
         why, near = "", ""
         if cov < c["min_cov"]:
-            why = f"under {c['min_cov']} reads"
+            raw_n = r.get("cov_raw", cov) or 0
+            why = (f"under {c['min_cov']} reads" if raw_n < c["min_cov"] else
+                   f"under {c['min_cov']} reads after weighting by coverage "
+                   f"({raw_n:,} reads count as {cov:,})")
             if cov >= 0.8 * c["min_cov"]:
                 near = f"{cov} reads, needs {c['min_cov']}"
         elif f is not None and f < c["absent_freq"]:

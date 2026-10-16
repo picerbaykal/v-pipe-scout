@@ -396,7 +396,28 @@ CHECK_DEFAULTS = {
                              #   (2026-10-13): in low-virus samples a few amplicons
                              #   reach 100,000s of reads from few molecules and
                              #   would outvote every other sample
+    "cov_factor": 10,        # ... and at most this × its median depth (2026-10-16):
+                             #   every sample votes, weighted by its coverage. A
+                             #   sample with median depth 2 and 400,000 reads at one
+                             #   marker (a jackpot: few virus copies, copied many
+                             #   times) counts as 20 reads; a broadly covered one as
+                             #   cap_reads. ×5 and ×20 gave the same verdicts (6
+                             #   cities, 3 windows: bench_samples, 16 Oct 2026)
 }
+
+
+def sample_cap(c: dict, depth: Optional[Dict[str, float]], date: str) -> float:
+    """Reads one sample counts at most per marker: check.cap_reads, and at
+    most check.cov_factor × the sample's median depth when it is known
+    (never under 1). 0 = no cap."""
+    cap = float(c.get("cap_reads") or 0)
+    if depth is None:
+        return cap
+    md = depth.get(str(date)[:10])
+    if md is None:
+        return cap
+    lim = max(1.0, float(c.get("cov_factor") or 0) * float(md))
+    return min(cap, lim) if cap else lim
 
 
 # "What makes a mutation a ★ marker" is shared with the scanner and lives under
@@ -578,11 +599,14 @@ def accumulate_check_stats(rows: List[dict],
 def check_verdicts(markers: List[str],
                    per_date: Dict[str, Dict[str, List[int]]],
                    cfg: Optional[dict] = None,
-                   no_link: Optional[set] = None) -> dict:
+                   no_link: Optional[set] = None,
+                   depth: Optional[Dict[str, float]] = None) -> dict:
     """Verdict for one variant in one city: a vote among its specific markers.
 
     Counts are pooled over all dates in the window (the heatmaps show dates),
-    each date counting at most cap_reads reads per marker (2026-10-13).
+    each date counting at most cap_reads reads per marker (2026-10-13), and
+    at most cov_factor × its median depth when depth = {date: median depth}
+    is given (sample_cap, 2026-10-16). Shares are kept, counts scaled.
     Each marker is
       present     >= present_freq of covering reads carry it, and those reads
                   match the variant at neighbouring positions (link >= link_min)
@@ -609,8 +633,8 @@ def check_verdicts(markers: List[str],
         return empty
     pooled = {m: [0.0, 0.0, 0.0, 0.0] for m in markers}
     raw = {m: 0 for m in markers}
-    cap = float(c.get("cap_reads") or 0)
-    for cells in (per_date or {}).values():
+    for dt, cells in (per_date or {}).items():
+        cap = sample_cap(c, depth, dt)
         for m in markers:
             cell = cells.get(m)
             if cell:
@@ -735,14 +759,14 @@ def kept_markers(mks: List[str], d: str, below_all: Dict[str, List[str]],
 
 
 def lineage_share(markers: List[str], per_date: Dict[str, Dict[str, List[int]]],
-                  dates=None, cfg: Optional[dict] = None) -> Optional[float]:
+                  dates=None, cfg: Optional[dict] = None,
+                  depth: Optional[Dict[str, float]] = None) -> Optional[float]:
     """Share of reads carrying a lineage's markers in one city: the median,
     over the markers with ≥ check.min_cov reads, of the share of reads at the
     marker that carry it. Reads pooled over `dates` (all when None), each date
-    counting at most check.cap_reads reads per marker, as the ★ check does.
+    counting at most sample_cap reads per marker, as the ★ check does.
     None when no marker has enough reads."""
     c = _check_cfg(cfg)
-    cap = float(c.get("cap_reads") or 0)
     vals = []
     for m in markers or []:
         cov = hit = 0.0
@@ -752,6 +776,7 @@ def lineage_share(markers: List[str], per_date: Dict[str, Dict[str, List[int]]],
             cell = (cells or {}).get(m)
             if not cell:
                 continue
+            cap = sample_cap(c, depth, dt)
             k = cap / cell[0] if cap and cell[0] > cap else 1.0
             cov += cell[0] * k
             hit += cell[1] * k

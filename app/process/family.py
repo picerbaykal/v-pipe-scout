@@ -151,6 +151,9 @@ def family_rows(findings: dict, scan_res_all: dict, cr_all: dict,
             q = chk.get("quality") or {}
             dates = ({d for d, v in q.items() if well_covered(v)}
                      if chk.get("basis") == "well" else None)
+            # the same weights as the ★ check's vote (2026-10-16)
+            depth = ({d: float((v or {}).get("median", 0) or 0) for d, v in q.items()}
+                     if chk.get("basis") == "weighted" and q else None)
             parts = []
             for d in ds:
                 below.add(d)
@@ -158,8 +161,8 @@ def family_rows(findings: dict, scan_res_all: dict, cr_all: dict,
                 dd = dd or {}
                 dm = kept_markers(dd.get("markers") or [], d, ball, sigs, has_reads)
                 xm = kept_markers(xd.get("markers") or [], d, ball, sigs, has_reads)
-                sd = lineage_share(dm, dd.get("per_date") or {}, dates)
-                sx = lineage_share(xm, xd.get("per_date") or {}, dates)
+                sd = lineage_share(dm, dd.get("per_date") or {}, dates, depth=depth)
+                sx = lineage_share(xm, xd.get("per_date") or {}, dates, depth=depth)
                 j = family_jaccard(sx, sd)
                 parts.append((d, j, None if j is None else
                               f"{100 * sd:.0f} % ÷ {100 * sx:.0f} %"))
