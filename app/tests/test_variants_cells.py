@@ -196,6 +196,41 @@ def test_table_has_an_overview_column_and_folds_unsupported_suggestions():
     assert html.count("class='nm'") == 2                       # PJ.2.1 has no row
 
 
+# ── the details' words (2026-10-20) ──────────────────────────────────────
+def test_share_is_said_on_the_counted_reads():
+    # XFG 4214C in Chur: 44.1 % computed on 65 counted reads, 142,546 in total
+    x = {"marker": "4214C", "cov": 65, "cov_raw": 142546, "freq": 0.441, "status": "unmeasured",
+         "why": "under 100 reads after weighting by coverage", "link": None, "link_n": 0}
+    assert vt._share_text(x) == "44.1 % of 65 counted reads (142,546 in total)"
+    assert vt._answer_text(x) == "couldn't answer: 65 counted reads, needs 100"
+    y = {"cov": 25620, "cov_raw": 25620, "freq": 0.0, "status": "absent", "why": "absent"}
+    assert vt._share_text(y) == "0.0 % of 25,620 reads"
+    assert vt._answer_text(y) == "not seen (< 1 %)"
+
+
+def test_answer_reasons_in_numbers():
+    base = {"cov": 500, "cov_raw": 500, "status": "unmeasured", "why": ""}
+    assert vt._answer_text(dict(base, freq=0.02)) == "couldn't answer: between 1 and 5 %"
+    assert vt._answer_text(dict(base, freq=0.3, link_n=8)) == (
+        "couldn't answer: only 8 of its reads reach a neighbour, needs 20")
+    assert vt._answer_text(dict(base, freq=0.3, link_n=50, link=0.6)) == (
+        "couldn't answer: its reads look like the lineage nearby on 60 %, needs 80 %")
+    assert vt._answer_text(dict(base, status="present", freq=0.3)) == "seen (≥ 5 %)"
+
+
+def test_reads_together_and_city_line():
+    assert vt._together_text({"link": 0.96, "link_n": 1240}) == "96 % of 1,240 reads"
+    assert vt._together_text({"link": None, "link_n": 0, "why": "present (no neighbour in reach: share only)"}) == "no neighbour in reach"
+    d = _d(2, 2, 2, n_samples=9, n_well=4)
+    d["timeline"] = [["2026-08-28", "present"]]
+    assert vt._city_line(d) == "2:0 · 9 samples, 4 well covered · seen on 1 alone, last 28 Aug"
+
+
+def test_the_page_says_panel_not_your_list():
+    for text in (vt.SHORT_LEGEND, vt.legend_full_html()):
+        assert "your list" not in text
+
+
 def test_legends_describe_the_new_cells():
     for text in (vt.SHORT_LEGEND, vt.legend_full_html()):
         assert "light = weak" not in text

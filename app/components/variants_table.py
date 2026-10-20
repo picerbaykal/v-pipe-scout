@@ -96,7 +96,8 @@ CSS = """
 .vt tr.dt td { height:auto; padding:8px 12px 10px; background:#f8fafc; white-space:normal;
                font-size:13px; line-height:1.55; border-left:3px solid #e2e8f0; }
 .vt .dl { display:flex; align-items:center; gap:10px; margin:2px 0; }
-.vt .dl b { min-width:84px; font-weight:600; }
+.vt .dl b, .vt .dl .dn { min-width:84px; }
+.vt .dl b { font-weight:600; }
 .vt .gap { color:#9ca3af; font-size:11px; margin:0 3px; }
 .vt table.mk { border-collapse:collapse; margin-top:6px; }
 .vt table.mk td, .vt table.mk th { height:auto; padding:1px 14px 1px 0; border:0; font-size:12.5px;
@@ -503,6 +504,72 @@ def _clin_link(muts):
     return COVSPECTRUM_MUTS.format(muts=quote_plus(",".join(muts)))
 
 
+# ── the details' words (2026-10-20): numbers in plain words ──────────────
+def _check_cfg_safe():
+    try:
+        from process.cooc import _check_cfg
+        return _check_cfg()
+    except Exception:
+        from process.cooc import CHECK_DEFAULTS
+        return dict(CHECK_DEFAULTS)
+
+
+def _city_line(d):
+    """'2:0 · 9 samples, 4 well covered · seen on 1 alone, 28 Aug'"""
+    parts = [_counts_label(d)]
+    n, k = d.get("n_samples"), d.get("n_well")
+    if n:
+        parts.append(f"{n} {_pl(n, 'sample')}" + (f", {k} well covered" if k is not None else ""))
+    clear = _clear_samples(d) or []
+    if clear:
+        parts.append(f"seen on {len(clear)} alone, last {_short_date(clear[-1])}")
+    return " · ".join(parts)
+
+
+def _share_text(x):
+    """'44.1 % of 65 counted reads (142,546 in total)' — the share is computed
+    on the counted reads; until 2026-10-20 it was printed next to the total."""
+    cov, raw, f = x.get("cov", 0) or 0, x.get("cov_raw", x.get("cov", 0)) or 0, x.get("freq")
+    if not raw or f is None:
+        return "no reads"
+    if cov < raw:
+        return f"{100 * f:.1f} % of {cov:,} counted reads ({raw:,} in total)"
+    return f"{100 * f:.1f} % of {raw:,} reads"
+
+
+def _answer_text(x):
+    """seen / not seen / couldn't answer, with the reason in numbers."""
+    c = _check_cfg_safe()
+    st, why, f = x.get("status"), x.get("why") or "", x.get("freq")
+    pf, af = c["present_freq"] * 100, c["absent_freq"] * 100
+    cov, ln = x.get("cov", 0) or 0, x.get("link_n", 0) or 0
+    if st == "present":
+        return (f"seen (≥ {pf:g} %), on its share alone: no neighbour in reach"
+                if "share only" in why else f"seen (≥ {pf:g} %)")
+    if st == "absent":
+        return f"not seen (< {af:g} %)"
+    if not cov:
+        return "couldn't answer: no reads"
+    if cov < c["min_cov"]:
+        return f"couldn't answer: {cov:,} counted reads, needs {c['min_cov']}"
+    if f is not None and f < c["present_freq"]:
+        return f"couldn't answer: between {af:g} and {pf:g} %"
+    if ln < c["min_link"]:
+        return f"couldn't answer: only {ln} of its reads reach a neighbour, needs {c['min_link']}"
+    link = x.get("link")
+    return (f"couldn't answer: its reads look like the lineage nearby on "
+            f"{100 * (link or 0):.0f} %, needs {c['link_min'] * 100:g} %")
+
+
+def _together_text(x):
+    """'96 % of 1,240 reads' — the co-occurrence at the mutation's neighbours."""
+    if x.get("link") is not None and x.get("link_n"):
+        return f"{100 * x['link']:.0f} % of {x['link_n']:,} reads"
+    if "share only" in (x.get("why") or ""):
+        return "no neighbour in reach"
+    return "–"
+
+
 def _detail_row(gid, v, per_city, cities, sel, n_cols, found=False):
     """The row's details (hidden until 'details ▸'): one calendar line per
     city, the markers with their real reads in the selected city, and their
@@ -513,8 +580,12 @@ def _detail_row(gid, v, per_city, cities, sel, n_cols, found=False):
         d = per_city.get(c)
         if not d or not d.get("timeline"):
             continue
-        lines.append(f"<div class='dl'><b>{_e(city_name(c))}</b>{_cal_line(d, top, low)}"
-                     f"<span class='dim'>{_e(_summary(d))}</span></div>")
+        # short numbers instead of a sentence (2026-10-20); the clicked city bold
+        nm = (f"<b class='dn'>{_e(city_name(c))}</b>" if c == sel
+              else f"<span class='dn'>{_e(city_name(c))}</span>")
+        sty = " style='color:#31333f;font-weight:600'" if c == sel else ""
+        txt = f"<span class='dim'{sty}>{_e(_city_line(d))}</span>"
+        lines.append(f"<div class='dl'>{nm}{_cal_line(d, top, low)}{txt}</div>")
     ds = per_city.get(sel) or {}
     mk_rows = []
     import statistics
@@ -523,24 +594,42 @@ def _detail_row(gid, v, per_city, cities, sel, n_cols, found=False):
         shares = [y.get("freq") for dd in per_city.values() for y in (dd.get("detail") or [])
                   if y.get("marker") == m and y.get("freq") is not None]
         med = f"{100 * statistics.median(shares):.0f} %" if shares else "–"
-        reads = x.get("cov_raw", x.get("cov", 0)) or 0
-        share = f"{100 * x['freq']:.1f} % of {reads:,} reads" if x.get("freq") is not None and reads else "no reads"
-        mk_rows.append(f"<tr><td class='mono'>{_ext(_clin_link([m]), m, 'which lineages carry it in clinical sequences (CoV-Spectrum)')}</td><td>{_e(share)}</td>"
-                       f"<td>{_e(x.get('why') or '')}</td><td>{med}</td></tr>")
+        mk_rows.append(f"<tr><td class='mono'>{_ext(_clin_link([m]), m, 'which lineages carry it in clinical sequences (CoV-Spectrum)')}</td>"
+                       f"<td>{_e(_share_text(x))}</td><td>{_e(_answer_text(x))}</td>"
+                       f"<td>{_e(_together_text(x))}</td><td>{med}</td></tr>")
     mk = ""
     if mk_rows:
-        basis = {"well": "well-covered samples",
-                 "weighted": "all samples, weighted by coverage"}.get(ds.get("basis"), "all samples")
-        mk = (f"<table class='mk'><tr><th>★ marker</th><th>{_e(city_name(sel))}, {basis}</th>"
-              "<th></th><th>median share, all cities</th></tr>" + "".join(mk_rows) + "</table>")
+        c = _check_cfg_safe()
+        th = lambda t, tip: f"<th data-tip='{_e(tip)}'>{_e(t)}</th>"          # noqa: E731
+        mk = ("<table class='mk'><tr>"
+              + th("its own mutation", "a mutation of this lineage that few other lineages carry "
+                   "(at most 5 outside its family); click for which lineages carry it in "
+                   "clinical sequences")
+              + th(f"{city_name(sel)}: share of reads",
+                   "share of the reads at this position that carry the mutation, all samples "
+                   f"of the dates counted, each at most {c['cov_factor']:g} × its median depth "
+                   f"and at most {c['cap_reads']:,} reads; the total in brackets when that cut "
+                   "reads")
+              + th("answer", f"seen: ≥ {c['present_freq'] * 100:g} % (and its reads look like "
+                   f"the lineage nearby) · not seen: < {c['absent_freq'] * 100:g} % · couldn't "
+                   f"answer: under {c['min_cov']} counted reads, between "
+                   f"{c['absent_freq'] * 100:g} and {c['present_freq'] * 100:g} %, or reads that "
+                   "don't look like the lineage nearby")
+              + th("reads together", "of the reads carrying the mutation that also reach a "
+                   "neighbouring position where the lineage has its own mutation: the share "
+                   f"that carry the lineage's version there too (needs ≥ {c['link_min'] * 100:g} % "
+                   f"of ≥ {c['min_link']} reads)")
+              + th("typical share, 6 cities", "the middle value of this mutation's share over "
+                   "the six cities: high or low everywhere means it's the mutation, not the city")
+              + "</tr>" + "".join(mk_rows) + "</table>")
     body = ("<div class='dim' style='font-size:12px'>Samples per city, newest right · striped = "
-            "low coverage (counts less in the vote) · ⋯ = older "
+            "low coverage (counts less) · green = seen on that sample alone · ⋯ = older "
             "low-coverage samples without it, not shown</div>" + "".join(lines) + mk
             + "<div style='font-size:12.5px;margin-top:6px'>"
             + _ext(_ww_link(v, sel), f"{v} in {city_name(sel)} wastewater (GenSpectrum)",
                    "mutation heatmaps of the lineage and its sublineages")
             + ((" · " + _ext(_clin_link([x['marker'] for x in ds.get('detail') or []]),
-                             "its ★ markers together in clinical data (CoV-Spectrum)",
+                             "its own mutations together in clinical data (CoV-Spectrum)",
                              "sequences carrying all of them: which lineages"))
                if ds.get("detail") else "")
             + "<span class='dim'> · each mutation per week: Signal over time (Look-up)</span></div>")
@@ -552,7 +641,7 @@ def _panel_cells(v, per_city, cities, sel):
     if res and all(_vote_counts(d)[0] == 0 for d in res):
         # no ★ marker: the same in every city, so said once (2026-10-20)
         return (f"<td class='nomk' colspan='{len(cities)}'>no mutation of its own — all are "
-                "shared with other lineages on your list</td>")
+                "shared with other lineages in the panel</td>")
     out = []
     for c in cities:
         d = per_city.get(c)
@@ -851,14 +940,14 @@ def _ovb(text, style="color:#4b5563;"):
 def _panel_overview(per_city, cities):
     res = [per_city[c] for c in cities if per_city.get(c)]
     if not res:
-        return (_ovb("<b>On your list</b> · no result"), "", GREY, "#6b7280", "dashed")
+        return (_ovb("<b>In panel</b> · no result"), "", GREY, "#6b7280", "dashed")
     if all(_vote_counts(x)[0] == 0 for x in res):
-        return (_ovb("<b>On your list</b> · can't be checked", "color:#6b7280;"),
-                "no mutation of its own: all its mutations are shared with other lineages on "
-                "your list, so its share in Deconvolution can't be checked here",
+        return (_ovb("<b>In panel</b> · can't be checked", "color:#6b7280;"),
+                "no mutation of its own: all its mutations are shared with other lineages in "
+                "the panel, so its share in Deconvolution can't be checked here",
                 GREY, "#6b7280", "filled")
     if _panel_warn(per_city, True):
-        return (_ovb("<b>On your list</b> · not seen in any city",
+        return (_ovb("<b>In panel</b> · not seen in any city",
                      f"background:#fffbeb;color:{AMBER_T};"),
                 _panel_warn(per_city, True).replace("<b style='color:" + AMBER_T + "'>", "")
                 .replace("</b>", "").rstrip(" ·"),
@@ -866,7 +955,7 @@ def _panel_overview(per_city, cities):
     meas = [c for c in cities if per_city.get(c) and _vote_counts(per_city[c])[0]]
     seen = [c for c in meas if _state(per_city[c]) == "present"]
     where = f" ({', '.join(city_code(c) for c in seen)})" if 0 < len(seen) <= 3 else ""
-    return (_ovb(f"<b style='color:#1f2328'>On your list</b> · seen in {len(seen)} of "
+    return (_ovb(f"<b style='color:#1f2328'>In panel</b> · seen in {len(seen)} of "
                  f"{len(meas)}{where}"),
             "", GREEN if seen else "#d1d5db", "#15803d" if seen else "#6b7280", "filled")
 
@@ -933,13 +1022,13 @@ def _finding_overview(v, f, cities, current_panel, has_children=False):
                else f"<button class='add' data-add='{_e(v)}'>+ Add</button>")
         return (kind, _ovb(f"<b>New</b> · seen in {', '.join(city_code(c) for c in seen)}{btn}",
                            "background:#fef2f2;color:#b91c1c;"),
-                "suggested by the reads and seen through its own mutations; not on your list",
+                "suggested by the reads and seen through its own mutations; not in the panel",
                 RED, RED, "filled")
     if kind == "folded":
         return (kind, "", "", GREY, "#9ca3af", "ring")
     return (kind, _ovb(f"<b style='color:#1f2328'>Possible</b> · {_e(why)}",
                        "color:#4b5563;box-shadow:inset 0 0 0 1px #e5e7eb;"),
-            "suggested by the reads, not on your list; its own mutations only partly confirm it",
+            "suggested by the reads, not in the panel; its own mutations only partly confirm it",
             "#9ca3af", "#4b5563", "ring")
 
 
@@ -1342,10 +1431,10 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
         if kind in ("panel", "panel_ot"):
             pc = {c: verdicts[c][v] for c in cities if v in verdicts.get(c, {})}
             # the dot, the name and the overview follow all cities, not the
-            # selected one (2026-10-20); amber only for "on your list, not
+            # selected one (2026-10-20); amber only for "in panel, not
             # seen in any city"
             ov, ovtip, dcol, ncol, dk = _panel_overview(pc, cities)
-            tip = f"{v}: on your list" + (f" · {ovtip}" if ovtip else "")
+            tip = f"{v}: in the panel" + (f" · {ovtip}" if ovtip else "")
             name = f"<span class='nm' style='color:{ncol}'>{_e(v)}</span>{chips}"
             tc = _tree_cell(r, dcol, dk, name, tip)
             tint = None                     # no row tint (2026-10-20)
@@ -1366,7 +1455,7 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
                 folded.append(v)
                 continue
             fam_desc = f.get("descendants") or []
-            tip = f"{v}: suggested by the reads, not on your list" + (f" · {ovtip}" if ovtip else "")
+            tip = f"{v}: suggested by the reads, not in the panel" + (f" · {ovtip}" if ovtip else "")
             name = f"<span class='nm' style='color:{ncol}'>{_e(v)}</span>{chips}"
             tc = _tree_cell(r, col, dk, name, tip)
             tint = None                     # no row tint (2026-10-20)
@@ -1403,7 +1492,7 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
         else:  # tracked, not selected
             name = f"<span style='color:{TRACKED}'>{_e(v)}</span>{chips}"
             tc = _tree_cell(r, TRACKED, "ring", name, f"{v}: officially tracked, not in your panel")
-            ov = _ovb("officially tracked · not on your list, not in the run", "color:#8b8f97;")
+            ov = _ovb("officially tracked · not in the panel, not in the run", "color:#8b8f97;")
             tint, cells, ev = None, f"<td colspan='{n_c}'></td>", ""
             drow, dgid = "", ""
         bg = f" style='background:{tint}{'22' if kind in ('panel', 'panel_ot') else '14'}'" if tint else ""
@@ -1599,8 +1688,8 @@ _LEGEND_ROWS = (
     + _li(S_BROAD, "2", "fits too many lineages · days")
     + _li(S_NEAR, "3", "◆ panel variant ± 1 change · days (a hint)")
     + "</div><div class='row'><span class='t'>Tree</span>"
-    + _ld(f"background:{GREEN}", "on your list, seen somewhere")
-    + _ld(f"background:{AMBER}", "on your list, not seen in any city")
+    + _ld(f"background:{GREEN}", "in panel, seen somewhere")
+    + _ld(f"background:{AMBER}", "in panel, not seen in any city")
     + _ld(f"background:{RED}", "new: suggested by the reads and seen (+ Add)")
     + _ld("border:2px solid #9ca3af", "possible: suggested, only partly seen")
     + _ld("border:2px solid #d1d5db", "covered: its own mutations are on a lineage below it")
@@ -1622,8 +1711,8 @@ SHORT_LEGEND = (
     + "undecided</span>"
     + "<span class='i'><span class='cal'><i style='background:" + GREEN + ";" + _LOWQ
     + "'></i></span>low coverage</span>"
-    + _ld(f"background:{GREEN}", "on your list")
-    + _ld(f"background:{AMBER}", "on your list, not seen in any city")
+    + _ld(f"background:{GREEN}", "in panel")
+    + _ld(f"background:{AMBER}", "in panel, not seen in any city")
     + _ld(f"background:{RED}", "new: suggested by the reads")
     + _ld("border:2px solid #9ca3af", "possible / covered")
     + "<span class='dim'>click a cell for its details · ⓘ more: “How to read this page” above the tabs</span>"

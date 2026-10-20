@@ -183,8 +183,8 @@ def _render_composition(cooc_result: dict, scanner_result: dict, key: str = "",
         # tree (was #0F6E56); grey stays "not explained" — it holds everything
         # else (too broad to name, new combinations, errors), not the tree's
         # unassigned patterns, which sit at positions this graph doesn't read
-        ("explained by your list", "explained_pct", "#16a34a", "rgba(22,163,74,0.85)"),
-        ("your list ± 1 change", "near_pct", "#4ade80", "rgba(134,239,172,0.85)"),
+        ("explained by the panel", "explained_pct", "#16a34a", "rgba(22,163,74,0.85)"),
+        ("panel ± 1 change", "near_pct", "#4ade80", "rgba(134,239,172,0.85)"),
         ("new lineage suggested by the reads", "addable_pct", "#dc2626", "rgba(220,38,38,0.55)"),
         ("not explained", "noise_pct", "#9ca3af", "rgba(156,163,175,0.40)"),
     ]
@@ -1986,8 +1986,8 @@ def app():
                           for l, d in sorted(_until_short.items()))
                           + f" — the window runs to {_dshort(_win_end)}; later dates have "
                           "no samples yet.")
-                  st.caption("How much of each city's reads the lineages on your list "
-                             "explain (green) vs the rest. Light green = a lineage on your list "
+                  st.caption("How much of each city's reads the lineages in the panel "
+                             "explain (green) vs the rest. Light green = a panel lineage "
                              "with one change (hover for which) · red = a new lineage the reads "
                              "suggest · grey = not explained (too broad to name, new "
                              "combinations, errors).")
@@ -1996,8 +1996,8 @@ def app():
                   # are identical. (Previously the legend went on the first plot
                   # only and ate into its fixed height, making it shorter.)
                   _comp_leg = [
-                      ("#16a34a", "explained by your list"),
-                      ("#4ade80", "your list ± 1 change"),
+                      ("#16a34a", "explained by the panel"),
+                      ("#4ade80", "panel ± 1 change"),
                       ("#dc2626", "new lineage suggested by the reads"),
                       ("#9ca3af", "not explained"),
                   ]
@@ -2281,7 +2281,7 @@ def app():
                     st.markdown("### Variants")
                     st.caption("Evidence from reads only, one column per city. The overview "
                                "covers all cities; click a city cell for its details. Hover "
-                               "anything for more; + Add puts a lineage on your list — "
+                               "anything for more; + Add puts a lineage in your panel — "
                                "re-run to apply.")
                     # the chosen city (click a city code in the table header)
                     if st.session_state.get("acooc_tree_city") not in _ready_locs:
