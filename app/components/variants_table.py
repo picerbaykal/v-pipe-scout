@@ -43,13 +43,14 @@ CSS = """
 .vt { border-collapse:collapse; font-size:15px; width:100%; }
 .vt th { text-align:left; font-size:12px; letter-spacing:.03em; text-transform:uppercase; color:#6b7280;
          font-weight:600; padding:0 8px 6px; border-bottom:1px solid #e6e8ec; white-space:nowrap; }
-.vt th.cc { width:34px; padding:0 2px 6px; text-align:center; letter-spacing:0; }
+.vt th.cc { width:56px; padding:0 2px 6px; text-align:center; letter-spacing:0; }
 .vt th.cc button { font:inherit; font-size:12px; font-weight:700; color:#6b7280; background:none; border:0;
                    border-radius:5px; padding:2px 5px; cursor:pointer; }
 .vt th.cc button:hover { background:#eef0f3; color:#31333f; }
 .vt th.cc.sel button { background:#31333f; color:#fff; }
 .vt td { padding:0 8px; height:34px; border-bottom:1px solid #eef0f2; white-space:nowrap; vertical-align:middle; }
-.vt td.cc { padding:0 2px; width:34px; text-align:center; cursor:pointer; }
+.vt td.cc { padding:0 2px; width:56px; text-align:center; cursor:pointer; }
+.vt td.nomk { color:#8b8f97; font-size:13px; padding-left:8px; }
 .vt td.cc .c { cursor:pointer; }
 .vt td.cc:not(.sel):hover { background:rgba(49,51,63,.04); }
 .vt td.cc.sel { background:rgba(49,51,63,.07); }
@@ -79,8 +80,9 @@ CSS = """
            vertical-align:1px; }
 .vt .add:hover { background:#dc2626; color:#fff; }
 .vt .added { font-size:12.5px; margin-left:9px; color:#6b7280; }
-.vt .c { display:inline-flex; align-items:center; justify-content:center; min-width:28px; padding:0 3px; height:22px;
-         border-radius:5px; font-size:13px; font-weight:700; box-sizing:border-box; color:#c4c7cd; cursor:default; }
+.vt .c { display:inline-flex; align-items:center; justify-content:center; min-width:40px; padding:0 4px; height:22px;
+         border-radius:5px; font-size:12.5px; font-weight:700; box-sizing:border-box; color:#c4c7cd; cursor:default;
+         white-space:nowrap; }
 .vt td.ev { white-space:normal; line-height:1.3; padding-left:12px; font-size:14.5px; }
 .vt .dim { color:#8b8f97; }
 .vt .tr-a { font-size:11px; margin-left:2px; }
@@ -198,6 +200,21 @@ def _pl(n, word):
 # Present in the sum, but clearly present in fewer than evidence.min_days
 # samples on their own (2026-10-09): a light fill with a thin solid edge of
 # the same hue (XFZ in Lugano: 2/2 from one sample, 24 Aug).
+# (2026-10-20) The cell shows the check's answer only, in three colours, and
+# its label counts every marker: "2✓ 1~ 1✗" (present · no vote · absent), so
+# no marker drops out of view (the old "1/1" for XFG in Lugano hid 4214C, in
+# between). Whether the lineage is in your panel is said once in the row
+# ("in your panel · absent in 6 of 6 cities"), not by the cell's colour; the
+# light shades are gone (their two meanings go into the hover in words).
+#   S_YES   present                     green
+#   S_NO    absent                      grey
+#   S_OPEN  tie, or not called (fewer   white, dashed amber edge
+#           than min_present present),
+#           or nothing decided
+S_YES = _fill(GREEN, "#fff")
+S_NO = _fill("#f3f4f6", "#4b5563") + "box-shadow:inset 0 0 0 1px #d1d5db;"
+S_OPEN = f"background:#fff;color:{AMBER_T};box-shadow:inset 0 0 0 1.5px {AMBER};"
+# kept for the legend of older pieces and the deep scan's own cells
 S_PRESENT_LIGHT = "background:#fff;color:#14532d;box-shadow:inset 0 0 0 1.5px #16a34a;"
 S_NOTFOUND_LIGHT = "background:#fff;color:#78350f;box-shadow:inset 0 0 0 1.5px #f59e0b;"
 S_FOUND_LIGHT = "background:#fff;color:#7f1d1d;box-shadow:inset 0 0 0 1.5px #dc2626;"
@@ -264,32 +281,41 @@ def _clear_note(d):
             "single samples were too thin, mixed or absent")
 
 
+def _counts_label(d):
+    """'2✓ 1~ 1✗': markers present · no vote (between 1 and 5 %, too few
+    reads, or reads unlike the lineage) · absent; zeros left out."""
+    n_mk, p, a, u = _vote_counts(d)
+    parts = [f"{n}{s}" for n, s in ((p, "✓"), (u, "~"), (a, "✗")) if n]
+    return " ".join(parts) or "–"
+
+
 def _scale(d, found=False):
     """(cell style, label, dot colour, name colour, share present or None)
-    for one city's check result. found: a lineage not in the panel."""
+    for one city's check result. found: a lineage not in the panel.
+    The cell (style, label) shows the answer only (2026-10-20); the dot and
+    name colours of the tree are unchanged."""
     n_mk, p, a, u = _vote_counts(d)
     if n_mk == 0:
         return S_NOMARK, "·", GREY, "#6b7280", None
+    lab = _counts_label(d)
     m = p + a
     if m == 0:
-        return S_NODATA, "?", GREY, "#6b7280", None
+        return S_OPEN, lab, GREY, "#6b7280", None
     share, st = p / m, _state(d)
     weak = d.get("basis") == "all"          # no well-covered sample decided it
     if st == "present":
         col = RED if found else GREEN
         if weak or _few_clear(d):
-            return ((S_FOUND_LIGHT if found else S_PRESENT_LIGHT), f"{p}/{m}",
-                    ("#fca5a5" if found else "#86efac"), (RED if found else "#15803d"), share)
-        return _fill(col, "#fff"), f"{p}/{m}", col, (RED if found else "#15803d"), share
+            return (S_YES, lab, ("#fca5a5" if found else "#86efac"),
+                    (RED if found else "#15803d"), share)
+        return S_YES, lab, col, (RED if found else "#15803d"), share
     if st == "absent" and not found:
-        if weak:
-            return S_NOTFOUND_LIGHT, f"{p}/{m}", "#fcd9a3", AMBER_T, share
-        return S_NOTFOUND, f"{p}/{m}", AMBER, AMBER_T, share
+        return S_NO, lab, ("#fcd9a3" if weak else AMBER), AMBER_T, share
     if st == "absent":
-        return S_PALE, f"{p}/{m}", PALE_BG, RED, share
+        return S_NO, lab, PALE_BG, RED, share
     if st == "few":
-        return S_FEW, f"{p}/{m}", PALE_BG, (RED if found else "#6b7280"), share
-    return S_MIXED, f"{p}/{m}", MIXED_BG, (RED if found else "#4b5563"), share
+        return S_OPEN, lab, PALE_BG, (RED if found else "#6b7280"), share
+    return S_OPEN, lab, MIXED_BG, (RED if found else "#4b5563"), share
 
 
 def _basis_samples(d):
@@ -383,7 +409,9 @@ def _cell_tip(v, city, d, extra=""):
     if _state(d) == "few":
         base += f" · only {p} ★ measured, {_min_present()} needed"
     ms = _marker_syms(d)
-    return (f"{v} · {city} — {word} ({counts}) · {base}"
+    # what the light shades said until 2026-10-20 is in words: "weak: no
+    # coverage data" in base, and on how few samples it was clear
+    return (f"{v} · {city} — {word} ({counts}) · {base}" + _clear_note(d)
             + (f" · {ms}" if ms else "") + extra)
 
 
@@ -507,6 +535,11 @@ def _detail_row(gid, v, per_city, cities, sel, n_cols, found=False):
 
 
 def _panel_cells(v, per_city, cities, sel):
+    res = [d for d in per_city.values() if d]
+    if res and all(_vote_counts(d)[0] == 0 for d in res):
+        # no ★ marker: the same in every city, so said once (2026-10-20)
+        return (f"<td class='nomk' colspan='{len(cities)}'>no ★ marker — its mutations are "
+                "all shared with other lineages, reads can't point to it on its own</td>")
     out = []
     for c in cities:
         d = per_city.get(c)
@@ -778,7 +811,24 @@ def _star_phrase(tl):
     return "★ markers: " + _cal_phrase(tl)
 
 
-def _panel_evidence(per_city, sel, v="", gid=""):
+def _panel_warn(per_city, in_panel):
+    """'in your panel · present in none of 6 cities: absent in 4, not called
+    in 2 · ' for a lineage of the panel that no city calls present — the same
+    whichever city is selected (2026-10-20: the warning the orange cells
+    gave, now said once, with the counts)."""
+    if not in_panel:
+        return ""
+    res = [x for x in per_city.values() if x and _vote_counts(x)[0]]
+    if not res or any(_state(x) == "present" for x in res):
+        return ""
+    n_abs = sum(1 for x in res if _state(x) == "absent")
+    rest = len(res) - n_abs
+    parts = ([f"absent in {n_abs}"] if n_abs else []) + ([f"not called in {rest}"] if rest else [])
+    return (f"<b style='color:{AMBER_T}'>in your panel</b> · present in none of {len(res)} "
+            f"{_pl(len(res), 'city')}: {', '.join(parts)} · ")
+
+
+def _panel_evidence(per_city, sel, v="", gid="", in_panel=False):
     """One line for the selected city (2026-10-13: the per-sample squares
     moved into the row's details)."""
     d = per_city.get(sel)
@@ -786,9 +836,10 @@ def _panel_evidence(per_city, sel, v="", gid=""):
         return "<span class='dim'>no result in this city</span>"
     n_mk, p, a, u = _vote_counts(d)
     if n_mk == 0:
-        return f"<span class='dim'>{_vote_text(d)}</span>"
+        return ""                     # said once across the city cells (2026-10-20)
     tip = _cell_tip(v, city_name(sel), d)
-    return (f"<span data-tip='{_e(tip)}'>{_e(_summary(d))}</span>"
+    return (_panel_warn(per_city, in_panel)
+            + f"<span data-tip='{_e(tip)}'>{_e(_summary(d))}</span>"
             + (_det_link(gid) if gid and d.get("timeline") else ""))
 
 
@@ -1140,19 +1191,15 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
                 "(median depth and share of the genome at ≥ 100 reads); the others have low "
                 "coverage, typical when little virus is in the water")
 
-    def _qsub(c):
-        if c not in quality:
-            return ""
-        k, n = quality[c]
-        return (f"<span style='display:block;font-size:10px;font-weight:400;"
-                f"letter-spacing:0'>{k}/{n}</span>")
+    # (2026-10-20) no "k/n" under the city code any more: it read like a vote;
+    # the samples well covered are in the code's hover and the Evidence header
     head = ("<tr><th>Variant</th>"
             + "".join(f"<th class='cc{' sel' if c == sel else ''}'><button data-city='{_e(c)}' "
                       f"data-tip='{_e(city_name(c))}"
                       + (f" · data until {_e(data_until[c])}" if c in data_until else "")
                       + _e(_qtip(c))
                       + f" — click to colour the tree by this city'>"
-                      f"{_e(city_code(c))}{_qsub(c)}</button></th>" for c in cities)
+                      f"{_e(city_code(c))}</button></th>" for c in cities)
             + f"<th style='padding-left:12px'>Evidence · {_e(city_name(sel))}"
             + (f" <span style='font-weight:400;text-transform:none;letter-spacing:0'>· data until "
                f"{_e(data_until[sel])}</span>" if sel in data_until else "")
@@ -1185,9 +1232,12 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
             name = f"<span class='nm' style='color:{ncol}'>{_e(v)}</span>{chips}"
             no_meas = share is None and dsel.get("n_markers", 0) > 0
             tc = _tree_cell(r, dcol, "dashed" if (no_meas or not dsel) else "filled", name, tip)
-            tint = _panel_tint(pc, sel)
+            # no row tint (2026-10-20): the cells carry the answer; a whole row
+            # in the selected city's colour was noise
+            tint = None
             dgid = "det-" + re.sub(r"[^A-Za-z0-9]", "_", v)
-            cells, ev = _panel_cells(v, pc, cities, sel), _panel_evidence(pc, sel, v, dgid)
+            cells = _panel_cells(v, pc, cities, sel)
+            ev = _panel_evidence(pc, sel, v, dgid, in_panel=True)
             drow = (_detail_row(dgid, v, pc, cities, sel, n_cols)
                     if any((x or {}).get("timeline") for x in pc.values()) else "")
         elif kind == "finding" and v in findings:
@@ -1215,7 +1265,7 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
                        else f"<button class='add' data-add='{_e(v)}'>+ Add</button>")
             name = (f"<span class='nm' style='color:{col}'>{_e(v)}</span>{chips}{btn}")
             tc = _tree_cell(r, col, dk, name, tip)
-            tint = RED if f.get("status") == "confirmed" else None
+            tint = None                     # no row tint (2026-10-20)
             dgid = "det-" + re.sub(r"[^A-Za-z0-9]", "_", v)
             _chk = {c: p_["check"] for c, p_ in (f.get("per_city") or {}).items()
                     if (p_ or {}).get("check")}
@@ -1405,25 +1455,20 @@ def _lc(d, found=False, extra=""):
 _LEGEND_ROWS = (
     ""
     "<div class='row'><span class='t'>★ check</span>"
-    "<span class='i'>markers present / covered — in your panel:"
-    + _lc({"n_markers": 4, "n_measured": 4, "n_present": 4}) + "present"
-    + _lc({"n_markers": 5, "n_measured": 5, "n_present": 2}) + "mixed"
-    + _lc({"n_markers": 4, "n_measured": 4, "n_present": 0}) + "absent</span>"
-    + "<span class='i'>not in your panel:"
-    + _lc({"n_markers": 3, "n_measured": 3, "n_present": 3}, True) + "present"
-    + _lc({"n_markers": 3, "n_measured": 3, "n_present": 0}, True) + "absent</span>"
+    "<span class='i'>each cell counts the lineage's ★ markers: ✓ present (≥ "
+    + f"{_num()['pf']} %) · ~ no vote (between {_num()['af']} and {_num()['pf']} %, under "
+    + f"{_num()['mc']} reads, or reads unlike it) · ✗ absent (< {_num()['af']} %)</span>"
     + "<span class='i'>"
-    + _lc({"n_markers": 2, "n_measured": 2, "n_present": 2,
-           "timeline": [["2026-01-01", "present"]]})
-    + _lc({"n_markers": 4, "n_measured": 4, "n_present": 0, "basis": "all"})
-    + "light = weak evidence: no coverage data for this city, or clearly present in "
-    + f"fewer than {_num()['ed']} samples</span>"
-    + "<span class='i'>" + _lc({"n_markers": 3, "n_measured": 1, "n_present": 1})
-    + f"too few markers measured (present needs {_min_present()})</span>"
-    + _li(S_NOMARK, "·", "no ★ marker")
-    + _li(S_NODATA, "?", "too few reads")
-    + "<span class='i'>n/m under a city code = samples well covered · details ▸ = samples "
-      "per city and the markers' reads</span>"
+    + _lc({"n_markers": 4, "n_measured": 4, "n_present": 3}) + "present: more ✓ than ✗, "
+    + f"and at least {_min_present()} ✓</span>"
+    + "<span class='i'>" + _lc({"n_markers": 4, "n_measured": 4, "n_present": 0}) + "absent: more ✗ than ✓</span>"
+    + "<span class='i'>" + _lc({"n_markers": 2, "n_measured": 2, "n_present": 1})
+    + _lc({"n_markers": 2, "n_measured": 1, "n_present": 1})
+    + f"tie, or not called (fewer than {_min_present()} ✓)</span>"
+    + "<span class='i'><b style='color:" + AMBER_T + "'>in your panel</b> · present in none of … cities = "
+      "a lineage of your panel no city calls present</span>"
+    + "<span class='i'>a row with no ★ marker says so once, across the cities</span>"
+    + "<span class='i'>details ▸ = samples per city and the markers' reads</span>"
     + "<span class='i'>in hovers: ✓ present (≥ " + f"{_num()['pf']}" + " %) · ✗ absent (< "
     + f"{_num()['af']}" + " %) · ~ in between · ? too few reads (or too few linked reads) · ≠ on reads unlike it · "
       "▧ low-coverage sample</span>"
@@ -1447,13 +1492,11 @@ _LEGEND_ROWS = (
 # always in view, with the cell colours you need while reading the tree.
 SHORT_LEGEND = (
     "<div class='lg lgs'><div class='row'>"
-    + "<span class='i'>" + _lc({"n_markers": 2, "n_measured": 2, "n_present": 2})
-    + _lc({"n_markers": 3, "n_measured": 3, "n_present": 3}, True) + "present</span>"
-    + "<span class='i'>" + _lc({"n_markers": 2, "n_measured": 2, "n_present": 1}) + "mixed</span>"
-    + "<span class='i'>" + _lc({"n_markers": 2, "n_measured": 2, "n_present": 0})
-    + _lc({"n_markers": 2, "n_measured": 2, "n_present": 0}, True) + "absent</span>"
-    + "<span class='i'>" + _lc({"n_markers": 2, "n_measured": 2, "n_present": 2, "basis": "all"})
-    + "light = weak</span>"
+    + "<span class='i'>✓ present · ~ no vote · ✗ absent (markers)</span>"
+    + "<span class='i'>" + _lc({"n_markers": 3, "n_measured": 3, "n_present": 3}) + "present</span>"
+    + "<span class='i'>" + _lc({"n_markers": 2, "n_measured": 2, "n_present": 0}) + "absent</span>"
+    + "<span class='i'>" + _lc({"n_markers": 2, "n_measured": 1, "n_present": 1})
+    + "tie or not called</span>"
     + "<span class='i'><span class='cal'><i style='background:" + GREEN + ";" + _LOWQ
     + "'></i></span>low coverage</span>"
     + _ld(f"background:{RED}", "found (not in panel)")
