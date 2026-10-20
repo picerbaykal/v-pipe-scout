@@ -143,19 +143,58 @@ def test_one_marker_of_an_unrelated_lineage_does_not_make_it_present():
     # LP.8 case: 1954A high (another lineage carries it), its other markers at 0
     pd_ = {"d1": _cells(**{"1954A": (500, 200), "100T": (500, 0), "200C": (500, 0)})}
     out = check_verdicts(["1954A", "100T", "200C"], pd_, CFG)
-    assert out["verdict"] == "mixed"          # 1 of 3: not present, not absent
+    # 1 present, 2 absent: the majority says absent (until 20 Oct "mixed")
+    assert out["verdict"] == "absent"
+
+
+# ── the vote is a simple majority of the measured markers (2026-10-20) ──
+def _vote(n_present, n_absent):
+    cells = {}
+    for i in range(n_present):
+        cells[f"{1000 + i}A"] = (500, 100)        # 20 %: present
+    for i in range(n_absent):
+        cells[f"{2000 + i}A"] = (500, 0)          # 0 %: absent
+    return check_verdicts(sorted(cells), {"d1": _cells(**cells)}, CFG)["verdict"]
+
+
+def test_majority_present():
+    # TA.1-like: 4 of 6 present was "mixed" under 75 %, now present
+    assert _vote(4, 2) == "present"
+    assert _vote(2, 1) == "present"
+
+
+def test_majority_absent():
+    assert _vote(2, 3) == "absent"
+    assert _vote(0, 2) == "absent"
+
+
+def test_majority_tie_is_mixed():
+    assert _vote(3, 3) == "mixed"
+    assert _vote(1, 1) == "mixed"
+
+
+def test_majority_still_needs_min_present():
+    # one marker present, none absent: more present than absent, but one
+    # marker alone can be borrowed from another lineage
+    assert _vote(1, 0) == "mixed"
+
+
+def test_old_vote_bands_are_gone():
+    assert "confirm_share" not in CHECK_DEFAULTS
+    assert "notfound_share" not in CHECK_DEFAULTS
 
 
 def test_day_marks_vote_per_marker_instead_of_pooling():
     from process.variant_explorer import check_in_data
     mk = ["1954A", "100T", "200C"]
-    # pooled, this day was "present": 300 of 1,500 reads = 20 % >= 5 %
+    # pooled, this day was "present": 300 of 1,500 reads = 20 % >= 5 %;
+    # per marker it is 1 present, 2 absent -> absent (majority, 2026-10-20)
     pd_ = {"2026-09-01": _cells(**{"1954A": (500, 300), "100T": (500, 0), "200C": (500, 0)}),
            "2026-09-05": _cells(**{"1954A": (500, 0), "100T": (500, 0), "200C": (500, 0)}),
            "2026-09-09": _cells(**{"1954A": (500, 60), "100T": (500, 50), "200C": (500, 40)}),
            "2026-09-12": _cells(**{"1954A": (50, 5)})}
     r = check_in_data(mk, pd_, sorted(pd_))
-    assert dict(r["timeline"]) == {"2026-09-01": "mixed", "2026-09-05": "absent",
+    assert dict(r["timeline"]) == {"2026-09-01": "absent", "2026-09-05": "absent",
                                    "2026-09-09": "present", "2026-09-12": "uncovered"}
 
 

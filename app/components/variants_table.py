@@ -219,11 +219,11 @@ def _state(d):
     if st not in ("present", "absent", "mixed"):
         if p + a == 0:
             return "not_covered"
-        hi, lo = _shares()
-        if p / (p + a) >= hi and p >= _min_present():
+        # the same majority vote as process.cooc.check_verdicts (2026-10-20)
+        if p > a and p >= _min_present():
             st = "present"
         else:
-            st = "absent" if p / (p + a) <= lo else "mixed"
+            st = "absent" if a > p else "mixed"
     if st == "mixed" and a == 0 and 0 < p < _min_present():
         return "few"
     return st
@@ -528,8 +528,9 @@ def _vote_counts(d):
 
 def _vote_text(d):
     """'1 present · 3 absent · 1 too few reads (of 5 ★ markers)' — exactly what
-    the verdict voted on: present ÷ (present + absent); ≥ 75 % present,
-    ≤ 25 % not found, in between mixed."""
+    the verdict voted on: more present than absent (and >= check.min_present
+    present) -> present, more absent -> absent, a tie -> mixed (majority,
+    2026-10-20; until then >= 75 % present, <= 25 % absent)."""
     n_mk, p, a, u = _vote_counts(d)
     if n_mk == 0:
         return "no ★ marker — it can't be told apart from related lineages on its own"
@@ -599,16 +600,6 @@ def _min_present():
         return int(_check_cfg().get("min_present", 2))
     except Exception:
         return 2
-
-
-def _shares():
-    """(confirm_share, notfound_share) of the check's vote, from the config."""
-    try:
-        from process.cooc import _check_cfg
-        c = _check_cfg()
-        return float(c["confirm_share"]), float(c["notfound_share"])
-    except Exception:
-        return 0.75, 0.25
 
 
 def _list_max(key, default):

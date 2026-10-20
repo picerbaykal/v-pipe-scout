@@ -54,16 +54,17 @@ def rules_rows() -> list:
          "mutation; share alone when no read can reach one", "check.link_min, check.min_link"),
         ("absent_freq", "marker absent", f"< {_pct(c['absent_freq'])} of its reads",
          "check.absent_freq"),
-        ("confirm_share", "cell present",
-         f"≥ {_pct(c['confirm_share'])} of the covered markers, and ≥ {c['min_present']} markers",
-         "check.confirm_share, check.min_present"),
-        ("notfound_share", "cell absent", f"≤ {_pct(c['notfound_share'])} of the covered markers; "
-         "in between: mixed", "check.notfound_share"),
-        ("cap_reads", "reads a sample counts per marker", f"at most {int(c['cap_reads']):,}",
-         "check.cap_reads"),
+        ("vote", "cell: the markers vote",
+         "more covered markers present than absent → present; more absent → absent; "
+         "a tie → mixed", "(majority, no setting)"),
+        ("min_present", "… present also needs",
+         f"≥ {c['min_present']} markers present", "check.min_present"),
+        ("cap_reads", "reads a sample counts per marker",
+         f"at most {int(c['cap_reads']):,}, and at most {c['cov_factor']:g} × the sample's "
+         "median depth", "check.cap_reads, check.cov_factor"),
         ("quality", "well-covered sample",
          f"median depth ≥ {q['min_median_depth']} and ≥ {_pct(q['min_share_100x'])} of the genome "
-         "at ≥ 100 reads; a city with any decides on those alone", "quality.*"),
+         "at ≥ 100 reads; counted and shown, every sample votes (weighted)", "quality.*"),
         ("calendar", "calendar line", f"the newest {c.get('calendar_samples', 12)} samples, plus "
          "older ones where it was present or that are well covered", "check.calendar_samples"),
         ("evidence_day", "deep scan: evidence day",

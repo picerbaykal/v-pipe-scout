@@ -206,9 +206,9 @@ def _check_section(variant, panel, cities, start_date, end_date, celery_app, key
                     f"present ≥ {c['present_freq'] * 100:g} % · absent &lt; "
                     f"{c['absent_freq'] * 100:g} % · ≥ {c['min_cov']} reads · link ≥ "
                     f"{c['link_min'] * 100:g} % of ≥ {c['min_link']} reads · verdict: present "
-                    f"if ≥ {c['confirm_share'] * 100:g} % of covered markers are present "
-                    f"and at least {c['min_present']}, "
-                    f"absent if ≤ {c['notfound_share'] * 100:g} % · ⚠ = just missed a rule"
+                    f"if more covered markers are present than absent and at least "
+                    f"{c['min_present']} are present, absent if more are absent, mixed on a "
+                    f"tie · ⚠ = just missed a rule"
                     f"</div>", unsafe_allow_html=True)
                 for city in cities:
                     if city in cur["res"]:

@@ -36,14 +36,18 @@ check:
   link_min: 0.8         # ... and >= 80% of those match the variant at neighbouring
   min_link: 20          #     positions (needs >= 20 such reads)
   absent_freq: 0.01     # absent: < 1% carry it
-  confirm_share: 0.75   # present / measured >= this -> present ...
-  min_present: 2        # ... and at least 2 markers present (one alone can come
-                        #   from an unrelated lineage: XFZ carries LP.8's 1954A)
-  notfound_share: 0.25  # present / measured <= this -> absent; between -> mixed
+  # The cell's verdict is a simple majority of the measured markers (no setting,
+  # 2026-10-20; until then confirm_share 0.75 / notfound_share 0.25): more present
+  # than absent -> present, more absent -> absent, a tie -> mixed.
+  min_present: 2        # present also needs at least 2 markers present (one alone
+                        #   can come from an unrelated lineage: XFZ carries LP.8's 1954A)
   calendar_samples: 12  # Evidence squares shown per row, the newest; the cell always
                         #   adds up ALL samples in the chosen dates
   cap_reads: 1000       # ... each counting at most this many reads per marker, so a
                         #   sample with a few huge amplicons can't outvote the others
+  cov_factor: 10        # ... and at most this × its median depth: every sample votes,
+                        #   weighted by its coverage (a jackpot sample, median depth 2,
+                        #   400,000 reads at one marker, counts as 20 reads)
 
 # ── Sample quality: coverage of each sample (process.sample_qc) ────────────
 # Read at 119 positions (one every 250 bases) by the panel check (worker:
@@ -102,14 +106,17 @@ lists:
 # the "Rules and thresholds" tab (UI only: a streamlit restart is enough).
 # After a sensitivity test or a check on real data, update its "tested".
 rules:
-  min_cov:        {why: "fewer reads give unstable shares", tested: "not yet"}
-  present_freq:   {why: "above sequencing noise", tested: "not yet"}
-  link:           {why: "the marker's reads must look like the lineage, not an error or another lineage", tested: "share-alone case: NB.1.8.1, 13 Oct"}
-  absent_freq:    {why: "below sequencing noise", tested: "not yet"}
-  confirm_share:  {why: "one marker alone can come from an unrelated lineage", tested: "LP.8 / XFZ, 9 Oct"}
-  notfound_share: {why: "", tested: "not yet"}
-  cap_reads:      {why: "one sample with a few huge amplicons can't outvote the others", tested: "Lugano, 13 Oct"}
+  # tested: 16 Oct = bench_params (6 cities, 7 Jun – 5 Sep, half and double, scored
+  # against Europe's clinical sequences); 20 Oct = bench_deepscan and bench_scorecard
+  # (6 cities, also 8 Mar – 6 Jun). Europe's sequences are mostly from the UK: a guide, not proof.
+  min_cov:        {why: "fewer reads give unstable shares", tested: "50 / 200: scores unchanged; no minimum is worse (16 Oct)"}
+  present_freq:   {why: "above sequencing noise", tested: "sensitive: 2.5 % +2 present and a decoy mixed, 10 % −4 present (16 Oct)"}
+  link:           {why: "the marker's reads must look like the lineage, not an error or another lineage", tested: "90 %: XFG mixed in 3 cities; 60 %: +1 present (16 Oct); share-alone case: NB.1.8.1, 13 Oct"}
+  absent_freq:    {why: "below sequencing noise; 1–5 % is a zone that doesn't vote", tested: "one cut-off at 5 % is worse (16 Oct)"}
+  vote:           {why: "one rule instead of two numbers", tested: "as good or better than 75 / 25 %, no new false alarm (16 Oct, 20 Oct both windows)"}
+  min_present:    {why: "one marker alone can come from an unrelated lineage", tested: "LP.8 / XFZ 9 Oct; RV.1.3 Zürich (one-sample spike) 20 Oct; 1: +5 present, can't rule out borrowed markers (16 Oct)"}
+  cap_reads:      {why: "one sample with a few huge amplicons can't outvote the others", tested: "Lugano, 13 Oct; ×5 / ×20 median depth: same verdicts (16 Oct)"}
   quality:        {why: "a low-virus sample comes from few molecules: its shares are snapshots", tested: "summer vs winter samples, 13 Oct"}
   calendar:       {why: "", tested: ""}
-  evidence_day:   {why: "", tested: "not yet"}
-  min_days:       {why: "one day alone can be a jackpot", tested: "not yet"}
+  evidence_day:   {why: "", tested: "min_reads 10 / 40: no change anywhere; min_share 1 %: drops one not-in-Europe find (20 Oct)"}
+  min_days:       {why: "one day alone can be a jackpot", tested: "1: 4 not-in-Europe finds; 3: −3 circulating (20 Oct)"}
