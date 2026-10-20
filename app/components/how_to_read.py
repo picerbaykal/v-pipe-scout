@@ -79,8 +79,9 @@ def rules_rows() -> list:
 
 _GRAPH = ("<div style='font-size:13px;color:#4b5563;margin-top:10px;'>"
           "<b style='font-size:12px;color:#6b7280;text-transform:uppercase;'>Panel check graph</b>"
-          " &nbsp;green = explained by your panel · light green = a panel variant ± 1 change · "
-          "red = a lineage the deep scan found · grey = unexplained</div>")
+          " &nbsp;green = explained by your list · light green = your list ± 1 change · "
+          "red = a new lineage the reads suggest · grey = not explained (too broad to name, "
+          "new combinations, errors)</div>")
 
 
 def render_how_to_read() -> None:

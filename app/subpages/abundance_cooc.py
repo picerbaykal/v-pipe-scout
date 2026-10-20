@@ -179,10 +179,14 @@ def _render_composition(cooc_result: dict, scanner_result: dict, key: str = "",
     import plotly.graph_objects as go
     dates = [r["date"] for r in rows]
     layers = [
-        ("explained by panel", "explained_pct", "#0F6E56", "rgba(15,110,86,0.85)"),
-        ("panel variant ± 1 change", "near_pct", "#4ade80", "rgba(134,239,172,0.85)"),
-        ("found, not in panel", "addable_pct", "#dc2626", "rgba(220,38,38,0.55)"),
-        ("unexplained, not attributed", "noise_pct", "#9ca3af", "rgba(156,163,175,0.40)"),
+        # the tree's colours and words (2026-10-20): green as in the Lineages
+        # tree (was #0F6E56); grey stays "not explained" — it holds everything
+        # else (too broad to name, new combinations, errors), not the tree's
+        # unassigned patterns, which sit at positions this graph doesn't read
+        ("explained by your list", "explained_pct", "#16a34a", "rgba(22,163,74,0.85)"),
+        ("your list ± 1 change", "near_pct", "#4ade80", "rgba(134,239,172,0.85)"),
+        ("new lineage suggested by the reads", "addable_pct", "#dc2626", "rgba(220,38,38,0.55)"),
+        ("not explained", "noise_pct", "#9ca3af", "rgba(156,163,175,0.40)"),
     ]
     fig = go.Figure()
     _near_txt = ["<br>".join(f"{_l} ({_n:,} reads)" for _l, _n in r.get("near_top", []))
@@ -1982,19 +1986,20 @@ def app():
                           for l, d in sorted(_until_short.items()))
                           + f" — the window runs to {_dshort(_win_end)}; later dates have "
                           "no samples yet.")
-                  st.caption("How much of each city's co-occurrence signal your panel "
-                             "explains (green) vs the rest. Light green = a panel variant with one "
-                             "change (hover for which) · red = a lineage the deep scan found · "
-                             "grey = unexplained, not attributed (unassigned patterns: Lineages table).")
+                  st.caption("How much of each city's reads the lineages on your list "
+                             "explain (green) vs the rest. Light green = a lineage on your list "
+                             "with one change (hover for which) · red = a new lineage the reads "
+                             "suggest · grey = not explained (too broad to name, new "
+                             "combinations, errors).")
                   # One shared legend ABOVE the grid; every plot has
                   # show_legend=False and the same fixed height, so all plot areas
                   # are identical. (Previously the legend went on the first plot
                   # only and ate into its fixed height, making it shorter.)
                   _comp_leg = [
-                      ("#0F6E56", "explained by panel"),
-                      ("#4ade80", "panel variant ± 1 change"),
-                      ("#dc2626", "found, not in panel"),
-                      ("#9ca3af", "unexplained, not attributed"),
+                      ("#16a34a", "explained by your list"),
+                      ("#4ade80", "your list ± 1 change"),
+                      ("#dc2626", "new lineage suggested by the reads"),
+                      ("#9ca3af", "not explained"),
                   ]
                   # panel union (city-independent) for the near-panel split —
                   # a read that is a panel variant + <2 stray mutations counts
