@@ -51,6 +51,11 @@ def test_tie_not_called_and_nothing_decided_share_one_style():
     assert st == vt.S_OPEN and lab == "3~"
 
 
+def test_undecided_cells_are_not_orange():
+    # orange is kept for one meaning: a panel lineage no city calls present
+    assert vt.AMBER not in vt.S_OPEN and vt.AMBER_T not in vt.S_OPEN
+
+
 def test_no_light_shade_any_more():
     # weak evidence (no coverage data) keeps the full colour; the hover says it
     d = _d(2, 2, 2, basis="all", state="present")

@@ -208,12 +208,12 @@ def _pl(n, word):
 # light shades are gone (their two meanings go into the hover in words).
 #   S_YES   present                     green
 #   S_NO    absent                      grey
-#   S_OPEN  tie, or not called (fewer   white, dashed amber edge
-#           than min_present present),
-#           or nothing decided
+#   S_OPEN  tie, or not called (fewer   white, dashed grey edge (orange is
+#           than min_present present),  kept for one meaning only: a lineage
+#           or nothing decided          of your panel no city calls present)
 S_YES = _fill(GREEN, "#fff")
 S_NO = _fill("#f3f4f6", "#4b5563") + "box-shadow:inset 0 0 0 1px #d1d5db;"
-S_OPEN = f"background:#fff;color:{AMBER_T};box-shadow:inset 0 0 0 1.5px {AMBER};"
+S_OPEN = "background:#fff;color:#374151;border:1.5px dashed #9ca3af;"
 # kept for the legend of older pieces and the deep scan's own cells
 S_PRESENT_LIGHT = "background:#fff;color:#14532d;box-shadow:inset 0 0 0 1.5px #16a34a;"
 S_NOTFOUND_LIGHT = "background:#fff;color:#78350f;box-shadow:inset 0 0 0 1.5px #f59e0b;"
@@ -1229,9 +1229,17 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
             dsel = pc.get(sel) or {}
             _st, _lb, dcol, ncol, share = _scale(dsel) if dsel else (None, "", GREY, "#6b7280", None)
             tip = _cell_tip(v, sname, dsel) if dsel else f"{v} · {sname}: no result"
-            name = f"<span class='nm' style='color:{ncol}'>{_e(v)}</span>{chips}"
             no_meas = share is None and dsel.get("n_markers", 0) > 0
-            tc = _tree_cell(r, dcol, "dashed" if (no_meas or not dsel) else "filled", name, tip)
+            dk = "dashed" if (no_meas or not dsel) else "filled"
+            # orange means one thing (2026-10-20): a lineage of your panel no
+            # city calls present — the same rule as the row's warning, whichever
+            # city is selected. Absent in this city but present elsewhere: grey.
+            if _panel_warn(pc, True):
+                dcol, ncol, dk = AMBER, AMBER_T, "filled"
+            elif dcol in (AMBER, "#fcd9a3"):
+                dcol, ncol = "#d1d5db", "#6b7280"
+            name = f"<span class='nm' style='color:{ncol}'>{_e(v)}</span>{chips}"
+            tc = _tree_cell(r, dcol, dk, name, tip)
             # no row tint (2026-10-20): the cells carry the answer; a whole row
             # in the selected city's colour was noise
             tint = None
