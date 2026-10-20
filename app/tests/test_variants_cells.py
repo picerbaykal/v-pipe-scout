@@ -32,9 +32,11 @@ BA32_TI = _d(24, 24, 0)       # Lugano: 24 markers absent
 
 
 def test_label_counts_every_marker():
-    assert vt._counts_label(XFG_TI) == "1✓ 1~"       # was "1/1": 4214C hidden
-    assert vt._counts_label(BA32_TI) == "24✗"
-    assert vt._counts_label(_d(4, 3, 2)) == "2✓ 1~ 1✗"
+    # present : absent (couldn't answer), like a score
+    assert vt._counts_label(XFG_TI) == "1:0 (1)"     # was "1/1": 4214C hidden
+    assert vt._counts_label(_d(39, 24, 0)) == "0:24 (15)"   # BA.3.2 Lugano (was 0/24)
+    assert vt._counts_label(_d(4, 4, 3)) == "3:1"
+    assert vt._counts_label(_d(0, 0, 0)) == "–"
 
 
 def test_colour_is_the_answer_only():
@@ -48,7 +50,7 @@ def test_tie_not_called_and_nothing_decided_share_one_style():
     assert vt._scale(_d(2, 2, 1))[0] == vt.S_OPEN               # tie
     assert vt._scale(XFG_TI)[0] == vt.S_OPEN                    # 1 present, needs 2
     st, lab = vt._scale(_d(3, 0, 0))[:2]                         # nothing decided
-    assert st == vt.S_OPEN and lab == "3~"
+    assert st == vt.S_OPEN and lab == "0:0 (3)"
 
 
 def test_undecided_cells_are_not_orange():
@@ -84,7 +86,45 @@ def test_panel_lineage_present_nowhere_gets_one_warning():
     assert vt._panel_warn(pc, in_panel=True) == ""
 
 
+# ── kept from test_variants_table_cells.py (9–13 Oct; its light colours and
+#    trend arrows are gone, these three checks still apply) ────────────────
+def _marks(p, m, n, marks):
+    d = _d(n, m, p)
+    d["timeline"] = [[f"2026-08-{10 + i:02d}", x] for i, x in enumerate(marks)]
+    d["state"] = vt._state(d)
+    return d
+
+
+def test_hover_says_on_how_few_samples_it_was_clear():
+    # what the light shade said until 20 Oct, now in the hover
+    d = _marks(2, 2, 3, ["absent", "thin", "present", "mixed"])
+    assert "only 1 sample on its own (12 Aug)" in vt._clear_note(d)
+    assert "only 1 sample on its own" in vt._cell_tip("X", "Basel", d)
+
+
+def test_old_results_use_only_their_well_covered_samples():
+    from process.sample_qc import PROBES, summarize
+    good = summarize({p: 9000 for p in PROBES})
+    bad = summarize({p: 1 for p in PROBES})
+    tl = [[f"2026-08-{10 + i:02d}", m] for i, m in enumerate(["present", "absent", "present", "absent"])]
+    d = {"n_present": 2, "n_measured": 2, "n_markers": 2, "state": "present", "timeline": tl,
+         "basis": "well", "quality": {x: (good if i in (1, 3) else bad) for i, (x, _m) in enumerate(tl)}}
+    assert vt._basis_samples(d)[0] == [("2026-08-11", "absent"), ("2026-08-13", "absent")]
+
+
+def test_deep_scan_evidence_says_when_samples_are_low_coverage():
+    from process.sample_qc import PROBES, summarize
+    good = summarize({p: 9000 for p in PROBES})
+    bad = summarize({p: (200000 if i < 15 else 1) for i, p in enumerate(PROBES)})
+    q = {"2026-08-01": bad, "2026-08-05": bad, "2026-08-09": good}
+    d = {"ev_dates": ["2026-08-01", "2026-08-05"], "check": {"quality": q}}
+    assert vt._ev_quality(d) == ", all low coverage"
+    d["ev_dates"].append("2026-08-09")
+    assert vt._ev_quality(d) == " (1 well covered)"
+    assert vt._ev_quality({"ev_dates": ["2026-08-01"], "check": {}}) == ""
+
+
 def test_legends_describe_the_new_cells():
     for text in (vt.SHORT_LEGEND, vt.legend_full_html()):
         assert "light = weak" not in text
-        assert "✓" in text and "~" in text and "✗" in text
+        assert "present : absent" in text and "couldn't answer" in text

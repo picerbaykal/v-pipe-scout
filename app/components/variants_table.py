@@ -43,13 +43,13 @@ CSS = """
 .vt { border-collapse:collapse; font-size:15px; width:100%; }
 .vt th { text-align:left; font-size:12px; letter-spacing:.03em; text-transform:uppercase; color:#6b7280;
          font-weight:600; padding:0 8px 6px; border-bottom:1px solid #e6e8ec; white-space:nowrap; }
-.vt th.cc { width:56px; padding:0 2px 6px; text-align:center; letter-spacing:0; }
+.vt th.cc { width:66px; padding:0 2px 6px; text-align:center; letter-spacing:0; }
 .vt th.cc button { font:inherit; font-size:12px; font-weight:700; color:#6b7280; background:none; border:0;
                    border-radius:5px; padding:2px 5px; cursor:pointer; }
 .vt th.cc button:hover { background:#eef0f3; color:#31333f; }
 .vt th.cc.sel button { background:#31333f; color:#fff; }
 .vt td { padding:0 8px; height:34px; border-bottom:1px solid #eef0f2; white-space:nowrap; vertical-align:middle; }
-.vt td.cc { padding:0 2px; width:56px; text-align:center; cursor:pointer; }
+.vt td.cc { padding:0 2px; width:66px; text-align:center; cursor:pointer; }
 .vt td.nomk { color:#8b8f97; font-size:13px; padding-left:8px; }
 .vt td.cc .c { cursor:pointer; }
 .vt td.cc:not(.sel):hover { background:rgba(49,51,63,.04); }
@@ -80,9 +80,11 @@ CSS = """
            vertical-align:1px; }
 .vt .add:hover { background:#dc2626; color:#fff; }
 .vt .added { font-size:12.5px; margin-left:9px; color:#6b7280; }
-.vt .c { display:inline-flex; align-items:center; justify-content:center; min-width:40px; padding:0 4px; height:22px;
+.vt .c { display:inline-flex; align-items:center; justify-content:center; min-width:28px; padding:0 3px; height:22px;
          border-radius:5px; font-size:12.5px; font-weight:700; box-sizing:border-box; color:#c4c7cd; cursor:default;
-         white-space:nowrap; }
+         white-space:nowrap; font-variant-numeric:tabular-nums; }
+.vt td.cc .c { width:62px; padding:0 2px; }   /* one width for every city cell (2026-10-20) */
+.vt .c .cu, .lg .c .cu { font-weight:400; font-size:10.5px; margin-left:2px; opacity:.8; }
 .vt td.ev { white-space:normal; line-height:1.3; padding-left:12px; font-size:14.5px; }
 .vt .dim { color:#8b8f97; }
 .vt .tr-a { font-size:11px; margin-left:2px; }
@@ -160,9 +162,14 @@ S_NEAR = _fill("#bbf7d0", "#14532d")
 S_NEAR1 = _dashed("#16a34a")
 
 
+def _lab_html(label) -> str:
+    """'0:24 (15)' with the bracket smaller and lighter: the score stands out."""
+    return re.sub(r" \((\d+)\)$", r"<span class='cu'>(\1)</span>", _e(label))
+
+
 def _cell(label, style, tip, sel) -> str:
     return (f"<td class='cc{' sel' if sel else ''}'><span class='c' style='{style}' "
-            f"data-tip='{_e(tip)}'>{_e(label)}</span></td>")
+            f"data-tip='{_e(tip)}'>{_lab_html(label)}</span></td>")
 
 
 def _empty(tip, sel):
@@ -282,11 +289,13 @@ def _clear_note(d):
 
 
 def _counts_label(d):
-    """'2✓ 1~ 1✗': markers present · no vote (between 1 and 5 %, too few
-    reads, or reads unlike the lineage) · absent; zeros left out."""
+    """'2:1 (1)': markers present : absent, and in brackets those that
+    couldn't answer (too few reads, between 1 and 5 %, or reads unlike the
+    lineage) — like a score, nothing left out (2026-10-20)."""
     n_mk, p, a, u = _vote_counts(d)
-    parts = [f"{n}{s}" for n, s in ((p, "✓"), (u, "~"), (a, "✗")) if n]
-    return " ".join(parts) or "–"
+    if n_mk == 0:
+        return "–"
+    return f"{p}:{a}" + (f" ({u})" if u else "")
 
 
 def _scale(d, found=False):
@@ -1200,7 +1209,9 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
                       + _e(_qtip(c))
                       + f" — click to colour the tree by this city'>"
                       f"{_e(city_code(c))}</button></th>" for c in cities)
-            + f"<th style='padding-left:12px'>Evidence · {_e(city_name(sel))}"
+            # the Evidence header may wrap (2026-10-20): unbroken, its long text
+            # kept the column wide and pushed the table past the right edge
+            + f"<th style='padding-left:12px;white-space:normal'>Evidence · {_e(city_name(sel))}"
             + (f" <span style='font-weight:400;text-transform:none;letter-spacing:0'>· data until "
                f"{_e(data_until[sel])}</span>" if sel in data_until else "")
             + (f" <span style='font-weight:400;text-transform:none;letter-spacing:0'>· "
@@ -1457,22 +1468,24 @@ def _ld(style, text):
 
 def _lc(d, found=False, extra=""):
     st, lb = _scale(d, found=found)[:2]
-    return f"<i class='c' style='width:auto;padding:0 6px;{st}{extra}'>{lb}</i>"
+    return f"<i class='c' style='width:auto;padding:0 6px;{st}{extra}'>{_lab_html(lb)}</i>"
 
 
 _LEGEND_ROWS = (
     ""
     "<div class='row'><span class='t'>★ check</span>"
-    "<span class='i'>each cell counts the lineage's ★ markers: ✓ present (≥ "
-    + f"{_num()['pf']} %) · ~ no vote (between {_num()['af']} and {_num()['pf']} %, under "
-    + f"{_num()['mc']} reads, or reads unlike it) · ✗ absent (< {_num()['af']} %)</span>"
+    "<span class='i'>each cell is the vote of the lineage's ★ markers, like a score: "
+    + f"<b>present : absent</b> (present ≥ {_num()['pf']} % of ≥ {_num()['mc']} reads, absent "
+    + f"< {_num()['af']} %), and in brackets the markers that couldn't answer (under "
+    + f"{_num()['mc']} reads after weighting by coverage, between {_num()['af']} and "
+    + f"{_num()['pf']} %, or reads unlike it)</span>"
     + "<span class='i'>"
-    + _lc({"n_markers": 4, "n_measured": 4, "n_present": 3}) + "present: more ✓ than ✗, "
-    + f"and at least {_min_present()} ✓</span>"
-    + "<span class='i'>" + _lc({"n_markers": 4, "n_measured": 4, "n_present": 0}) + "absent: more ✗ than ✓</span>"
+    + _lc({"n_markers": 4, "n_measured": 4, "n_present": 3}) + "present: more present than absent, "
+    + f"and at least {_min_present()} present</span>"
+    + "<span class='i'>" + _lc({"n_markers": 4, "n_measured": 4, "n_present": 0}) + "absent: more absent than present</span>"
     + "<span class='i'>" + _lc({"n_markers": 2, "n_measured": 2, "n_present": 1})
     + _lc({"n_markers": 2, "n_measured": 1, "n_present": 1})
-    + f"tie, or not called (fewer than {_min_present()} ✓)</span>"
+    + f"undecided: a tie, or fewer than {_min_present()} present</span>"
     + "<span class='i'><b style='color:" + AMBER_T + "'>in your panel</b> · present in none of … cities = "
       "a lineage of your panel no city calls present</span>"
     + "<span class='i'>a row with no ★ marker says so once, across the cities</span>"
@@ -1500,11 +1513,11 @@ _LEGEND_ROWS = (
 # always in view, with the cell colours you need while reading the tree.
 SHORT_LEGEND = (
     "<div class='lg lgs'><div class='row'>"
-    + "<span class='i'>✓ present · ~ no vote · ✗ absent (markers)</span>"
+    + "<span class='i'>markers present : absent (couldn't answer)</span>"
     + "<span class='i'>" + _lc({"n_markers": 3, "n_measured": 3, "n_present": 3}) + "present</span>"
     + "<span class='i'>" + _lc({"n_markers": 2, "n_measured": 2, "n_present": 0}) + "absent</span>"
     + "<span class='i'>" + _lc({"n_markers": 2, "n_measured": 1, "n_present": 1})
-    + "tie or not called</span>"
+    + "undecided</span>"
     + "<span class='i'><span class='cal'><i style='background:" + GREEN + ";" + _LOWQ
     + "'></i></span>low coverage</span>"
     + _ld(f"background:{RED}", "found (not in panel)")
