@@ -28,9 +28,10 @@ def panel_verdicts(cooc_res: dict, variants: list) -> dict:
             out[v] = {"state": "no_data", "reason": "no check data — run the panel check again",
                       "n_present": 0, "n_measured": 0, "n_markers": 0}
             continue
-        # one vote per city (process.variant_explorer.check_in_data, 2026-10-13):
-        # the well-covered samples decide when the city has any, otherwise all
-        # samples in the run's dates, each counting at most check.cap_reads reads
+        # one vote per city (process.variant_explorer.check_in_data): every
+        # sample in the run's dates votes, each counting at most check.cap_reads
+        # reads and at most check.cov_factor x its median depth (2026-10-16;
+        # until then the well-covered samples decided alone)
         _cid = check_in_data(ci.get("markers") or [], ci.get("per_date") or {}, _dates,
                              quality=(cooc_res or {}).get("sample_qc"))
         nd, np_, nm = _cid["n_markers"], _cid["n_present"], _cid["n_measured"]

@@ -70,7 +70,7 @@ def test_no_marker_said_once_across_the_cities():
     pc = {c: _d(0, 0, 0) for c in cities}
     html = vt._panel_cells("KP.2", pc, cities, "Lugano (TI)")
     assert html.count("<td") == 1 and f"colspan='{len(cities)}'" in html
-    assert "no ★ marker" in html
+    assert "no mutation of its own" in html
 
 
 def test_panel_lineage_present_nowhere_gets_one_warning():
@@ -124,7 +124,79 @@ def test_deep_scan_evidence_says_when_samples_are_low_coverage():
     assert vt._ev_quality({"ev_dates": ["2026-08-01"], "check": {}}) == ""
 
 
+# ── rows by importance: the overview column (2026-10-20) ─────────────────
+CITIES = ["Basel (BS)", "Chur (GR)", "Genève (GE)", "Laupen (BE)", "Lugano (TI)", "Zürich (ZH)"]
+
+
+def _sc(p, a, u=0):
+    """a check result from a score p:a (u)"""
+    return _d(p + a + u, p + a, p)
+
+
+def _find(per_city, **kw):
+    """per_city: {code: (days, (p, a, u), xcheck)}"""
+    pc = {}
+    for c in CITIES:
+        code = c.split("(")[1][:2]
+        if code in per_city:
+            days, sc, x = per_city[code]
+            pc[c] = {"days": days, "check": _sc(*sc), "xcheck": x}
+    return dict({"status": "confirmed", "per_city": pc, "addable": False}, **kw)
+
+
+def test_panel_overview_seen_not_seen_cant_check():
+    nb = {c: s for c, s in zip(CITIES, [_sc(3, 1), _sc(1, 0, 3), _sc(2, 2), _sc(4, 0),
+                                         _sc(3, 0, 1), _sc(3, 0, 1)])}
+    html, _tip, dot, _ink, _k = vt._panel_overview(nb, CITIES)
+    assert "seen in 4 of 6" in html and dot == vt.GREEN
+    lp8 = {c: s for c, s in zip(CITIES, [_sc(0, 4), _sc(0, 0, 4), _sc(0, 4), _sc(0, 0, 4),
+                                          _sc(0, 2, 2), _sc(0, 4)])}
+    html, tip, dot, _ink, _k = vt._panel_overview(lp8, CITIES)
+    assert "not seen in any city" in html and dot == vt.AMBER
+    assert "absent in 4, not called in 2" in tip
+    kp2 = {c: _d(0, 0, 0) for c in CITIES}
+    html, _tip, dot, _ink, _k = vt._panel_overview(kp2, CITIES)
+    assert "can't be checked" in html and dot != vt.AMBER       # amber means one thing only
+
+
+def test_suggestion_new_possible_folded():
+    # RV.2.1.1: seen in BE and ZH, but suggested on 1 sample only -> possible
+    rv = _find({"BE": (1, (4, 0, 2), False), "ZH": (0, (5, 1), True), "GE": (0, (1, 3, 2), True)})
+    assert vt._finding_status("RV.2.1.1", rv, CITIES) == (
+        "possible", "seen in BE, ZH · suggested on 1 sample only")
+    # RF.5.4: suggested 5x in ZH, where its one mutation couldn't answer -> stays
+    rf = _find({"ZH": (5, (0, 0, 1), False), "BS": (0, (0, 1), True), "GE": (0, (0, 1), True)})
+    assert vt._finding_status("RF.5.4", rf, CITIES) == (
+        "possible", "couldn't check in ZH · suggested 5× in ZH")
+    # ST.1: not seen where suggested (BS), but a tie in TI -> stays
+    st = _find({"BS": (2, (0, 4, 1), False), "TI": (0, (1, 1, 3), True), "GE": (0, (0, 5), True)})
+    assert vt._finding_status("ST.1", st, CITIES) == ("possible", "unclear in TI · suggested 2× in BS")
+    # PJ.2.1: not seen where suggested, not seen or unclear anywhere -> folded
+    pj = _find({"BE": (1, (0, 13, 6), False), "GE": (0, (3, 15, 1), True), "ZH": (0, (0, 19), True)})
+    assert vt._finding_status("PJ.2.1", pj, CITIES)[0] == "folded"
+    assert vt._finding_status("PJ.2.1", pj, CITIES, has_children=True)[0] == "possible"
+    # + Add -> new; family -> covered
+    assert vt._finding_status("PQ.16.1.1", _find({}, addable=True), CITIES)[0] == "new"
+    assert vt._finding_status("SW.2", _find({}, status="family"), CITIES)[0] == "covered"
+
+
+def test_table_has_an_overview_column_and_folds_unsupported_suggestions():
+    base = dict(depth=1, guides=[], last=True, has_children=False)
+    rows = [dict(base, node="LP.8", kind="panel"), dict(base, node="PJ.2.1", kind="finding"),
+            dict(base, node="RV.2.1.1", kind="finding")]
+    ver = {c: {"LP.8": _sc(0, 4)} for c in CITIES}
+    findings = {
+        "PJ.2.1": _find({"BE": (1, (0, 13, 6), False), "GE": (0, (3, 15, 1), True)}),
+        "RV.2.1.1": _find({"BE": (1, (4, 0, 2), False), "ZH": (0, (5, 1), True)})}
+    html = vt.build(CITIES, CITIES[3], rows, ver, findings, ["LP.8"])
+    assert "Overview · all cities" in html
+    assert "not seen in any city" in html                      # LP.8, amber
+    assert "Possible" in html and "suggested on 1 sample only" in html   # RV.2.1.1
+    assert "1 suggestion not supported by its own mutations" in html and "PJ.2.1" in html
+    assert html.count("class='nm'") == 2                       # PJ.2.1 has no row
+
+
 def test_legends_describe_the_new_cells():
     for text in (vt.SHORT_LEGEND, vt.legend_full_html()):
         assert "light = weak" not in text
-        assert "present : absent" in text and "couldn't answer" in text
+        assert "couldn't answer" in text

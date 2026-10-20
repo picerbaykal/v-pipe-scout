@@ -2279,9 +2279,9 @@ def app():
                     from components import variants_table as _vt
                     st.markdown("---")
                     st.markdown("### Variants")
-                    st.caption("Evidence from reads only, one column per city. The tree is "
-                               "coloured by the city you click in the header (shaded). Hover "
-                               "anything for details; + Add puts a finding in your panel — "
+                    st.caption("Evidence from reads only, one column per city. The overview "
+                               "covers all cities; click a city cell for its details. Hover "
+                               "anything for more; + Add puts a lineage on your list — "
                                "re-run to apply.")
                     # the chosen city (click a city code in the table header)
                     if st.session_state.get("acooc_tree_city") not in _ready_locs:

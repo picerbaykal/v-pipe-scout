@@ -51,6 +51,10 @@ CSS = """
 .vt td { padding:0 8px; height:34px; border-bottom:1px solid #eef0f2; white-space:nowrap; vertical-align:middle; }
 .vt td.cc { padding:0 2px; width:66px; text-align:center; cursor:pointer; }
 .vt td.nomk { color:#8b8f97; font-size:13px; padding-left:8px; }
+.vt td.ov { white-space:normal; padding:2px 8px; min-width:250px; max-width:300px; }
+.vt .ovb { display:inline-block; font-size:12.5px; line-height:1.3; padding:2px 7px; border-radius:5px; }
+.vt .ovb b { font-weight:600; }
+.vt .ovb .add { margin-left:6px; }
 .vt td.cc .c { cursor:pointer; }
 .vt td.cc:not(.sel):hover { background:rgba(49,51,63,.04); }
 .vt td.cc.sel { background:rgba(49,51,63,.07); }
@@ -547,8 +551,8 @@ def _panel_cells(v, per_city, cities, sel):
     res = [d for d in per_city.values() if d]
     if res and all(_vote_counts(d)[0] == 0 for d in res):
         # no ★ marker: the same in every city, so said once (2026-10-20)
-        return (f"<td class='nomk' colspan='{len(cities)}'>no ★ marker — its mutations are "
-                "all shared with other lineages, reads can't point to it on its own</td>")
+        return (f"<td class='nomk' colspan='{len(cities)}'>no mutation of its own — all are "
+                "shared with other lineages on your list</td>")
     out = []
     for c in cities:
         d = per_city.get(c)
@@ -837,6 +841,108 @@ def _panel_warn(per_city, in_panel):
             f"{_pl(len(res), 'city')}: {', '.join(parts)} · ")
 
 
+# ── the overview column (2026-10-20): the whole lineage over all cities, in
+#    plain words, the same whichever city is selected. The per-city words are
+#    in the details. Returns (html, tip, dot colour, name colour, dot kind). ──
+def _ovb(text, style="color:#4b5563;"):
+    return f"<span class='ovb' style='{style}'>{text}</span>"
+
+
+def _panel_overview(per_city, cities):
+    res = [per_city[c] for c in cities if per_city.get(c)]
+    if not res:
+        return (_ovb("<b>On your list</b> · no result"), "", GREY, "#6b7280", "dashed")
+    if all(_vote_counts(x)[0] == 0 for x in res):
+        return (_ovb("<b>On your list</b> · can't be checked", "color:#6b7280;"),
+                "no mutation of its own: all its mutations are shared with other lineages on "
+                "your list, so its share in Deconvolution can't be checked here",
+                GREY, "#6b7280", "filled")
+    if _panel_warn(per_city, True):
+        return (_ovb("<b>On your list</b> · not seen in any city",
+                     f"background:#fffbeb;color:{AMBER_T};"),
+                _panel_warn(per_city, True).replace("<b style='color:" + AMBER_T + "'>", "")
+                .replace("</b>", "").rstrip(" ·"),
+                AMBER, AMBER_T, "filled")
+    meas = [c for c in cities if per_city.get(c) and _vote_counts(per_city[c])[0]]
+    seen = [c for c in meas if _state(per_city[c]) == "present"]
+    where = f" ({', '.join(city_code(c) for c in seen)})" if 0 < len(seen) <= 3 else ""
+    return (_ovb(f"<b style='color:#1f2328'>On your list</b> · seen in {len(seen)} of "
+                 f"{len(meas)}{where}"),
+            "", GREEN if seen else "#d1d5db", "#15803d" if seen else "#6b7280", "filled")
+
+
+def _finding_status(v, f, cities, has_children=False):
+    """'new' / 'possible' / 'covered' / 'named' / 'folded' for a lineage the
+    reads suggested (a deep scan find), and the reason for 'possible'.
+    folded: its own mutations say not seen in every city where the reads
+    suggested it, and no city says seen or unclear (a tie) — a leaf only, so
+    no branch loses its children (2026-10-20)."""
+    st = f.get("status")
+    if st == "family":
+        return "covered", ""
+    if st == "named":
+        return "named", ""
+    pc = f.get("per_city") or {}
+    chk = {c: (pc.get(c) or {}).get("check") for c in cities if (pc.get(c) or {}).get("check")}
+    state = {c: _state(d) for c, d in chk.items()}
+    seen = [c for c in cities if state.get(c) == "present"]
+    tie = [c for c in cities if state.get(c) == "mixed"]
+    few = [c for c in cities if state.get(c) == "few"]
+    sugg = {c: int((pc.get(c) or {}).get("days") or 0) for c in cities
+            if not (pc.get(c) or {}).get("xcheck") and int((pc.get(c) or {}).get("days") or 0) > 0}
+    if f.get("addable"):
+        return "new", ""
+    if (not seen and not tie and sugg and not has_children
+            and all(state.get(c) == "absent" for c in sugg)):
+        return "folded", ""
+    ed = _num()["ed"]
+    one_sample = sugg and max(sugg.values()) < ed and len(sugg) < 2
+    code = lambda cs: ", ".join(city_code(c) for c in cs)                    # noqa: E731
+    top = max(sugg, key=sugg.get) if sugg else None
+    sug_txt = (f"suggested {sugg[top]}× in {city_code(top)}" if top and not one_sample else
+               "suggested on 1 sample only" if one_sample else "")
+    if seen:
+        why = f"seen in {code(seen)}"
+    elif tie:
+        why = f"unclear in {code(tie)}"
+    elif few:
+        p = _vote_counts(chk[few[0]])[1]
+        why = f"{p} of its own mutations seen in {city_code(few[0])} (needs {_min_present()})"
+    elif top and state.get(top) not in ("absent",):
+        why = f"couldn't check in {city_code(top)}"
+    else:
+        why = "its own mutations not seen"
+    return "possible", " · ".join(x for x in (why, sug_txt) if x)
+
+
+def _finding_overview(v, f, cities, current_panel, has_children=False):
+    kind, why = _finding_status(v, f, cities, has_children)
+    pc = f.get("per_city") or {}
+    if kind == "covered":
+        desc = f.get("descendants") or []
+        by = ", ".join(desc[:2]) + (f" +{len(desc) - 2}" if len(desc) > 2 else "")
+        return (kind, _ovb(f"<b>Covered</b> by {_e(by)}", "color:#9ca3af;"),
+                f"its own mutations are on the reads of the lineages below it ({', '.join(desc[:6])}); "
+                "add those instead", "#d1d5db", "#9ca3af", "ring")
+    if kind == "named":
+        return (kind, _ovb("not confirmed: reads also fit related lineages", "color:#9ca3af;"),
+                "", GREY, "#9ca3af", "ring")
+    if kind == "new":
+        seen = [c for c in cities if _state(((pc.get(c) or {}).get("check")) or {}) == "present"]
+        btn = ("<span class='added'>added · re-run needed</span>" if v in current_panel
+               else f"<button class='add' data-add='{_e(v)}'>+ Add</button>")
+        return (kind, _ovb(f"<b>New</b> · seen in {', '.join(city_code(c) for c in seen)}{btn}",
+                           "background:#fef2f2;color:#b91c1c;"),
+                "suggested by the reads and seen through its own mutations; not on your list",
+                RED, RED, "filled")
+    if kind == "folded":
+        return (kind, "", "", GREY, "#9ca3af", "ring")
+    return (kind, _ovb(f"<b style='color:#1f2328'>Possible</b> · {_e(why)}",
+                       "color:#4b5563;box-shadow:inset 0 0 0 1px #e5e7eb;"),
+            "suggested by the reads, not on your list; its own mutations only partly confirm it",
+            "#9ca3af", "#4b5563", "ring")
+
+
 def _panel_evidence(per_city, sel, v="", gid="", in_panel=False):
     """One line for the selected city (2026-10-13: the per-sample squares
     moved into the row's details)."""
@@ -1106,8 +1212,8 @@ def _pattern_row(muts, days, cities, sel, style_full, style_one, color, evidence
                                f"{' '.join(muts)}", sel == c))
     m = " ".join(muts[:4]) + (" …" if len(muts) > 4 else "")
     return (f"<tr><td style='padding-left:14px'><span class='mono' style='color:{color}' "
-            f"data-tip='{_e(' '.join(muts))}'>{_e(m)}</span></td>{''.join(cells)}"
-            f"<td class='ev'>{evidence}</td></tr>")
+            f"data-tip='{_e(' '.join(muts))}'>{_e(m)}</span></td><td class='ov'></td>"
+            f"{''.join(cells)}<td class='ev'>{evidence}</td></tr>")
 
 
 # ── the whole view ─────────────────────────────────────────────────────────
@@ -1155,7 +1261,8 @@ def _near_rows(r, v, changes, cities, sel, gid, n_cols):
               "<span class='dim'>not in this city · </span>") + place
         if not gain:
             ev = f"<span class='dim'>{ev}</span>"
-        out.append(f"<tr class='near g-{gid} hid'>{tc}{''.join(cells)}<td class='ev'>{ev}</td></tr>")
+        out.append(f"<tr class='near g-{gid} hid'>{tc}<td class='ov'></td>{''.join(cells)}"
+                   f"<td class='ev'>{ev}</td></tr>")
     return out
 
 
@@ -1189,7 +1296,7 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
     data_until = data_until or {}
     ot = set(ot)
     n_c = len(cities)
-    n_cols = n_c + 2
+    n_cols = n_c + 3          # tree · overview · cities · details (2026-10-20)
     quality = quality or {}
 
     def _qtip(c):
@@ -1202,23 +1309,20 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
 
     # (2026-10-20) no "k/n" under the city code any more: it read like a vote;
     # the samples well covered are in the code's hover and the Evidence header
-    head = ("<tr><th>Variant</th>"
+    # (2026-10-20) tree · overview (all cities, never changes) · cities · details;
+    # the per-city words moved into the details, opened by clicking a cell
+    head = ("<tr><th>Lineage</th><th style='padding-left:8px'>Overview · all cities</th>"
             + "".join(f"<th class='cc{' sel' if c == sel else ''}'><button data-city='{_e(c)}' "
                       f"data-tip='{_e(city_name(c))}"
                       + (f" · data until {_e(data_until[c])}" if c in data_until else "")
                       + _e(_qtip(c))
-                      + f" — click to colour the tree by this city'>"
+                      + f" — click to show this city in the details'>"
                       f"{_e(city_code(c))}</button></th>" for c in cities)
-            # the Evidence header may wrap (2026-10-20): unbroken, its long text
-            # kept the column wide and pushed the table past the right edge
-            + f"<th style='padding-left:12px;white-space:normal'>Evidence · {_e(city_name(sel))}"
-            + (f" <span style='font-weight:400;text-transform:none;letter-spacing:0'>· data until "
-               f"{_e(data_until[sel])}</span>" if sel in data_until else "")
-            + (f" <span style='font-weight:400;text-transform:none;letter-spacing:0'>· "
-               f"{quality[sel][0]} of {quality[sel][1]} samples well covered</span>"
-               if sel in quality else "")
-            + "</th></tr>")
+            # the last column takes the spare width, so the tree, the overview
+            # and the cells stay together on the left (2026-10-20)
+            + "<th style='width:100%'></th></tr>")
     body = []
+    folded = []
     sname = city_name(sel)
     for r in rows:
         v, kind = r["node"], r["kind"]
@@ -1228,68 +1332,50 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
                       f"{_e(r['parents'])}</span>")
         if kind == "group":
             body.append(f"<tr class='sp'>{_tree_cell(r, GREY, 'spine', f'''<span class='grp-root'>{_e(r['label'])}</span>''', r.get('tip', r['label']))}"
-                        f"<td colspan='{n_c + 1}'></td></tr>")
+                        f"<td colspan='{n_c + 2}'></td></tr>")
             continue
         if kind == "spine":
             name = f"<span class='spl'>{_e(r['label'])}</span>{chips}"
             body.append(f"<tr class='sp'>{_tree_cell(r, GREY, 'spine', name, r['label'])}"
-                        f"<td colspan='{n_c + 1}'></td></tr>")
+                        f"<td colspan='{n_c + 2}'></td></tr>")
             continue
         if kind in ("panel", "panel_ot"):
             pc = {c: verdicts[c][v] for c in cities if v in verdicts.get(c, {})}
-            dsel = pc.get(sel) or {}
-            _st, _lb, dcol, ncol, share = _scale(dsel) if dsel else (None, "", GREY, "#6b7280", None)
-            tip = _cell_tip(v, sname, dsel) if dsel else f"{v} · {sname}: no result"
-            no_meas = share is None and dsel.get("n_markers", 0) > 0
-            dk = "dashed" if (no_meas or not dsel) else "filled"
-            # orange means one thing (2026-10-20): a lineage of your panel no
-            # city calls present — the same rule as the row's warning, whichever
-            # city is selected. Absent in this city but present elsewhere: grey.
-            if _panel_warn(pc, True):
-                dcol, ncol, dk = AMBER, AMBER_T, "filled"
-            elif dcol in (AMBER, "#fcd9a3"):
-                dcol, ncol = "#d1d5db", "#6b7280"
+            # the dot, the name and the overview follow all cities, not the
+            # selected one (2026-10-20); amber only for "on your list, not
+            # seen in any city"
+            ov, ovtip, dcol, ncol, dk = _panel_overview(pc, cities)
+            tip = f"{v}: on your list" + (f" · {ovtip}" if ovtip else "")
             name = f"<span class='nm' style='color:{ncol}'>{_e(v)}</span>{chips}"
             tc = _tree_cell(r, dcol, dk, name, tip)
-            # no row tint (2026-10-20): the cells carry the answer; a whole row
-            # in the selected city's colour was noise
-            tint = None
+            tint = None                     # no row tint (2026-10-20)
             dgid = "det-" + re.sub(r"[^A-Za-z0-9]", "_", v)
             cells = _panel_cells(v, pc, cities, sel)
-            ev = _panel_evidence(pc, sel, v, dgid, in_panel=True)
+            ov = f"<span data-tip='{_e(ovtip)}'>{ov}</span>" if ovtip else ov
             drow = (_detail_row(dgid, v, pc, cities, sel, n_cols)
                     if any((x or {}).get("timeline") for x in pc.values()) else "")
+            ev = _det_link(dgid) if drow else ""
         elif kind == "finding" and v in findings:
             f = findings[v]
-            _dsel = (f.get("per_city") or {}).get(sel) or {}
-            n_sel = int(_dsel.get("days", 0) or 0)
-            named = f.get("status") == "named"
-            family = f.get("status") == "family"
-            col = GREY if (named or family) else RED
-            dk = ("ring" if named or family or n_sel == 0
-                  else "filled" if n_sel >= nn["ed"] else "dashed")
-            if _dsel.get("xcheck"):
-                dk = "dashed" if (_dsel.get("check") or {}).get("state") == "present" else "ring"
-            tip = (f"{v}: not in your panel · {sname}: "
-                   + ("not confirmed" if named else f"evidence on {n_sel} {_pl(n_sel, 'sample')}"
-                      if n_sel else "not seen here"))
+            # new / possible / covered, from all cities (2026-10-20); a
+            # suggestion its own mutations don't support where the reads
+            # suggested it is folded into one line under the tree
+            fkind, ov, ovtip, col, ncol, dk = _finding_overview(
+                v, f, cities, current_panel, bool(r.get("has_children")))
+            if fkind == "folded":
+                folded.append(v)
+                continue
             fam_desc = f.get("descendants") or []
-            if family:
-                tip = (f"{v}: family — its ★ markers are carried by the lineages below it "
-                       f"({', '.join(fam_desc[:6])}{' …' if len(fam_desc) > 6 else ''}); "
-                       "add those instead")
-            btn = ""
-            if f.get("addable"):
-                btn = ("<span class='added'>added · re-run needed</span>" if v in current_panel
-                       else f"<button class='add' data-add='{_e(v)}'>+ Add</button>")
-            name = (f"<span class='nm' style='color:{col}'>{_e(v)}</span>{chips}{btn}")
+            tip = f"{v}: suggested by the reads, not on your list" + (f" · {ovtip}" if ovtip else "")
+            name = f"<span class='nm' style='color:{ncol}'>{_e(v)}</span>{chips}"
             tc = _tree_cell(r, col, dk, name, tip)
             tint = None                     # no row tint (2026-10-20)
             dgid = "det-" + re.sub(r"[^A-Za-z0-9]", "_", v)
             _chk = {c: p_["check"] for c, p_ in (f.get("per_city") or {}).items()
                     if (p_ or {}).get("check")}
             cells = _finding_cells(v, f, cities, sel)
-            ev = _finding_evidence(f, sel, dgid if _chk else "")
+            ev = ""
+            family = fkind == "covered"
             its = (f.get("itself") or {}).get(sel)
             if its:
                 # Jaccard with the lineages directly below it (found or in
@@ -1305,21 +1391,21 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
                 _it = ("can’t tell (too few reads, or no marker kept by all lineages below)"
                        if its[0] is None
                        else f"≈ {100 * its[0]:.0f} %")
-            if family:
-                _fd = ", ".join(fam_desc[:4]) + (f" +{len(fam_desc) - 4}" if len(fam_desc) > 4 else "")
-                ev = (f"<span class='dim' data-tip='{_e(_calc if its else tip)}'>family — carried by "
-                      f"lineages below it ({_e(_fd)})"
-                      + (f": itself {_it}" if its else "") + "</span> · " + ev)
-            elif its:
-                ev = (ev + f"<span class='dim' data-tip='{_e(_calc)}'> · itself {_it}, "
-                      "after the lineages below it</span>")
+            # "itself" (how much of it is left after the lineages below it) goes
+            # into the overview's hover; the details get it in part B
+            if its:
+                ovtip = (ovtip + " · " if ovtip else "") + (
+                    f"{sname}: itself {_it} after the lineages below it — {_calc}")
+            ov = f"<span data-tip='{_e(ovtip)}'>{ov}</span>" if ovtip else ov
             drow = (_detail_row(dgid, v, _chk, cities, sel, n_cols, found=True)
                     if any(x.get("timeline") for x in _chk.values()) else "")
+            ev = _det_link(dgid) if drow else ""
         else:  # tracked, not selected
             name = f"<span style='color:{TRACKED}'>{_e(v)}</span>{chips}"
             tc = _tree_cell(r, TRACKED, "ring", name, f"{v}: officially tracked, not in your panel")
-            tint, cells, ev = None, f"<td colspan='{n_c}'></td>", "<span class='dim'>not in the run</span>"
-            drow = ""
+            ov = _ovb("officially tracked · not on your list, not in the run", "color:#8b8f97;")
+            tint, cells, ev = None, f"<td colspan='{n_c}'></td>", ""
+            drow, dgid = "", ""
         bg = f" style='background:{tint}{'22' if kind in ('panel', 'panel_ot') else '14'}'" if tint else ""
         nch = near.get(v) if kind in ("panel", "panel_ot") else None
         if nch:
@@ -1349,7 +1435,10 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
             tag = (f"<span class='{cls}' data-grp='{gid}' data-tip='{_e(tip)}'>"
                    f"{label} <span class='arr'>▸</span></span>")
             tc = tc.replace("</span></td>", f"</span>{tag}</td>", 1) if tc.endswith("</span></td>") else tc
-        body.append(f"<tr{bg}>{tc}{cells}<td class='ev'>{ev}</td></tr>")
+        # data-gid: clicking a city cell of this row also opens its details
+        gid_attr = f" data-gid='{dgid}'" if drow else ""
+        body.append(f"<tr{bg}{gid_attr}>{tc}<td class='ov'>{ov}</td>{cells}"
+                    f"<td class='ev'>{ev}</td></tr>")
         if drow:
             body.append(drow)
         if nch:
@@ -1357,6 +1446,15 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
             if len(nch) > near_max:
                 body.append(f"<tr class='near note g-{gid} hid'><td colspan='{n_cols}'>"
                             f"showing {near_max} of {len(nch)} changes of {_e(v)}</td></tr>")
+
+    if folded:
+        body.append(
+            f"<tr class='note'><td colspan='{n_cols}'><span data-tip='Suggested by the reads in "
+            "some city, but their own mutations say not seen there, and no city sees them or is "
+            "unclear. Leaves of the tree only.'>"
+            f"▸ {len(folded)} {_pl(len(folded), 'suggestion')} not supported by "
+            f"{'its' if len(folded) == 1 else 'their'} own mutations where the reads suggested "
+            f"{'it' if len(folded) == 1 else 'them'}: {_e(', '.join(folded))}</span></td></tr>")
 
     if named_hidden:
         n_named = sum(1 for f in findings.values() if f.get("status") == "named")
@@ -1495,33 +1593,40 @@ _LEGEND_ROWS = (
       "▧ low-coverage sample</span>"
     + "</div><div class='row'><span class='t'>Found</span>"
     + _li(S_NAMED, "0", "not confirmed (reads also fit related lineages)")
-    + "<span class='i'><b style='color:#6b7280'>grey name</b> family: its ★ markers are on "
-      "the reads of lineages below it (itself under the present limit), no + Add</span>"
+    + "<span class='i'><b style='color:#9ca3af'>covered</b>: its own mutations are on the reads "
+      "of lineages below it (itself under the present limit), no + Add — add those instead</span>"
     + _li(S_NOVEL, "3", "unassigned · days")
     + _li(S_BROAD, "2", "fits too many lineages · days")
     + _li(S_NEAR, "3", "◆ panel variant ± 1 change · days (a hint)")
     + "</div><div class='row'><span class='t'>Tree</span>"
-    + _ld(f"background:{RED}", "found in this city")
-    + _ld(f"border:1.8px dashed {RED}", "1 day here")
-    + _ld(f"border:2px solid {RED}", "not seen here")
+    + _ld(f"background:{GREEN}", "on your list, seen somewhere")
+    + _ld(f"background:{AMBER}", "on your list, not seen in any city")
+    + _ld(f"background:{RED}", "new: suggested by the reads and seen (+ Add)")
+    + _ld("border:2px solid #9ca3af", "possible: suggested, only partly seen")
+    + _ld("border:2px solid #d1d5db", "covered: its own mutations are on a lineage below it")
     + _ld(f"border:2px solid {TRACKED}", "OT, not selected")
-    + "<span class='i'>panel dots = the cell colours · hover anything for details · click a "
-      "city's code or any of its cells to colour the tree</span></div>")
+    + "<span class='i'>the dots and the overview column cover all cities and don't change when "
+      "you click one · click a city's code or any of its cells to see it in the details · "
+      "suggestions their own mutations don't support are listed in one line under the "
+      "tree</span></div>")
 
 # The full legend now lives behind "ⓘ How to read this page" above the tabs
 # (components.how_to_read, 2026-10-13); the table keeps one short line on top,
 # always in view, with the cell colours you need while reading the tree.
 SHORT_LEGEND = (
     "<div class='lg lgs'><div class='row'>"
-    + "<span class='i'>markers present : absent (couldn't answer)</span>"
-    + "<span class='i'>" + _lc({"n_markers": 3, "n_measured": 3, "n_present": 3}) + "present</span>"
-    + "<span class='i'>" + _lc({"n_markers": 2, "n_measured": 2, "n_present": 0}) + "absent</span>"
+    + "<span class='i'>cells: its own mutations seen : not seen (couldn't answer)</span>"
+    + "<span class='i'>" + _lc({"n_markers": 3, "n_measured": 3, "n_present": 3}) + "seen</span>"
+    + "<span class='i'>" + _lc({"n_markers": 2, "n_measured": 2, "n_present": 0}) + "not seen</span>"
     + "<span class='i'>" + _lc({"n_markers": 2, "n_measured": 1, "n_present": 1})
     + "undecided</span>"
     + "<span class='i'><span class='cal'><i style='background:" + GREEN + ";" + _LOWQ
     + "'></i></span>low coverage</span>"
-    + _ld(f"background:{RED}", "found (not in panel)")
-    + "<span class='dim'>ⓘ more: “How to read this page” above the tabs</span>"
+    + _ld(f"background:{GREEN}", "on your list")
+    + _ld(f"background:{AMBER}", "on your list, not seen in any city")
+    + _ld(f"background:{RED}", "new: suggested by the reads")
+    + _ld("border:2px solid #9ca3af", "possible / covered")
+    + "<span class='dim'>click a cell for its details · ⓘ more: “How to read this page” above the tabs</span>"
     + "</div></div>")
 
 
@@ -1624,11 +1729,22 @@ window.vtClick = function (e, send, sendHeight) {
   }
   // any cell of a city column picks that city, so there's no need to
   // scroll back to the header codes (2026-10-08)
+  // a cell also opens its row's details for that city (2026-10-20): the
+  // details stay open across the redraw that the city change triggers
   var td = e.target.closest("td.cc");
   if (td && td.parentNode) {
-    var own = Array.prototype.slice.call(td.parentNode.querySelectorAll("td.cc"));
+    var tr = td.parentNode, gid = tr.getAttribute("data-gid");
+    var own = Array.prototype.slice.call(tr.querySelectorAll("td.cc"));
     var heads = document.querySelectorAll("th.cc [data-city]");
     var i = own.indexOf(td);
+    if (gid) {
+      window.vtOpen[gid] = true;
+      document.querySelectorAll(".g-" + gid).forEach(function (r) { r.classList.remove("hid"); });
+      document.querySelectorAll("[data-grp='" + gid + "'] .arr").forEach(function (a) {
+        a.textContent = "▾";
+      });
+      sendHeight();
+    }
     if (own.length === heads.length && i >= 0 && !td.classList.contains("sel")) {
       send("streamlit:setComponentValue",
            {value: {city: heads[i].getAttribute("data-city"), t: Date.now()}, dataType: "json"});
