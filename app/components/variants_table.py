@@ -411,9 +411,11 @@ def _cell_tip(v, city, d, extra=""):
     50 % ✓ · 8350C 0 % ✗' (+ why it was checked)."""
     n_mk, p, a, u = _vote_counts(d)
     if n_mk == 0:
-        return f"{v} · {city} — no ★ marker"
-    word = _WORD.get(_state(d), "too few reads")
-    counts = f"{p} ✓ {a} ✗" + (f" {u} ?" if u else "") + f" of {n_mk} ★"
+        return f"{v} · {city} — no mutation of its own"
+    # plain words (2026-10-21): the old ✓ ✗ ? ★ symbols are gone from the page
+    word = {"present": "seen", "absent": "not seen"}.get(_state(d), "undecided")
+    counts = (f"{p} seen, {a} not seen" + (f", {u} couldn't answer" if u else "")
+              + f", of {n_mk} own {_pl(n_mk, 'mutation')}")
     samples, basis = _basis_samples(d)
     base = (f"{len(samples)} {_pl(len(samples), 'sample')} weighted by coverage (each ≤ "
             f"{_cov_factor():g} × its median depth, ≤ {_cap_reads():,} reads)" if basis == "weighted"
@@ -421,8 +423,10 @@ def _cell_tip(v, city, d, extra=""):
             else "weak: no coverage data (all counted, ≤ "
                  f"{_cap_reads():,} reads each)")
     if _state(d) == "few":
-        base += f" · only {p} ★ measured, {_min_present()} needed"
-    ms = _marker_syms(d)
+        base += f" · only {p} seen, {_min_present()} needed"
+    ms = " · ".join(f"{x['marker']}: {_answer_text(x)}" for x in (d.get("detail") or [])[:6])
+    if len(d.get("detail") or []) > 6:
+        ms += f" · +{len(d['detail']) - 6} more"
     # what the light shades said until 2026-10-20 is in words: "weak: no
     # coverage data" in base, and on how few samples it was clear
     return (f"{v} · {city} — {word} ({counts}) · {base}" + _clear_note(d)
@@ -1025,7 +1029,13 @@ def _finding_overview(v, f, cities, current_panel, has_children=False):
                 "suggested by the reads and seen through its own mutations; not in the panel",
                 RED, RED, "filled")
     if kind == "folded":
-        return (kind, "", "", GREY, "#9ca3af", "ring")
+        sugg = [c for c in cities if not (pc.get(c) or {}).get("xcheck")
+                and int((pc.get(c) or {}).get("days") or 0) > 0]
+        where = ", ".join(city_code(c) for c in sugg)
+        return (kind, _ovb(f"<b>Not supported</b> · suggested in {_e(where)}, its own "
+                           "mutations not seen there", "color:#9ca3af;"),
+                "the reads suggested it, but its own mutations say not seen in every city "
+                "where they did, and no city sees it", "#d1d5db", "#9ca3af", "ring")
     return (kind, _ovb(f"<b style='color:#1f2328'>Possible</b> · {_e(why)}",
                        "color:#4b5563;box-shadow:inset 0 0 0 1px #e5e7eb;"),
             "suggested by the reads, not in the panel; its own mutations only partly confirm it",
@@ -1411,7 +1421,7 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
             # and the cells stay together on the left (2026-10-20)
             + "<th style='width:100%'></th></tr>")
     body = []
-    folded = []
+    folded, folded_rows = [], []
     sname = city_name(sel)
     for r in rows:
         v, kind = r["node"], r["kind"]
@@ -1452,8 +1462,11 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
             fkind, ov, ovtip, col, ncol, dk = _finding_overview(
                 v, f, cities, current_panel, bool(r.get("has_children")))
             if fkind == "folded":
+                # kept, but drawn flat at the bottom in a closed group that the
+                # line under the tree opens (2026-10-21: PJ.2.1 had a signal
+                # in the wastewater and couldn't be opened while hidden)
                 folded.append(v)
-                continue
+                r = dict(r, depth=0, guides=[], last=True, has_children=False)
             fam_desc = f.get("descendants") or []
             tip = f"{v}: suggested by the reads, not in the panel" + (f" · {ovtip}" if ovtip else "")
             name = f"<span class='nm' style='color:{ncol}'>{_e(v)}</span>{chips}"
@@ -1526,6 +1539,13 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
             tc = tc.replace("</span></td>", f"</span>{tag}</td>", 1) if tc.endswith("</span></td>") else tc
         # data-gid: clicking a city cell of this row also opens its details
         gid_attr = f" data-gid='{dgid}'" if drow else ""
+        if kind == "finding" and v in folded:
+            # into the closed "not supported" group at the bottom
+            folded_rows.append(f"<tr class='g-fold hid'{gid_attr}>{tc}<td class='ov'>{ov}</td>"
+                               f"{cells}<td class='ev'>{ev}</td></tr>")
+            if drow:
+                folded_rows.append(drow)
+            continue
         body.append(f"<tr{bg}{gid_attr}>{tc}<td class='ov'>{ov}</td>{cells}"
                     f"<td class='ev'>{ev}</td></tr>")
         if drow:
@@ -1538,12 +1558,14 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
 
     if folded:
         body.append(
-            f"<tr class='note'><td colspan='{n_cols}'><span data-tip='Suggested by the reads in "
-            "some city, but their own mutations say not seen there, and no city sees them or is "
-            "unclear. Leaves of the tree only.'>"
-            f"▸ {len(folded)} {_pl(len(folded), 'suggestion')} not supported by "
-            f"{'its' if len(folded) == 1 else 'their'} own mutations where the reads suggested "
-            f"{'it' if len(folded) == 1 else 'them'}: {_e(', '.join(folded))}</span></td></tr>")
+            f"<tr class='grp' data-grp='fold'><td colspan='{n_cols}'><span data-tip='Suggested "
+            "by the reads in some city, but their own mutations say not seen there, and no city "
+            "sees them or is unclear. Leaves of the tree only. Click to show their rows.'>"
+            f"<span class='arr'>▸</span>{len(folded)} {_pl(len(folded), 'suggestion')} not "
+            f"supported by {'its' if len(folded) == 1 else 'their'} own mutations where the "
+            f"reads suggested {'it' if len(folded) == 1 else 'them'}: "
+            f"{_e(', '.join(folded))}</span></td></tr>")
+        body += folded_rows
 
     if named_hidden:
         n_named = sum(1 for f in findings.values() if f.get("status") == "named")

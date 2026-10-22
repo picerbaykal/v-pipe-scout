@@ -99,7 +99,9 @@ def test_hover_says_on_how_few_samples_it_was_clear():
     # what the light shade said until 20 Oct, now in the hover
     d = _marks(2, 2, 3, ["absent", "thin", "present", "mixed"])
     assert "only 1 sample on its own (12 Aug)" in vt._clear_note(d)
-    assert "only 1 sample on its own" in vt._cell_tip("X", "Basel", d)
+    tip = vt._cell_tip("X", "Basel", d)
+    assert "only 1 sample on its own" in tip
+    assert "★" not in tip and "✓" not in tip and "2 seen, 0 not seen" in tip
 
 
 def test_old_results_use_only_their_well_covered_samples():
@@ -193,7 +195,9 @@ def test_table_has_an_overview_column_and_folds_unsupported_suggestions():
     assert "not seen in any city" in html                      # LP.8, amber
     assert "Possible" in html and "suggested on 1 sample only" in html   # RV.2.1.1
     assert "1 suggestion not supported by its own mutations" in html and "PJ.2.1" in html
-    assert html.count("class='nm'") == 2                       # PJ.2.1 has no row
+    # PJ.2.1 keeps a row, closed in the group the line opens (2026-10-21)
+    assert "data-grp='fold'" in html and "class='g-fold hid'" in html
+    assert "Not supported" in html and "suggested in BE" in html
 
 
 # ── the details' words (2026-10-20) ──────────────────────────────────────
