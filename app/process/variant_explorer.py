@@ -255,21 +255,33 @@ def check_in_data(markers: List[str], per_date: Dict[str, Dict[str, list]],
     # markers with no neighbour in reach, decided on the whole window
     no_link = set(check_verdicts(markers, per_date or {}, c)["no_link"])
     need = min(2, len(markers))
+    # a sample's square counts its reads like the cell does (2026-10-22): at
+    # most min(cap_reads, cov_factor × its median depth) per marker. Until
+    # then a square counted up to cap_reads, so a thin sample with a jackpot
+    # (few virus copies, copied many times) gave a firm answer the cell
+    # itself discounts: 97 of 124 thin BA.3.2 spring squares answered.
+    from process.cooc import sample_cap
+    depth_all = ({str(d)[:10]: float((v or {}).get("median", 0) or 0)
+                  for d, v in quality.items()} if quality else None)
+    c_day = dict(c, cap_reads=0)                 # capped below, link kept whole
     for d in sorted(set(dates or []) | set(per_date or {})):
         cells = (per_date or {}).get(d, {})
-        if not any((cells.get(m) or [0])[0] >= c["min_cov"] for m in markers):
+        cap = sample_cap(c, depth_all, d)
+        k = {m: (cap / x[0] if cap and x[0] > cap else 1.0)
+             for m, x in cells.items() if m in link and x and x[0]}
+        if not any(cells[m][0] * k[m] >= c["min_cov"] for m in k):
             tl.append([d, "uncovered"])
             continue
-        # this day's reads, the window's link
-        day = {m: [x[0], x[1], link[m][0], link[m][1]]
-               for m, x in cells.items() if m in link and x}
-        r = check_verdicts(markers, {d: day}, c, no_link)
+        # this day's counted reads, the window's link
+        day = {m: [cells[m][0] * k[m], cells[m][1] * k[m], link[m][0], link[m][1]]
+               for m in k}
+        r = check_verdicts(markers, {d: day}, c_day, no_link)
         if r["n_measured"] < need:
             mark = "present" if r["verdict"] == "present" else "thin"
         else:
             mark = r["verdict"] if r["verdict"] in ("present", "absent") else "mixed"
         tl.append([d, mark])
-        detail[d] = _day_detail(markers, day, r, c)
+        detail[d] = _day_detail(markers, day, r, c, raw={m: cells[m][0] for m in k})
     # the vote (2026-10-16): every sample, each counting at most
     # min(check.cap_reads, check.cov_factor × its median depth) reads per
     # marker (process.cooc.sample_cap) — basis "weighted". Until 16 Oct the
@@ -285,14 +297,28 @@ def check_in_data(markers: List[str], per_date: Dict[str, Dict[str, list]],
     res = check_verdicts(markers, pd_all, None, no_link, depth=depth)
     basis = "weighted" if depth else "all"
     state = res["verdict"]          # present / absent / mixed / not_covered
+    # each sample's COUNTED reads per marker (the same cap as the vote), for
+    # the all-cities answer and week line (process.national, 2026-10-22)
+    from process.cooc import sample_cap
+    samples = {}
+    for d, cells in pd_all.items():
+        cap = sample_cap(c, depth, d)
+        row = {}
+        for m in markers:
+            x = cells.get(m)
+            if x and x[0]:
+                k = cap / x[0] if cap and x[0] > cap else 1.0
+                row[m] = [round(v * k, 2) for v in x]
+        if row:
+            samples[str(d)[:10]] = row
     return {"state": state, "n_present": res["n_present"], "n_measured": res["n_measured"],
             "n_markers": res["n_markers"], "timeline": tl,
             "day_detail": detail, "detail": _marker_detail(markers, pd_all, res, c),
             "quality": q, "n_well": len(good) if q else None, "n_samples": len(tl),
-            "basis": basis}
+            "basis": basis, "markers": list(markers), "samples": samples}
 
 
-def _day_detail(markers, cells, r, c, n_max=8) -> str:
+def _day_detail(markers, cells, r, c, n_max=8, raw=None) -> str:
     """One day, every marker: '14808C 8 % of 140 reads ✓ · 21249A 0 % of 900
     reads ✗ · 24604G 3 % of 300 reads (1–5 %) · 4927T 12 reads (under 100)'."""
     out = []
@@ -302,14 +328,16 @@ def _day_detail(markers, cells, r, c, n_max=8) -> str:
         if not cov:
             out.append(f"{m} no reads")
             continue
-        # the real read count, not the one capped for the vote (2026-10-13)
-        num = f"{m} {f * 100:.0f} % of {x.get('cov_raw', cov):,} reads"
+        # counted reads, and the total when the cap cut it (2026-10-22)
+        tot = (raw or {}).get(m, x.get("cov_raw", cov))
+        num = (f"{m} {f * 100:.0f} % of {cov:,} counted reads ({tot:,} in total)" if tot > cov
+               else f"{m} {f * 100:.0f} % of {tot:,} reads")
         if st == "present":
             out.append(num + " ✓")
         elif st == "absent":
             out.append(num + " ✗")
         elif cov < c["min_cov"]:
-            out.append(f"{m} {cov} reads (under {c['min_cov']})")
+            out.append(f"{m} {cov:,} counted reads (under {c['min_cov']})")
         elif f < c["present_freq"]:
             out.append(num + f" ({c['absent_freq'] * 100:g}–{c['present_freq'] * 100:g} %)")
         else:

@@ -56,7 +56,10 @@ def panel_verdicts(cooc_res: dict, variants: list) -> dict:
                   "n_samples": _cid.get("n_samples"), "basis": _cid.get("basis"),
                   # each marker's numbers, for the row's details (2026-10-13)
                   "detail": _cid.get("detail") or [],
-                  "day_detail": _cid.get("day_detail") or {}}
+                  "day_detail": _cid.get("day_detail") or {},
+                  # counted reads per sample, for the all-cities week line (2026-10-22)
+                  "markers": _cid.get("markers") or [],
+                  "samples": _cid.get("samples") or {}}
     return out
 
 

@@ -210,7 +210,7 @@ def test_day_marks_use_the_cells_rule_and_say_when_a_day_is_too_thin():
     r = check_in_data(mk, pd_, sorted(pd_))
     assert dict(r["timeline"]) == {"2026-09-05": "thin", "2026-09-09": "mixed"}
     # the hover says why, marker by marker
-    assert "500A 40 reads (under 100)" in r["day_detail"]["2026-09-05"]
+    assert "500A 40 counted reads (under 100)" in r["day_detail"]["2026-09-05"]
     assert "400T 20 % of 500 reads ✓" in r["day_detail"]["2026-09-09"]
 
 

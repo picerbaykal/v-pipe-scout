@@ -40,7 +40,19 @@ TRACKED = "#1f2430"        # officially tracked, not selected: hollow ring in th
 
 CSS = """
 <style>
+/* narrow screens (2026-10-22): the table scrolls sideways inside its box
+   instead of being cut at the right, and the lineage column stays put */
+.vtw { overflow-x:auto; max-width:100%; -webkit-overflow-scrolling:touch; }
 .vt { border-collapse:collapse; font-size:15px; width:100%; }
+.vt td.tr, .vt th:first-child { position:sticky; left:0; z-index:2; background:#fff; }
+.vt tr.dt td, .vt tr.sec td, .vt tr.grp td, .vt tr.note td { position:static; }
+@media (max-width: 1100px) {
+  .vt { font-size:14px; }
+  .vt td.ov { min-width:160px; max-width:220px; }
+  .vt th.cc, .vt td.cc { width:54px; }
+  .vt td.cc .c { width:50px; font-size:11.5px; }
+  .vt .spl { max-width:160px; }
+}
 .vt th { text-align:left; font-size:12px; letter-spacing:.03em; text-transform:uppercase; color:#6b7280;
          font-weight:600; padding:0 8px 6px; border-bottom:1px solid #e6e8ec; white-space:nowrap; }
 .vt th.cc { width:66px; padding:0 2px 6px; text-align:center; letter-spacing:0; }
@@ -59,7 +71,7 @@ CSS = """
 .vt td.cc:not(.sel):hover { background:rgba(49,51,63,.04); }
 .vt td.cc.sel { background:rgba(49,51,63,.07); }
 .vt tr.sp td { height:24px; border-bottom:none; }
-.vt td.tr { position:relative; padding-right:12px; }
+.vt td.tr { padding-right:12px; }   /* sticky (top of CSS) also anchors the tree lines */
 .vt .v { position:absolute; top:0; bottom:0; border-left:1.5px solid #d3d1c7; }
 .vt .v.half { bottom:50%; }
 .vt .v.down { top:50%; }
@@ -574,11 +586,52 @@ def _together_text(x):
     return "–"
 
 
+# ── All cities, one square per week (2026-10-22): on top of the city lines in
+#    a row's details. Each square is the cells' vote on every sample of every
+#    city that week (process.national); striped = fewer than 2 well-covered
+#    samples that week. ──────────────────────────────────────────────────────
+_NAT_WORD = {"present": "seen", "absent": "not seen", "mixed": "tie",
+             "not_covered": "too few reads"}
+
+
+def _nat_line(per_city, top, low=None):
+    """'All 6 cities  ■■■□□  6:0 (1) · seen' — or "" without data."""
+    try:
+        from process.national import national
+        nat = national(per_city)
+    except Exception:
+        return ""
+    if not nat or not nat["weeks"]:
+        return ""
+    mk = _day_marks(top, low)
+    sq = []
+    for w in nat["weeks"]:
+        a = w["answer"]
+        m = {"present": "present", "absent": "absent", "mixed": "mixed"}.get(a["verdict"], "thin")
+        style, _ = mk[m]
+        extra = "" if w["n_well"] >= 2 else (_LOWQ_EMPTY if m == "thin" else _LOWQ)
+        cities = " · ".join(f"{city_name(c)} {_NAT_WORD.get(v, v)}"
+                            for c, v in w["cities"].items())
+        tip = (f"week of {_short_date(w['start'])} · {_counts_label(a)} · "
+               f"{_NAT_WORD.get(a['verdict'], '')} · {w['n_samples']} "
+               f"{_pl(w['n_samples'], 'sample')}, {w['n_well']} well covered — {cities}")
+        sq.append(f"<i style='{style}{extra}' data-tip='{_e(tip)}'></i>")
+    a, n_c = nat["answer"], nat["n_cities"]
+    tip = ("all cities pooled, every sample in the chosen dates: its own mutations seen : "
+           "not seen (couldn't answer), the same rule as the cells")
+    return (f"<div class='dl'><b class='dn'>All {n_c} {_pl(n_c, 'city')}</b>"
+            f"<span class='cal' style='margin-left:0'>{''.join(sq)}</span>"
+            f"<span data-tip='{_e(tip)}'><b>{_e(_counts_label(a))}</b> · "
+            f"{_e(_NAT_WORD.get(a['verdict'], ''))}</span></div>")
+
+
 def _detail_row(gid, v, per_city, cities, sel, n_cols, found=False):
     """The row's details (hidden until 'details ▸'): one calendar line per
     city, the markers with their real reads in the selected city, and their
     median share across cities."""
-    top, low = (RED, None) if found else (GREEN, AMBER)
+    # not seen = pale, as in the cells: amber means only "in panel, not seen in
+    # any city" (2026-10-20); until 2026-10-22 a not-seen square was amber here
+    top, low = (RED, None) if found else (GREEN, None)
     lines = []
     for c in cities:
         d = per_city.get(c)
@@ -590,6 +643,7 @@ def _detail_row(gid, v, per_city, cities, sel, n_cols, found=False):
         sty = " style='color:#31333f;font-weight:600'" if c == sel else ""
         txt = f"<span class='dim'{sty}>{_e(_city_line(d))}</span>"
         lines.append(f"<div class='dl'>{nm}{_cal_line(d, top, low)}{txt}</div>")
+    nat = _nat_line(per_city, top, low)
     ds = per_city.get(sel) or {}
     mk_rows = []
     import statistics
@@ -626,7 +680,10 @@ def _detail_row(gid, v, per_city, cities, sel, n_cols, found=False):
               + th("typical share, 6 cities", "the middle value of this mutation's share over "
                    "the six cities: high or low everywhere means it's the mutation, not the city")
               + "</tr>" + "".join(mk_rows) + "</table>")
-    body = ("<div class='dim' style='font-size:12px'>Samples per city, newest right · striped = "
+    body = ((("<div class='dim' style='font-size:12px'>All cities: one square per week, "
+              "oldest left · striped = fewer than 2 well-covered samples that week</div>" + nat)
+             if nat else "")
+            + "<div class='dim' style='font-size:12px'>Samples per city, newest right · striped = "
             "low coverage (counts less) · green = seen on that sample alone · ⋯ = older "
             "low-coverage samples without it, not shown</div>" + "".join(lines) + mk
             + "<div style='font-size:12.5px;margin-top:6px'>"
@@ -1631,7 +1688,8 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
                         f"({novel_rest} reads, summed over cities and days) — not listed</td></tr>")
 
     return (CSS + SHORT_LEGEND
-            + f"<table class='vt'><thead>{head}</thead><tbody>{''.join(body)}</tbody></table>")
+            + f"<div class='vtw'><table class='vt'><thead>{head}</thead>"
+              f"<tbody>{''.join(body)}</tbody></table></div>")
 
 
 def _novel_evidence(muts, info):
