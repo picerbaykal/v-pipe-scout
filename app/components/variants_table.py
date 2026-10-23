@@ -1173,8 +1173,10 @@ def _new_grade(f, cities):
     if not g["ok_missing"]:
         k = len(g["missing"])
         return False, (f"{where} · " if where else "") + (
-            f"{k} of {g['n_measured']} mutations under {c.get('absent_freq', 0.01) * 100:g} % pooled"), (
-            early + f" · missing pooled: {', '.join(g['missing'][:8])}")
+            f"{k} of its {g['n_measured']} mutations missing"), (
+            early + f" · missing: under {c.get('absent_freq', 0.01) * 100:g} % of the reads of all "
+            f"cities together: {', '.join(g['missing'][:8])}; a real lineage carries all its "
+            "mutations")
     if not g["pooled_seen"]:
         return False, f"{where} · not clear with all cities pooled", early
     return False, f"{where} only, {wk}", early
