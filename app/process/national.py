@@ -113,8 +113,6 @@ def grade(per_city: Dict[str, dict], cfg: Optional[dict] = None) -> Optional[dic
 
     per_city: {city: check_in_data result}. Returns None without samples, else
       cities       cities whose own check says seen
-      found_pooled all cities pooled say seen at check.find_pooled_freq (2.5 %):
-                   found even when no city alone says seen
       pooled_seen  all cities pooled say seen at check.confirm_pooled_freq (5 %)
       weeks, n_weeks  weeks of the all-cities line that say seen, of all weeks
       missing, n_measured  its mutations clearly missing pooled (< 1 %), of
@@ -124,14 +122,15 @@ def grade(per_city: Dict[str, dict], cfg: Optional[dict] = None) -> Optional[dic
                    check.confirm_max_missing of n_measured
     bench_scorecard (6 cities, 7 Jun – 5 Sep and 8 Mar – 6 Jun): confirmed held
     no gone or not-in-Europe lineage; found-and-not-confirmed ("early") held
-    the one not-in-Europe false alarm (RF.5.1, Zürich) and 4 real lineages
-    (TK.1, PQ.16.1.1, RV.2.1.1, RV.1.3)."""
+    the one not-in-Europe false alarm (RF.5.1, Zürich) and real first
+    sightings (TK.1, PQ.16.1.1, RV.2.1.1). Finding stays per city: pooling
+    only grades (finding by pooling added up mutations from different
+    cities, XFG.6.3.3)."""
     from process.cooc import _check_cfg
     c = _check_cfg(cfg)
     conf = national(per_city, c["confirm_pooled_freq"])
     if not conf:
         return None
-    find = national(per_city, c["find_pooled_freq"])
     a = conf["answer"]
     cities = sorted(k for k, d in (per_city or {}).items() if (d or {}).get("state") == "present")
     weeks = sum(w["answer"]["verdict"] == "present" for w in conf["weeks"])
@@ -141,7 +140,6 @@ def grade(per_city: Dict[str, dict], cfg: Optional[dict] = None) -> Optional[dic
     ok_missing = len(missing) <= int(c["confirm_max_missing"] * n_meas)
     confirmed = bool(pooled_seen and ok_missing and (len(cities) >= c["confirm_min_cities"]
                                                      or weeks >= c["confirm_min_weeks"]))
-    return {"cities": cities, "found_pooled": bool(find and find["answer"]["verdict"] == "present"),
-            "pooled_seen": pooled_seen, "weeks": weeks, "n_weeks": len(conf["weeks"]),
+    return {"cities": cities, "pooled_seen": pooled_seen, "weeks": weeks, "n_weeks": len(conf["weeks"]),
             "missing": missing, "n_measured": n_meas, "ok_missing": ok_missing,
             "confirmed": confirmed}

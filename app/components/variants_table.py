@@ -1159,8 +1159,6 @@ def _new_grade(f, cities):
         return False, (f"{where} · " if where else "") + (
             f"{k} of {g['n_measured']} mutations under {c.get('absent_freq', 0.01) * 100:g} % pooled"), (
             early + f" · missing pooled: {', '.join(g['missing'][:8])}")
-    if not seen:
-        return False, "not clear in any city alone, seen with all cities pooled", early
     if not g["pooled_seen"]:
         return False, f"{where} · not clear with all cities pooled", early
     return False, f"{where} only, {wk}", early

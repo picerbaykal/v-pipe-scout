@@ -416,9 +416,9 @@ CHECK_DEFAULTS = {
                              #   and its own 1501A is at 0.8 % of 2,587 reads
     # A found lineage, graded on all cities pooled (process.national.grade,
     # 2026-10-23; bench_scorecard 6 cities, summer and spring):
-    "find_pooled_freq": 0.025,   # found also when all cities pooled say seen at this
-                                 #   share, though no city alone does (summer: +2
-                                 #   circulating lineages, no false alarm)
+    # (found also by pooling at 2.5 % was tried and dropped: it adds up
+    # mutations from different cities — XFG.6.3.3, Sep–Oct, Lugano's 1194C
+    # and 8359C plus Zürich's 28904T, in no city together)
     "confirm_pooled_freq": 0.05,  # confirmed: all cities pooled say seen at this share,
     "confirm_min_cities": 2,     #   ... and it's seen in at least this many cities
     "confirm_min_weeks": 2,      #   ... or in this many weeks of the all-cities line,
