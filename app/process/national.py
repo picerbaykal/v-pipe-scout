@@ -26,18 +26,23 @@ def _monday(d: str) -> date:
     return x - timedelta(days=x.weekday())
 
 
-def _vote(markers: List[str], samples: List[dict], own: Optional[dict] = None) -> dict:
+def _vote(markers: List[str], samples: List[dict], own: Optional[dict] = None,
+          present_freq: Optional[float] = None) -> dict:
     """check_verdicts on already-counted reads: keys are unique per sample
     (date#city) and no second cap is applied. own: the lineage's own markers,
-    as the cells use them (2026-10-23)."""
+    as the cells use them (2026-10-23); present_freq: another "seen" share
+    for grade() (else check.present_freq)."""
     from process.cooc import check_verdicts
+    cfg = dict(cap_reads=0)
+    if present_freq is not None:
+        cfg["present_freq"] = present_freq
     return check_verdicts(markers, {f"{s['date']}#{s['city']}": s["cells"] for s in samples},
-                          dict(cap_reads=0), own=own)
+                          cfg, own=own)
 
 
-def national(per_city: Dict[str, dict]) -> Optional[dict]:
+def national(per_city: Dict[str, dict], present_freq: Optional[float] = None) -> Optional[dict]:
     """The pooled answer for the chosen dates and one per week, or None
-    without samples.
+    without samples. present_freq: the "seen" share (default check.present_freq).
 
     Returns {answer: check_verdicts(...) for all samples, n_cities,
              weeks: [{start (Monday, ISO), answer, n_samples, n_well,
@@ -70,11 +75,12 @@ def national(per_city: Dict[str, dict]) -> Optional[dict]:
         ss = by_week[wk]
         cities = {}
         for c in sorted({s["city"] for s in ss}):
-            cities[c] = _vote(markers, [s for s in ss if s["city"] == c], own)["verdict"]
-        weeks.append({"start": wk.isoformat(), "answer": _vote(markers, ss, own),
+            cities[c] = _vote(markers, [s for s in ss if s["city"] == c], own,
+                              present_freq)["verdict"]
+        weeks.append({"start": wk.isoformat(), "answer": _vote(markers, ss, own, present_freq),
                       "n_samples": len(ss), "n_well": sum(s["well"] for s in ss),
                       "cities": cities})
-    return {"answer": _vote(markers, samples, own),
+    return {"answer": _vote(markers, samples, own, present_freq),
             "n_cities": len({s["city"] for s in samples}), "weeks": weeks}
 
 
@@ -100,3 +106,42 @@ def sudden(nat: Optional[dict], quiet_weeks: int = 2, min_cities: int = 2) -> Op
         return None
     return {"week": last["start"], "cities": cities,
             "quiet": [(w["start"], w["n_well"]) for w in before]}
+
+
+def grade(per_city: Dict[str, dict], cfg: Optional[dict] = None) -> Optional[dict]:
+    """How sure a found lineage is, from all cities pooled (2026-10-23).
+
+    per_city: {city: check_in_data result}. Returns None without samples, else
+      cities       cities whose own check says seen
+      found_pooled all cities pooled say seen at check.find_pooled_freq (2.5 %):
+                   found even when no city alone says seen
+      pooled_seen  all cities pooled say seen at check.confirm_pooled_freq (5 %)
+      weeks, n_weeks  weeks of the all-cities line that say seen, of all weeks
+      missing, n_measured  its mutations clearly missing pooled (< 1 %), of
+                   those measured
+      confirmed    pooled_seen, and in >= check.confirm_min_cities cities or
+                   >= check.confirm_min_weeks weeks, and missing <=
+                   check.confirm_max_missing of n_measured
+    bench_scorecard (6 cities, 7 Jun – 5 Sep and 8 Mar – 6 Jun): confirmed held
+    no gone or not-in-Europe lineage; found-and-not-confirmed ("early") held
+    the one not-in-Europe false alarm (RF.5.1, Zürich) and 4 real lineages
+    (TK.1, PQ.16.1.1, RV.2.1.1, RV.1.3)."""
+    from process.cooc import _check_cfg
+    c = _check_cfg(cfg)
+    conf = national(per_city, c["confirm_pooled_freq"])
+    if not conf:
+        return None
+    find = national(per_city, c["find_pooled_freq"])
+    a = conf["answer"]
+    cities = sorted(k for k, d in (per_city or {}).items() if (d or {}).get("state") == "present")
+    weeks = sum(w["answer"]["verdict"] == "present" for w in conf["weeks"])
+    missing = sorted(m for m, x in (a.get("markers") or {}).items() if x.get("status") == "absent")
+    n_meas = a.get("n_measured", 0)
+    pooled_seen = a["verdict"] == "present"
+    ok_missing = len(missing) <= int(c["confirm_max_missing"] * n_meas)
+    confirmed = bool(pooled_seen and ok_missing and (len(cities) >= c["confirm_min_cities"]
+                                                     or weeks >= c["confirm_min_weeks"]))
+    return {"cities": cities, "found_pooled": bool(find and find["answer"]["verdict"] == "present"),
+            "pooled_seen": pooled_seen, "weeks": weeks, "n_weeks": len(conf["weeks"]),
+            "missing": missing, "n_measured": n_meas, "ok_missing": ok_missing,
+            "confirmed": confirmed}

@@ -414,6 +414,23 @@ CHECK_DEFAULTS = {
                              #   A child carries its parent's mutations: SB.1.1
                              #   2:1 in Zürich, but both seen markers are SB.1's
                              #   and its own 1501A is at 0.8 % of 2,587 reads
+    # A found lineage, graded on all cities pooled (process.national.grade,
+    # 2026-10-23; bench_scorecard 6 cities, summer and spring):
+    "find_pooled_freq": 0.025,   # found also when all cities pooled say seen at this
+                                 #   share, though no city alone does (summer: +2
+                                 #   circulating lineages, no false alarm)
+    "confirm_pooled_freq": 0.05,  # confirmed: all cities pooled say seen at this share,
+    "confirm_min_cities": 2,     #   ... and it's seen in at least this many cities
+    "confirm_min_weeks": 2,      #   ... or in this many weeks of the all-cities line,
+    "confirm_max_missing": 0.10,  #   ... and at most this share of its measured
+                                 #   mutations is clearly missing (< absent_freq) pooled
+                                 #   (PJ.2.1, Sep–Oct: 4 of 18 at 0.0–0.2 %). Confirmed
+                                 #   held no gone or not-in-Europe lineage in either
+                                 #   window; "early" (found, not confirmed): summer 4
+                                 #   of 5 real
+    "thin_well_min": 2,          # a city with fewer well-covered samples: a seen cell
+                                 #   is striped (display only; counting thin cities
+                                 #   or not gave the same grades, 23 Oct)
 }
 
 

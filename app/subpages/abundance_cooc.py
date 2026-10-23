@@ -2444,9 +2444,20 @@ def app():
                         _ok = any((d.get("days") or 0) >= _ED for d in _pc.values())
                         # + Add: process.family.plus_add (the ★ check confirms it in
                         # a city, more than one sample; never "named" / "family")
+                        # all cities pooled (process.national.grade, 2026-10-23): found
+                        # also when no city alone says seen; confirmed / early in the row
+                        _gr = None
+                        if _status != "named":
+                            try:
+                                from process.national import grade as _grade
+                                _gr = _grade({c: d["check"] for c, d in _pc.items()
+                                              if d.get("check")})
+                            except Exception:
+                                _gr = None
                         return {"status": _status if _status != "confirmed" or _ok else "1 day",
-                                "per_city": _pc,
-                                "addable": _plus_add(_pc, _status, _ED)}
+                                "per_city": _pc, "grade": _gr,
+                                "addable": _plus_add(_pc, _status, _ED,
+                                                     pooled=bool(_gr and _gr["found_pooled"]))}
 
                     _findings = {}
                     if not _scan_running:

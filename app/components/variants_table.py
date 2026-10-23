@@ -317,6 +317,14 @@ def _counts_label(d):
     return f"{p}:{a}" + (f" ({u})" if u else "")
 
 
+def _thin(d):
+    """A city whose samples in the chosen dates are mostly thin: fewer than
+    check.thin_well_min well covered (None when the result has no coverage
+    data)."""
+    nw = d.get("n_well")
+    return nw is not None and nw < int(_check_cfg_safe().get("thin_well_min", 2))
+
+
 def _scale(d, found=False):
     """(cell style, label, dot colour, name colour, share present or None)
     for one city's check result. found: a lineage not in the panel.
@@ -333,10 +341,13 @@ def _scale(d, found=False):
     weak = d.get("basis") == "all"          # no well-covered sample decided it
     if st == "present":
         col = RED if found else GREEN
+        # seen in a city with fewer than check.thin_well_min well-covered
+        # samples: striped, as a low-coverage square (2026-10-23, display only)
+        sty = S_YES + _LOWQ_CELL if _thin(d) else S_YES
         if weak or _few_clear(d):
-            return (S_YES, lab, ("#fca5a5" if found else "#86efac"),
+            return (sty, lab, ("#fca5a5" if found else "#86efac"),
                     (RED if found else "#15803d"), share)
-        return S_YES, lab, col, (RED if found else "#15803d"), share
+        return sty, lab, col, (RED if found else "#15803d"), share
     if st == "absent" and not found:
         return S_NO, lab, ("#fcd9a3" if weak else AMBER), AMBER_T, share
     if st == "absent":
@@ -443,6 +454,9 @@ def _cell_tip(v, city, d, extra=""):
         ms += f" · +{len(d['detail']) - 6} more"
     # what the light shades said until 2026-10-20 is in words: "weak: no
     # coverage data" in base, and on how few samples it was clear
+    if _state(d) == "present" and _thin(d):
+        base += (f" · striped: {d.get('n_well')} of {d.get('n_samples')} samples well covered, "
+                 "so this city alone is weak evidence")
     if d.get("own_missing"):
         own, n_o = ", ".join(d.get("own") or []), len(d.get("own") or [])
         base += (f" · {'the mutation' if n_o == 1 else 'the mutations'} new in {v} ({own}) "
@@ -933,6 +947,9 @@ def _cal_max():
 # colour, crossed by thin diagonal lines — counted, but it weighs little
 _LOWQ = ("background-image:repeating-linear-gradient(135deg,rgba(255,255,255,.85) 0 1.5px,"
          "transparent 1.5px 3.5px);")
+# the same stripes on a city cell, lighter so its count stays readable
+_LOWQ_CELL = ("background-image:repeating-linear-gradient(135deg,rgba(255,255,255,.3) 0 2px,"
+              "transparent 2px 6px);text-shadow:0 0 2px #14532d,0 0 1px #14532d;")
 _LOWQ_EMPTY = ("background-image:repeating-linear-gradient(135deg,#9ca3af 0 1px,"
                "transparent 1px 3.5px);")
 
@@ -1107,6 +1124,48 @@ def _finding_status(v, f, cities, has_children=False):
     return "possible", " · ".join(x for x in (why, sug_txt) if x)
 
 
+def _new_grade(f, cities):
+    """(confirmed, reason, hover) for a "New" row, from all cities pooled
+    (process.national.grade, 2026-10-23). Confirmed: seen pooled, in >= 2
+    cities or >= 2 weeks, at most 10 % of its mutations clearly missing;
+    otherwise early, with the first condition it misses."""
+    pc = f.get("per_city") or {}
+    chk = {c: (pc.get(c) or {}).get("check") for c in cities if (pc.get(c) or {}).get("check")}
+    g = f.get("grade")
+    if g is None and chk:
+        try:
+            from process.national import grade
+            g = grade(chk)
+        except Exception:
+            g = None
+    seen = [c for c in cities if _state(chk.get(c) or {}) == "present"]
+    codes = ", ".join(city_code(c) for c in seen)
+    if not g:
+        return False, (f"seen in {codes}" if seen else "seen"), "no pooled answer (no samples)"
+    c = _check_cfg_safe()
+    n_c, wk = len(seen), f"{g['weeks']} of {g['n_weeks']} {_pl(g['n_weeks'], 'week')}"
+    where = f"seen in {n_c} {_pl(n_c, 'city')}" if n_c > 3 else (f"seen in {codes}" if seen else "")
+    if g["confirmed"]:
+        return True, f"{where}, {wk}" if where else wk, (
+            f"confirmed: all cities pooled say seen ({c.get('confirm_pooled_freq', 0.05) * 100:g} %), "
+            f"in {n_c} {_pl(n_c, 'city')} and {wk}, {len(g['missing'])} of {g['n_measured']} "
+            "mutations clearly missing")
+    early = ("early: found, not confirmed yet · check the next samples · confirmed needs all "
+             f"cities pooled to say seen, {c.get('confirm_min_cities', 2)} cities or "
+             f"{c.get('confirm_min_weeks', 2)} weeks, and at most "
+             f"{c.get('confirm_max_missing', 0.1) * 100:g} % of its mutations clearly missing")
+    if not g["ok_missing"]:
+        k = len(g["missing"])
+        return False, (f"{where} · " if where else "") + (
+            f"{k} of {g['n_measured']} mutations under {c.get('absent_freq', 0.01) * 100:g} % pooled"), (
+            early + f" · missing pooled: {', '.join(g['missing'][:8])}")
+    if not seen:
+        return False, "not clear in any city alone, seen with all cities pooled", early
+    if not g["pooled_seen"]:
+        return False, f"{where} · not clear with all cities pooled", early
+    return False, f"{where} only, {wk}", early
+
+
 def _finding_overview(v, f, cities, current_panel, has_children=False):
     kind, why = _finding_status(v, f, cities, has_children)
     pc = f.get("per_city") or {}
@@ -1120,13 +1179,17 @@ def _finding_overview(v, f, cities, current_panel, has_children=False):
         return (kind, _ovb("not confirmed: reads also fit related lineages", "color:#9ca3af;"),
                 "", GREY, "#9ca3af", "ring")
     if kind == "new":
-        seen = [c for c in cities if _state(((pc.get(c) or {}).get("check")) or {}) == "present"]
         btn = ("<span class='added'>added · re-run needed</span>" if v in current_panel
                else f"<button class='add' data-add='{_e(v)}'>+ Add</button>")
-        return (kind, _ovb(f"<b>New</b> · seen in {', '.join(city_code(c) for c in seen)}{btn}",
-                           "background:#fef2f2;color:#b91c1c;"),
-                "suggested by the reads and seen through its own mutations; not in the panel",
-                RED, RED, "filled")
+        conf, why, tip = _new_grade(f, cities)
+        if conf:
+            return (kind, _ovb(f"<b>New · confirmed</b> · {_e(why)}{btn}",
+                               "background:#fef2f2;color:#b91c1c;"),
+                    "suggested by the reads, not in the panel; " + tip, RED, RED, "filled")
+        return (kind, _ovb(f"<b>New · early</b> · {_e(why)}{btn}",
+                           "background:#fff;color:#b91c1c;box-shadow:inset 0 0 0 1px #fca5a5;"
+                           "border:1px dashed #f87171;"),
+                "suggested by the reads, not in the panel; " + tip, RED, RED, "ring")
     if kind == "folded":
         sugg = [c for c in cities if not (pc.get(c) or {}).get("xcheck")
                 and int((pc.get(c) or {}).get("days") or 0) > 0]
@@ -1816,7 +1879,10 @@ _LEGEND_ROWS = (
     + "</div><div class='row'><span class='t'>Tree</span>"
     + _ld(f"background:{GREEN}", "in panel, seen somewhere")
     + _ld(f"background:{AMBER}", "in panel, not seen in any city")
-    + _ld(f"background:{RED}", "new: suggested by the reads and seen (+ Add)")
+    + _ld(f"background:{RED}", "new · confirmed: seen with all cities pooled, in ≥ 2 cities or "
+          "weeks, ≤ 10 % of its mutations missing (+ Add)")
+    + _ld(f"border:2px solid {RED}", "new · early: found, not confirmed yet (+ Add, check the "
+          "next samples)")
     + _ld("border:2px solid #9ca3af", "possible: suggested, only partly seen")
     + _ld("border:2px solid #d1d5db", "covered: its own mutations are on a lineage below it")
     + _ld(f"border:2px solid {TRACKED}", "OT, not selected")
@@ -1839,7 +1905,8 @@ SHORT_LEGEND = (
     + "'></i></span>low coverage</span>"
     + _ld(f"background:{GREEN}", "in panel")
     + _ld(f"background:{AMBER}", "in panel, not seen in any city")
-    + _ld(f"background:{RED}", "new: suggested by the reads")
+    + _ld(f"background:{RED}", "new · confirmed")
+    + _ld(f"border:2px solid {RED}", "new · early")
     + _ld("border:2px solid #9ca3af", "possible / covered")
     + "<span class='dim'>click a cell for its details · ⓘ more: “How to read this page” above the tabs</span>"
     + "</div></div>")

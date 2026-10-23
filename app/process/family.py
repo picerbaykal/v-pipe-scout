@@ -71,14 +71,17 @@ def panel_verdicts(cooc_res: dict, variants: list, own: dict = None) -> dict:
     return out
 
 
-def plus_add(per_city: dict, status: str, min_days: int) -> bool:
+def plus_add(per_city: dict, status: str, min_days: int, pooled: bool = False) -> bool:
     """+ Add (2026-10-02): the ★ check confirms it in at least one city, and it
     is more than one sample (>= min_days evidence days in a city, or 1 day in
     >= 2 cities); never for a "named" (not confirmed) or "family" lineage.
-    per_city: {city: {"days": int, "check": {"state": …}}}."""
+    per_city: {city: {"days": int, "check": {"state": …}}}.
+    pooled (2026-10-23): all cities pooled say seen (process.national.grade
+    found_pooled) — counts like a city that says seen."""
     if status in ("named", "family"):
         return False
-    present = any((d.get("check") or {}).get("state") == "present" for d in per_city.values())
+    present = pooled or any((d.get("check") or {}).get("state") == "present"
+                            for d in per_city.values())
     ok = any((d.get("days") or 0) >= min_days for d in per_city.values())
     samples = ok or sum(1 for d in per_city.values() if (d.get("days") or 0) >= 1) >= 2
     return bool(present and samples)
