@@ -2177,8 +2177,17 @@ def app():
                 #    signal over time. Uses the panel that was RUN, so the colours
                 #    always match the results. (2026-09-30) ─────────────────────
                 _run_panel = st.session_state.get("acooc_ran_panel") or all_selected_variants
+                # the mutations each lineage gained itself, not its parent's:
+                # "seen" needs one of them when they're measured (2026-10-23)
+                from process.variant_explorer import own_of as _own_of
+                _pl_own = cached_get_pango_loader()
+
+                def _own(_v):
+                    return _own_of(_v, _pl_own)
+
+                _own_map = {_v: _own(_v) for _v in _run_panel}
                 _verdicts_by_city = {
-                    _l: _panel_verdicts(_cr_all[_l], _run_panel)
+                    _l: _panel_verdicts(_cr_all[_l], _run_panel, _own_map)
                     for _l in location_names if _cr_all.get(_l) is not None}
                 # scanner findings only when NOTHING is still running
                 # (_outstanding drives the autorefresh), so partial results
@@ -2233,7 +2242,8 @@ def app():
                             return None
                         return _cid(_pv.get("markers") or [], _pv.get("per_date") or {},
                                     _fc.get("dates") or [],
-                                    quality=(_cr_all.get(_loc) or {}).get("sample_qc"))
+                                    quality=(_cr_all.get(_loc) or {}).get("sample_qc"),
+                                    own=_own(_node))
 
                     def _xcheck(_loc, _node):
                         """Phase 3: the ★ marker check of a lineage named in another
@@ -2244,7 +2254,8 @@ def app():
                             return None
                         return _cid(_pv.get("markers") or [], _pv.get("per_date") or {},
                                     _x.get("dates") or [],
-                                    quality=(_cr_all.get(_loc) or {}).get("sample_qc"))
+                                    quality=(_cr_all.get(_loc) or {}).get("sample_qc"),
+                                    own=_own(_node))
 
                     def _ingest_clade(_c, _loc, _bucket=None):
                         # Route one finding (top-level OR a promoted sub-finding) into
@@ -2492,7 +2503,7 @@ def app():
                     _rows = tree_rows(_run_panel, curated_variants, cached_get_pango_loader(),
                                       findings=list(_findings),
                                       recomb_parents=st.session_state["acooc_recomb_parents"])
-                    _family_by_jaccard(_findings, _scan_res_all, _cr_all, _run_panel)
+                    _family_by_jaccard(_findings, _scan_res_all, _cr_all, _run_panel, _own_map)
                     # ── panel variant ± 1 change (the amber band, per change) ──
                     from process.near_changes import near_changes, where_in_tree
                     from process.scanner import (EVIDENCE_MIN_DAYS, EVIDENCE_MIN_READS,

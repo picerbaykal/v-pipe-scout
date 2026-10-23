@@ -443,6 +443,10 @@ def _cell_tip(v, city, d, extra=""):
         ms += f" · +{len(d['detail']) - 6} more"
     # what the light shades said until 2026-10-20 is in words: "weak: no
     # coverage data" in base, and on how few samples it was clear
+    if d.get("own_missing"):
+        own, n_o = ", ".join(d.get("own") or []), len(d.get("own") or [])
+        base += (f" · {'the mutation' if n_o == 1 else 'the mutations'} new in {v} ({own}) "
+                 f"not seen: the seen ones {d.get('parent') or 'its parent'} carries too")
     return (f"{v} · {city} — {word} ({counts}) · {base}" + _clear_note(d)
             + (f" · {ms}" if ms else "") + extra)
 
@@ -541,6 +545,8 @@ def _city_line(d):
     clear = _clear_samples(d) or []
     if clear:
         parts.append(f"seen on {len(clear)} alone, last {_short_date(clear[-1])}")
+    if d.get("own_missing"):
+        parts.append(f"only mutations {d.get('parent') or 'its parent'} carries too seen")
     return " · ".join(parts)
 
 
@@ -676,7 +682,13 @@ def _detail_row(gid, v, per_city, cities, sel, n_cols, found=False):
         shares = [y.get("freq") for dd in per_city.values() for y in (dd.get("detail") or [])
                   if y.get("marker") == m and y.get("freq") is not None]
         med = f"{100 * statistics.median(shares):.0f} %" if shares else "–"
-        mk_rows.append(f"<tr><td class='mono'>{_ext(_clin_link([m]), m, 'which lineages carry it in clinical sequences (CoV-Spectrum)')}</td>"
+        # a mutation its parent carries too (2026-10-23): "seen" needs one
+        # that isn't, when those are measured
+        inh = ("" if ds.get("own") is None or m in (ds.get("own") or [])
+               else f"<span class='dim' data-tip='{_e(ds.get('parent') or 'its parent')} carries it "
+                    f"too: seen alone it can be {_e(ds.get('parent') or 'the parent')}'s reads'>"
+                    f" · {_e(ds.get('parent') or 'parent')}'s too</span>")
+        mk_rows.append(f"<tr><td class='mono'>{_ext(_clin_link([m]), m, 'which lineages carry it in clinical sequences (CoV-Spectrum)')}{inh}</td>"
                        f"<td>{_e(_share_text(x))}</td><td>{_e(_answer_text(x))}</td>"
                        f"<td>{_e(_together_text(x))}</td><td>{med}</td></tr>")
     mk = ""
@@ -1075,8 +1087,14 @@ def _finding_status(v, f, cities, has_children=False):
     top = max(sugg, key=sugg.get) if sugg else None
     sug_txt = (f"suggested {sugg[top]}× in {city_code(top)}" if top and not one_sample else
                "suggested on 1 sample only" if one_sample else "")
+    # every seen mutation is one it shares with its parent, its own not
+    # seen (process.cooc.check_verdicts, own_missing, 2026-10-23)
+    own_miss = [c for c in tie if (chk.get(c) or {}).get("own_missing")]
     if seen:
         why = f"seen in {code(seen)}"
+    elif own_miss:
+        par = (chk[own_miss[0]] or {}).get("parent") or "its parent"
+        why = f"in {code(own_miss)} only mutations {par} carries too are seen"
     elif tie:
         why = f"unclear in {code(tie)}"
     elif few:

@@ -197,8 +197,23 @@ def investigate_variant(variant: str, pango_loader,
     }
 
 
+def own_of(variant: str, pango_loader) -> Optional[dict]:
+    """The mutations `variant` gained itself, not its parent's
+    (process.cooc.own_markers), from the loader's tree, for check_in_data's
+    `own`; None without a tree or a parent."""
+    from process.cooc import own_markers
+    if pango_loader is None or not variant:
+        return None
+    try:
+        _, sigs, parent, _ = _indices(pango_loader)
+    except Exception:
+        return None
+    return own_markers(variant, None, sigs, parent)
+
+
 def check_in_data(markers: List[str], per_date: Dict[str, Dict[str, list]],
-                  dates: List[str], quality: Optional[Dict[str, dict]] = None) -> Dict:
+                  dates: List[str], quality: Optional[Dict[str, dict]] = None,
+                  own: Optional[dict] = None) -> Dict:
     """One city's answer from the worker's counts.
 
     per_date: {date: {marker: [cov, hit, link_n, link_ok]}} (accumulate_check_stats)
@@ -238,6 +253,9 @@ def check_in_data(markers: List[str], per_date: Dict[str, Dict[str, list]],
              pooled over the whole window, and its own reads for the share.
       day_detail: {date: "14808C 8 % of 140 reads ✓ · …"} for the squares'
              hover: why the day got its mark
+    own:      own_of(...) — the markers the lineage gained itself; a present
+              vote whose own markers say not seen becomes mixed, also per
+              day (2026-10-23). Returned with "own", "parent", "own_missing".
     """
     from process.cooc import _check_cfg, check_verdicts
     c = _check_cfg()
@@ -275,7 +293,7 @@ def check_in_data(markers: List[str], per_date: Dict[str, Dict[str, list]],
         # this day's counted reads, the window's link
         day = {m: [cells[m][0] * k[m], cells[m][1] * k[m], link[m][0], link[m][1]]
                for m in k}
-        r = check_verdicts(markers, {d: day}, c_day, no_link)
+        r = check_verdicts(markers, {d: day}, c_day, no_link, own=own)
         if r["n_measured"] < need:
             mark = "present" if r["verdict"] == "present" else "thin"
         else:
@@ -294,7 +312,7 @@ def check_in_data(markers: List[str], per_date: Dict[str, Dict[str, list]],
     good = [d for d in q if well_covered(q[d])]
     pd_all = per_date or {}
     depth = {d: float((v or {}).get("median", 0) or 0) for d, v in q.items()} or None
-    res = check_verdicts(markers, pd_all, None, no_link, depth=depth)
+    res = check_verdicts(markers, pd_all, None, no_link, depth=depth, own=own)
     basis = "weighted" if depth else "all"
     state = res["verdict"]          # present / absent / mixed / not_covered
     # each sample's COUNTED reads per marker (the same cap as the vote), for
@@ -315,7 +333,9 @@ def check_in_data(markers: List[str], per_date: Dict[str, Dict[str, list]],
             "n_markers": res["n_markers"], "timeline": tl,
             "day_detail": detail, "detail": _marker_detail(markers, pd_all, res, c),
             "quality": q, "n_well": len(good) if q else None, "n_samples": len(tl),
-            "basis": basis, "markers": list(markers), "samples": samples}
+            "basis": basis, "markers": list(markers), "samples": samples,
+            "own": res.get("own"), "parent": res.get("parent"),
+            "own_missing": res.get("own_missing", False)}
 
 
 def _day_detail(markers, cells, r, c, n_max=8, raw=None) -> str:

@@ -9,9 +9,13 @@ the reproducibility study (bench_repro.py) use the same code:
 from __future__ import annotations
 
 
-def panel_verdicts(cooc_res: dict, variants: list) -> dict:
+def panel_verdicts(cooc_res: dict, variants: list, own: dict = None) -> dict:
     """Per panel variant in ONE city: {variant: {"state", "reason"}} from the
     worker's panel_check (reads only, never the abundance).
+
+    own: {variant: process.variant_explorer.own_of(...)} — the markers each
+    gained itself; present needs one of them when they're measured
+    (2026-10-23). Without it the vote is as before.
 
     state: present / absent / mixed (the marker vote of
     process.cooc.check_verdicts), no_marker (nothing specific to test),
@@ -33,7 +37,8 @@ def panel_verdicts(cooc_res: dict, variants: list) -> dict:
         # reads and at most check.cov_factor x its median depth (2026-10-16;
         # until then the well-covered samples decided alone)
         _cid = check_in_data(ci.get("markers") or [], ci.get("per_date") or {}, _dates,
-                             quality=(cooc_res or {}).get("sample_qc"))
+                             quality=(cooc_res or {}).get("sample_qc"),
+                             own=(own or {}).get(v))
         nd, np_, nm = _cid["n_markers"], _cid["n_present"], _cid["n_measured"]
         _sym = {"present": "✓", "absent": "✗"}
         mk = [f"{x['marker']} {(x['freq'] or 0) * 100:.0f}% {_sym.get(x['status'], '?')}"
@@ -59,7 +64,10 @@ def panel_verdicts(cooc_res: dict, variants: list) -> dict:
                   "day_detail": _cid.get("day_detail") or {},
                   # counted reads per sample, for the all-cities week line (2026-10-22)
                   "markers": _cid.get("markers") or [],
-                  "samples": _cid.get("samples") or {}}
+                  "samples": _cid.get("samples") or {},
+                  # its own markers, not its parent's (2026-10-23)
+                  "own": _cid.get("own"), "parent": _cid.get("parent"),
+                  "own_missing": _cid.get("own_missing", False)}
     return out
 
 
@@ -77,7 +85,7 @@ def plus_add(per_city: dict, status: str, min_days: int) -> bool:
 
 
 def family_rows(findings: dict, scan_res_all: dict, cr_all: dict,
-                       panel: list) -> None:
+                       panel: list, own: dict = None) -> None:
     """A found lineage whose ★ signal comes from lineages below it
     (2026-10-14). Its ★ markers are carried by all its descendants, so its ★
     check measures the whole family (BA.2.86 "present" in Zürich because JN.1
@@ -93,6 +101,8 @@ def family_rows(findings: dict, scan_res_all: dict, cr_all: dict,
       3. Jaccard = share of D ÷ share of X;  left = 1 − Σ Jaccard;
          X itself = X's share × left: the share of reads that are X and
          not a lineage below it
+
+    own: as panel_verdicts, so the panel's answers here are the table's.
 
     on the samples the ★ check uses (the well-covered ones when the city has
     any). "Can't tell" when a share has too few reads or no marker is left.
@@ -116,14 +126,14 @@ def family_rows(findings: dict, scan_res_all: dict, cr_all: dict,
 
     def _pstate(loc, v):
         if loc not in pv_cache:
-            pv_cache[loc] = panel_verdicts(cr_all.get(loc) or {}, panel) if panel else {}
+            pv_cache[loc] = panel_verdicts(cr_all.get(loc) or {}, panel, own) if panel else {}
         return (pv_cache[loc].get(v) or {}).get("state")
 
     def _seen_markers(loc, v):
         """v's markers its own check says seen in this city (2026-10-23)."""
         if v in panel:
             if loc not in pv_cache:
-                pv_cache[loc] = panel_verdicts(cr_all.get(loc) or {}, panel) if panel else {}
+                pv_cache[loc] = panel_verdicts(cr_all.get(loc) or {}, panel, own) if panel else {}
             det = (pv_cache[loc].get(v) or {}).get("detail") or []
         else:
             det = (((((findings.get(v) or {}).get("per_city") or {}).get(loc) or {})

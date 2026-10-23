@@ -408,6 +408,12 @@ CHECK_DEFAULTS = {
                              #   times) counts as 20 reads; a broadly covered one as
                              #   cap_reads. ×5 and ×20 gave the same verdicts (6
                              #   cities, 3 windows: bench_samples, 16 Oct 2026)
+    "own_marker": True,      # present also needs one of the mutations the lineage
+                             #   gained itself (not its parent's) to be present,
+                             #   when one of them is measured not seen (2026-10-23).
+                             #   A child carries its parent's mutations: SB.1.1
+                             #   2:1 in Zürich, but both seen markers are SB.1's
+                             #   and its own 1501A is at 0.8 % of 2,587 reads
 }
 
 
@@ -601,11 +607,29 @@ def accumulate_check_stats(rows: List[dict],
                         cell[3] += cnt
 
 
+def own_markers(variant: str, markers: Optional[List[str]],
+                lineage_signatures: Dict[str, Set[str]],
+                parent_map: Dict[str, str]) -> Optional[dict]:
+    """The mutations `variant` gained itself — not carried by its parent in
+    the tree (2026-10-23): {"parent": name, "markers": [...]}, kept to
+    `markers` when given (check_verdicts keeps them to the lineage's markers
+    anyway), or None when it has no parent in the tree (a recombinant root:
+    every marker is its own). SB.1.1: parent SB.1; of its markers 1501A,
+    21414C (SB.1's) and 18585T (XFG.6.2.2's) only 1501A is its own."""
+    p = (parent_map or {}).get(variant) or ""
+    if not p or p not in (lineage_signatures or {}):
+        return None
+    gained = set(lineage_signatures.get(variant) or ()) - set(lineage_signatures[p] or ())
+    keep = sorted(gained) if markers is None else [m for m in markers if m in gained]
+    return {"parent": p, "markers": keep}
+
+
 def check_verdicts(markers: List[str],
                    per_date: Dict[str, Dict[str, List[int]]],
                    cfg: Optional[dict] = None,
                    no_link: Optional[set] = None,
-                   depth: Optional[Dict[str, float]] = None) -> dict:
+                   depth: Optional[Dict[str, float]] = None,
+                   own: Optional[dict] = None) -> dict:
     """Verdict for one variant in one city: a vote among its specific markers.
 
     Counts are pooled over all dates in the window (the heatmaps show dates),
@@ -633,6 +657,11 @@ def check_verdicts(markers: List[str],
     (Until 2026-10-20: present >= 75 %, absent <= 25 %, mixed in between.)
     (Until 2026-10-08 the verdicts were named confirmed / not_found /
     inconsistent / cant_confirm.)
+    own (own_markers(), 2026-10-23, setting check.own_marker): a present vote
+    becomes mixed ("own_missing") when none of the lineage's own markers is
+    present and at least one is absent — every seen marker is one it shares
+    with its parent, and its own say not seen. Own markers with too few reads
+    leave the vote as it is.
     Uses reads only — never the deconvolution abundance."""
     c = _check_cfg(cfg)
     empty = {"verdict": "not_covered", "n_markers": len(markers or []),
@@ -681,8 +710,17 @@ def check_verdicts(markers: List[str],
         verdict = "absent"
     else:
         verdict = "mixed"
+    own_l = [m for m in ((own or {}).get("markers") or []) if m in out]
+    own_missing = bool(
+        verdict == "present" and c.get("own_marker", True) and own_l
+        and not any(out[m]["status"] == "present" for m in own_l)
+        and any(out[m]["status"] == "absent" for m in own_l))
+    if own_missing:
+        verdict = "mixed"
     return {"verdict": verdict, "n_markers": len(markers), "n_present": n_p,
-            "n_measured": n_meas, "markers": out, "no_link": sorted(no_link)}
+            "n_measured": n_meas, "markers": out, "no_link": sorted(no_link),
+            "own": own_l if own else None,
+            "parent": (own or {}).get("parent"), "own_missing": own_missing}
 
 # ══ Lineages found below a found lineage: how much of it is itself ═════════
 # (2026-10-14) An ancestor's ★ markers are carried by all its descendants, so

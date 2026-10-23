@@ -26,12 +26,13 @@ def _monday(d: str) -> date:
     return x - timedelta(days=x.weekday())
 
 
-def _vote(markers: List[str], samples: List[dict]) -> dict:
+def _vote(markers: List[str], samples: List[dict], own: Optional[dict] = None) -> dict:
     """check_verdicts on already-counted reads: keys are unique per sample
-    (date#city) and no second cap is applied."""
+    (date#city) and no second cap is applied. own: the lineage's own markers,
+    as the cells use them (2026-10-23)."""
     from process.cooc import check_verdicts
     return check_verdicts(markers, {f"{s['date']}#{s['city']}": s["cells"] for s in samples},
-                          dict(cap_reads=0))
+                          dict(cap_reads=0), own=own)
 
 
 def national(per_city: Dict[str, dict]) -> Optional[dict]:
@@ -45,10 +46,12 @@ def national(per_city: Dict[str, dict]) -> Optional[dict]:
         from process.sample_qc import well_covered
     except Exception:                                   # pragma: no cover
         well_covered = lambda _q: False                 # noqa: E731
-    markers, samples = [], []
+    markers, samples, own = [], [], None
     for city, d in (per_city or {}).items():
         if not d:
             continue
+        if d.get("own") is not None and own is None:
+            own = {"parent": d.get("parent"), "markers": list(d["own"])}
         for m in d.get("markers") or []:
             if m not in markers:
                 markers.append(m)
@@ -67,11 +70,11 @@ def national(per_city: Dict[str, dict]) -> Optional[dict]:
         ss = by_week[wk]
         cities = {}
         for c in sorted({s["city"] for s in ss}):
-            cities[c] = _vote(markers, [s for s in ss if s["city"] == c])["verdict"]
-        weeks.append({"start": wk.isoformat(), "answer": _vote(markers, ss),
+            cities[c] = _vote(markers, [s for s in ss if s["city"] == c], own)["verdict"]
+        weeks.append({"start": wk.isoformat(), "answer": _vote(markers, ss, own),
                       "n_samples": len(ss), "n_well": sum(s["well"] for s in ss),
                       "cities": cities})
-    return {"answer": _vote(markers, samples),
+    return {"answer": _vote(markers, samples, own),
             "n_cities": len({s["city"] for s in samples}), "weeks": weeks}
 
 
