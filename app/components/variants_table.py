@@ -689,9 +689,14 @@ def _detail_row(gid, v, per_city, cities, sel, n_cols, found=False):
         lines.append(f"<div class='dl'>{nm}{_cal_line(d, top, low)}{txt}</div>")
     nat = _nat_line(per_city, top, low)
     ds = per_city.get(sel) or {}
-    mk_rows = []
+    mk_rows, mk_rest = [], []
     import statistics
-    for x in ds.get("detail") or []:
+    # seen mutations first, by position on the genome; the rest folded
+    # under one line (2026-10-23)
+    def _pos(x):
+        mm = re.search(r"\d+", str(x.get("marker") or ""))
+        return int(mm.group(0)) if mm else 0
+    for x in sorted(ds.get("detail") or [], key=_pos):
         m = x.get("marker")
         shares = [y.get("freq") for dd in per_city.values() for y in (dd.get("detail") or [])
                   if y.get("marker") == m and y.get("freq") is not None]
@@ -702,14 +707,15 @@ def _detail_row(gid, v, per_city, cities, sel, n_cols, found=False):
                else f"<span class='dim' data-tip='{_e(ds.get('parent') or 'its parent')} carries it "
                     f"too: seen alone it can be {_e(ds.get('parent') or 'the parent')}'s reads'>"
                     f" · {_e(ds.get('parent') or 'parent')}'s too</span>")
-        mk_rows.append(f"<tr><td class='mono'>{_ext(_clin_link([m]), m, 'which lineages carry it in clinical sequences (CoV-Spectrum)')}{inh}</td>"
-                       f"<td>{_e(_share_text(x))}</td><td>{_e(_answer_text(x))}</td>"
-                       f"<td>{_e(_together_text(x))}</td><td>{med}</td></tr>")
+        (mk_rows if x.get("status") == "present" else mk_rest).append(
+            f"<tr><td class='mono'>{_ext(_clin_link([m]), m, 'which lineages carry it in clinical sequences (CoV-Spectrum)')}{inh}</td>"
+            f"<td>{_e(_share_text(x))}</td><td>{_e(_answer_text(x))}</td>"
+            f"<td>{_e(_together_text(x))}</td><td>{med}</td></tr>")
     mk = ""
-    if mk_rows:
+    if mk_rows or mk_rest:
         c = _check_cfg_safe()
         th = lambda t, tip: f"<th data-tip='{_e(tip)}'>{_e(t)}</th>"          # noqa: E731
-        mk = ("<table class='mk'><tr>"
+        head = ("<tr>"
               + th("its own mutation", "a mutation of this lineage that few other lineages carry "
                    "(at most 5 outside its family); click for which lineages carry it in "
                    "clinical sequences")
@@ -727,9 +733,19 @@ def _detail_row(gid, v, per_city, cities, sel, n_cols, found=False):
                    "neighbouring position where the lineage has its own mutation: the share "
                    f"that carry the lineage's version there too (needs ≥ {c['link_min'] * 100:g} % "
                    f"of ≥ {c['min_link']} reads)")
-              + th("typical share, 6 cities", "the middle value of this mutation's share over "
-                   "the six cities: high or low everywhere means it's the mutation, not the city")
-              + "</tr>" + "".join(mk_rows) + "</table>")
+              + th("median of 6 cities", "this mutation's share in each of the six cities, "
+                   "the middle value: if it's high or low everywhere, it's the mutation, not the "
+                   "city")
+              + "</tr>")
+        n_seen = len(mk_rows)
+        mk = (f"<div class='dim' style='font-size:12px;margin-top:6px'>{n_seen} of "
+              f"{n_seen + len(mk_rest)} of its mutations seen in {_e(city_name(sel))}, by position "
+              "on the genome</div>"
+              + ("<table class='mk'>" + head + "".join(mk_rows) + "</table>" if mk_rows else ""))
+        if mk_rest:
+            mk += (f"<details class='mkr'><summary class='dim' style='font-size:12px;cursor:pointer'>"
+                   f"{len(mk_rest)} not seen or couldn't answer ▸</summary>"
+                   "<table class='mk'>" + head + "".join(mk_rest) + "</table></details>")
     body = ((("<div class='dim' style='font-size:12px'>All cities: one square per week, "
               "oldest left · striped = fewer than 2 well-covered samples that week</div>" + nat)
              if nat else "")
