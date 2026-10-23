@@ -73,3 +73,27 @@ def national(per_city: Dict[str, dict]) -> Optional[dict]:
                       "cities": cities})
     return {"answer": _vote(markers, samples),
             "n_cities": len({s["city"] for s in samples}), "weeks": weeks}
+
+
+def sudden(nat: Optional[dict], quiet_weeks: int = 2, min_cities: int = 2) -> Optional[dict]:
+    """A lineage that appears suddenly (2026-10-23): seen in the newest week,
+    in at least `min_cities` cities, after `quiet_weeks` weeks in which all
+    cities pooled said not seen, each on at least 2 well-covered samples (a
+    trustworthy "not seen"). PJ.2.1, 5 Sep – 5 Oct: not seen on 2–5
+    well-covered samples a week, then seen on 3–4 Oct in Lugano (64 % of
+    counted reads), Basel, Zürich and Genève, each city with a different set
+    of its mutations. A real arrival and a lab batch look the same here; the
+    next samples tell them apart. None when it doesn't apply."""
+    if not nat or len(nat.get("weeks") or []) < quiet_weeks + 1:
+        return None
+    wk = nat["weeks"]
+    last, before = wk[-1], wk[-1 - quiet_weeks:-1]
+    if last["answer"]["verdict"] != "present":
+        return None
+    if not all(w["answer"]["verdict"] == "absent" and w["n_well"] >= 2 for w in before):
+        return None
+    cities = [c for c, v in last["cities"].items() if v == "present"]
+    if len(cities) < min_cities:
+        return None
+    return {"week": last["start"], "cities": cities,
+            "quiet": [(w["start"], w["n_well"]) for w in before]}

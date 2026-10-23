@@ -55,6 +55,6 @@ def test_family_rows_skips_mixed_children_and_lost_markers():
     family_rows(findings, scan, {"ZH": {}}, [])
     assert findings["BA.2.86"]["status"] == "family"
     assert findings["JN.1"]["status"] == "family"
-    # XFG: only XFG.1.1 (5 % of 45 %) is present below it -> itself ~ 89 %, stays
+    # XFG: only XFG.1.1 (5 % of 45 %) is present below it -> itself ~ 40 % of reads, stays
     assert findings["XFG"]["status"] == "confirmed"
-    assert abs(findings["XFG"]["itself"]["ZH"][0] - (1 - .05 / .45)) < 1e-6
+    assert abs(findings["XFG"]["itself"]["ZH"][0] - .45 * (1 - .05 / .45)) < 1e-6

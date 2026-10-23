@@ -90,14 +90,23 @@ def family_rows(findings: dict, scan_res_all: dict, cr_all: dict,
       2. each one's share at its markers that every lineage below it with
          reads here (not absent) still carries, and X's share at its markers
          that those carry (process.cooc.kept_markers, lineage_share)
-      3. Jaccard = share of D ÷ share of X;  X itself = 1 − Σ Jaccard
+      3. Jaccard = share of D ÷ share of X;  left = 1 − Σ Jaccard;
+         X itself = X's share × left: the share of reads that are X and
+         not a lineage below it
 
     on the samples the ★ check uses (the well-covered ones when the city has
     any). "Can't tell" when a share has too few reads or no marker is left.
-    X becomes a "family" row (no + Add) when, in every city where it is
-    present, X itself could be measured and is under the marker present limit
-    (check.present_freq). Lineages lower in the tree are decided first, so a
-    family row below X is skipped in X's walk."""
+    X becomes a "family" row (no + Add) when X itself is under the marker
+    present limit (check.present_freq) in every city where it is present and
+    could be measured, and at least one city could. Lineages lower in the
+    tree are decided first, so a family row below X is skipped in X's walk.
+
+    2026-10-23: (a) X itself is a share of reads, compared with the 5 %
+    limit; until then the left-over FRACTION (1 − Σ Jaccard) was compared
+    with 5 %. (b) A city with fewer than 2 well-covered samples can't tell:
+    its shares are jackpots. XFG.14.8.1 (5 Sep – 5 Oct), whose 3 markers TA.1
+    all carries, stayed "New" next to TA.1: Basel (0 of 8 well covered) left
+    56 % of 34 %, Genève (7 of 8) 16 % of 16 % = 2.6 % of reads."""
     from process.cooc import (_check_cfg, family_jaccard, kept_markers, lineage_share,
                               nearest_below)
     from process.sample_qc import well_covered
@@ -109,6 +118,17 @@ def family_rows(findings: dict, scan_res_all: dict, cr_all: dict,
         if loc not in pv_cache:
             pv_cache[loc] = panel_verdicts(cr_all.get(loc) or {}, panel) if panel else {}
         return (pv_cache[loc].get(v) or {}).get("state")
+
+    def _seen_markers(loc, v):
+        """v's markers its own check says seen in this city (2026-10-23)."""
+        if v in panel:
+            if loc not in pv_cache:
+                pv_cache[loc] = panel_verdicts(cr_all.get(loc) or {}, panel) if panel else {}
+            det = (pv_cache[loc].get(v) or {}).get("detail") or []
+        else:
+            det = (((((findings.get(v) or {}).get("per_city") or {}).get(loc) or {})
+                    .get("check") or {}).get("detail") or [])
+        return {x.get("marker") for x in det if x.get("status") == "present"}
 
     def _fstate(loc, v):
         return ((((findings.get(v) or {}).get("per_city") or {}).get(loc) or {})
@@ -128,6 +148,9 @@ def family_rows(findings: dict, scan_res_all: dict, cr_all: dict,
         for loc, px in (fx.get("per_city") or {}).items():
             chk = (px or {}).get("check") or {}
             if chk.get("state") != "present":
+                continue
+            if chk.get("n_well") is not None and chk["n_well"] < 2:
+                itself[loc] = (None, [])          # thin city: can't tell
                 continue
             fc = (scan_res_all.get(loc) or {}).get("findings_check") or {}
             ball = fc.get("below_all") or {}
@@ -164,19 +187,27 @@ def family_rows(findings: dict, scan_res_all: dict, cr_all: dict,
                 dd = pvar.get(d) if d not in panel else pc.get(d)
                 dd = dd or {}
                 dm = kept_markers(dd.get("markers") or [], d, ball, sigs, has_reads)
+                # D's share at the markers its own check sees here: one it
+                # doesn't (TA.1's 14808C, 2.5 % where its others are ~20 %)
+                # would pull D's share down and leave X a false "itself"
+                _seen = _seen_markers(loc, d)
+                dm = [m for m in dm if m in _seen] or dm
                 xm = kept_markers(xd.get("markers") or [], d, ball, sigs, has_reads)
                 sd = lineage_share(dm, dd.get("per_date") or {}, dates, depth=depth)
                 sx = lineage_share(xm, xd.get("per_date") or {}, dates, depth=depth)
                 j = family_jaccard(sx, sd)
                 parts.append((d, j, None if j is None else
                               f"{100 * sd:.0f} % ÷ {100 * sx:.0f} %"))
-            val = (None if any(j is None for _d, j, _k in parts)
-                   else max(0.0, 1.0 - sum(j for _d, j, _k in parts)))
+            sx_all = lineage_share(xd.get("markers") or [], xd.get("per_date") or {},
+                                   dates, depth=depth)
+            val = (None if sx_all is None or any(j is None for _d, j, _k in parts)
+                   else sx_all * max(0.0, 1.0 - sum(j for _d, j, _k in parts)))
             itself[loc] = (val, sorted(parts, key=lambda t: -(t[1] or 0)))
             measured.append(val)
         if itself:
             fx["itself"] = itself
-        if measured and all(v is not None and v < pf for v in measured):
+        known = [v for v in measured if v is not None]
+        if known and all(v < pf for v in known):
             fx["status"] = "family"
             fx["addable"] = False
             fx["descendants"] = sorted(below)

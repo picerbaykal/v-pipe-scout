@@ -67,6 +67,8 @@ CSS = """
 .vt .ovb { display:inline-block; font-size:12.5px; line-height:1.3; padding:2px 7px; border-radius:5px; }
 .vt .ovb b { font-weight:600; }
 .vt .ovb .add { margin-left:6px; }
+.vt .sud { display:inline-block; font-size:12px; line-height:1.3; margin-top:3px; padding:1px 7px;
+           border-radius:5px; color:#374151; background:#f3f4f6; box-shadow:inset 0 0 0 1px #9ca3af; }
 .vt td.cc .c { cursor:pointer; }
 .vt td.cc:not(.sel):hover { background:rgba(49,51,63,.04); }
 .vt td.cc.sel { background:rgba(49,51,63,.07); }
@@ -592,6 +594,28 @@ def _together_text(x):
 #    samples that week. ──────────────────────────────────────────────────────
 _NAT_WORD = {"present": "seen", "absent": "not seen", "mixed": "tie",
              "not_covered": "too few reads"}
+
+
+def _sudden_tag(per_city):
+    """' ⚠ appeared suddenly' after the overview (2026-10-23, process.national
+    .sudden): seen in the newest week in ≥ 2 cities after 2 weeks of a
+    trustworthy "not seen". Grey, not amber: amber means only "in panel, not
+    seen in any city"."""
+    try:
+        from process.national import national, sudden
+        s = sudden(national(per_city))
+    except Exception:
+        return ""
+    if not s:
+        return ""
+    quiet = ", ".join(f"week of {_short_date(d)} ({n} well-covered)" for d, n in s["quiet"])
+    tip = (f"Not seen in all cities pooled in the {len(s['quiet'])} weeks before ({quiet}), "
+           f"then seen in the week of {_short_date(s['week'])} in "
+           + ", ".join(city_name(c) for c in s["cities"])
+           + ". A real arrival and a lab batch (the same sequencing run) look the same "
+           "here: check the next samples before acting on it.")
+    return (f" <span class='sud' data-tip='{_e(tip)}'>⚠ appeared suddenly · "
+            f"check the next samples</span>")
 
 
 def _nat_line(per_city, top, low=None):
@@ -1508,6 +1532,7 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
             dgid = "det-" + re.sub(r"[^A-Za-z0-9]", "_", v)
             cells = _panel_cells(v, pc, cities, sel)
             ov = f"<span data-tip='{_e(ovtip)}'>{ov}</span>" if ovtip else ov
+            ov += _sudden_tag(pc)
             drow = (_detail_row(dgid, v, pc, cities, sel, n_cols)
                     if any((x or {}).get("timeline") for x in pc.values()) else "")
             ev = _det_link(dgid) if drow else ""
@@ -1543,19 +1568,22 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
                     f"{d} {'can’t tell' if j is None else f'{j:.2f}'}"
                     + (f" ({k})" if k else "")
                     for d, j, k in its[1][:5])
-                _calc = (f"{v} itself = 1 − Σ Jaccard with the nearest lineages below it that "
+                _calc = (f"{v} itself = its share × (1 − Σ Jaccard) with the nearest lineages below it that "
                          f"are present and in the panel or offered + Add. Jaccard = their share "
                          f"÷ {v}’s share, each read at the ★ markers that every lineage below "
                          f"with reads here still carries: {_parts}")
-                _it = ("can’t tell (too few reads, or no marker kept by all lineages below)"
+                _it = ("can’t tell (fewer than 2 well-covered samples)"
+                       if its[0] is None and not its[1]
+                       else "can’t tell (too few reads, or no marker kept by all lineages below)"
                        if its[0] is None
-                       else f"≈ {100 * its[0]:.0f} %")
+                       else f"≈ {100 * its[0]:.1f} % of reads")
             # "itself" (how much of it is left after the lineages below it) goes
             # into the overview's hover; the details get it in part B
             if its:
                 ovtip = (ovtip + " · " if ovtip else "") + (
                     f"{sname}: itself {_it} after the lineages below it — {_calc}")
             ov = f"<span data-tip='{_e(ovtip)}'>{ov}</span>" if ovtip else ov
+            ov += _sudden_tag(_chk)
             drow = (_detail_row(dgid, v, _chk, cities, sel, n_cols, found=True)
                     if any(x.get("timeline") for x in _chk.values()) else "")
             ev = _det_link(dgid) if drow else ""

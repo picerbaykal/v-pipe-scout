@@ -75,3 +75,28 @@ def test_a_not_seen_square_is_pale_not_amber():
     d = check_in_data(MK, pd, ["2026-08-27"], quality=q)
     html = vt._detail_row("g", "XFG", {"Basel (BS)": d}, ["Basel (BS)"], "Basel (BS)", 9)
     assert vt.AMBER not in html and vt.D_PALE in html
+
+
+def _week(start, verdict, n_well, cities):
+    return {"start": start, "answer": {"verdict": verdict}, "n_well": n_well,
+            "n_samples": 5, "cities": cities}
+
+
+def test_sudden_appearance_after_two_trustworthy_quiet_weeks():
+    # PJ.2.1, 5 Sep – 5 Oct: not seen on 4 and 5 well-covered samples, then
+    # seen in Basel and Lugano in the same week
+    from process.national import sudden
+    nat = {"weeks": [_week("2026-09-14", "absent", 4, {}), _week("2026-09-21", "absent", 5, {}),
+                     _week("2026-09-28", "present", 5, {"Basel (BS)": "present",
+                                                        "Lugano (TI)": "present",
+                                                        "Zürich (ZH)": "absent"})]}
+    s = sudden(nat)
+    assert s["cities"] == ["Basel (BS)", "Lugano (TI)"] and s["week"] == "2026-09-28"
+    # not when a quiet week rests on thin samples, or only one city sees it,
+    # or it was already seen before
+    thin = {"weeks": [dict(nat["weeks"][0], n_well=1)] + nat["weeks"][1:]}
+    assert sudden(thin) is None
+    one = {"weeks": nat["weeks"][:2] + [_week("2026-09-28", "present", 5, {"Basel (BS)": "present"})]}
+    assert sudden(one) is None
+    seen = {"weeks": [_week("2026-09-14", "present", 4, {})] + nat["weeks"][1:]}
+    assert sudden(seen) is None
