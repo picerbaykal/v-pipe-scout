@@ -314,8 +314,16 @@ def _confirm_new_run(reasons: list, clears: list) -> None:
 def _run_scope(selected_locations, all_selected_variants, start_date, end_date) -> dict:
     """How the left side compares with the current run (2026-10-09):
     mode "first" (no run yet), "add" (only locations added: same panel and
-    dates), "new" (panel or dates changed, or nothing new: a new run).
-    Also the reasons and the tags for the run line."""
+    dates), "panel" (the panel changed, same dates: the panel check runs
+    again and nothing else is cleared, 2026-10-23), "new" (dates changed, or
+    nothing new: a new run). Also the reasons and the tags for the run line.
+
+    Until 2026-10-23 a panel change blocked every button until a new run,
+    and a new run cleared the deep scan: adding a lineage the deep scan found
+    and then running the deconvolution was impossible without scanning again.
+    Now each part keeps the panel it was made with (acooc_ran_panel for the
+    panel check, acooc_deconv_panel, acooc_scanner_panels) and says when the
+    panel on the left differs."""
     ss = st.session_state
     has_run = bool(ss.get("acooc_cooc_tasks"))
     ran_panel = list(ss.get("acooc_ran_panel") or [])
@@ -330,13 +338,18 @@ def _run_scope(selected_locations, all_selected_variants, start_date, end_date) 
         reasons.append("panel " + " ".join([f"+ {v}" for v in plus] + [f"− {v}" for v in minus]))
     if ran_dates and now_dates != ran_dates:
         reasons.append(f"dates {now_dates[0]} – {now_dates[1]}")
+    dates_changed = bool(ran_dates and now_dates != ran_dates)
     if not has_run:
         mode = "first"
     elif not reasons and new_locs:
         mode = "add"
+    elif (plus or minus) and not dates_changed:
+        mode = "panel"
     else:
         mode = "new"
-    pending = has_run and bool(reasons or new_locs)
+    # what blocks the other buttons: new dates (a new run) or cities not yet
+    # added; a changed panel doesn't (2026-10-23)
+    pending = has_run and (dates_changed or mode == "add")
     if not pending:
         block = ""
     elif mode == "add":
@@ -347,7 +360,14 @@ def _run_scope(selected_locations, all_selected_variants, start_date, end_date) 
                  "first, or undo the change")
     return {"mode": mode, "reasons": reasons, "new_locs": new_locs, "pending": pending,
             "block": block, "ran_panel": ran_panel, "ran_locs": ran_locs,
-            "ran_dates": ran_dates}
+            "ran_dates": ran_dates, "plus": plus, "minus": minus}
+
+
+def _panel_diff(used, now) -> str:
+    """'+ TA.1 − KP.2' between the panel a result was made with and now."""
+    used, now = set(used or []), set(now or [])
+    return " ".join([f"+ {v}" for v in sorted(now - used)]
+                    + [f"− {v}" for v in sorted(used - now)])
 
 
 # Result tabs, grouped in the order results arrive (2026-10-08): panel and
@@ -903,13 +923,18 @@ def app():
             _run_label = ("▶ Add " + " and ".join(_short(l) for l in _nl) + " to the run"
                           if len(_nl) <= 2 else f"▶ Add {len(_nl)} cities to the run")
             _run_note = "keeps the current results"
+        elif _scope["mode"] == "panel":
+            _run_label = "▶ Re-run panel check"
+            _run_note = ("panel " + _panel_diff(_scope["ran_panel"], all_selected_variants)
+                         + " · keeps the deconvolution and the deep scan; re-run those "
+                         "from their own buttons")
         elif _scope["mode"] == "new":
             _run_label, _run_note = "▶ Start a new run", "asks before clearing the current results"
         else:
             _run_label, _run_note = "▶ Run analysis", "panel check for all cities"
         # one highlighted button at a time (2026-10-09): Run is it when there
         # is no run yet or the left side changed, and nothing is running
-        _run_next = (_scope["mode"] == "first" or _scope["pending"]) and not _busy
+        _run_next = (_scope["mode"] in ("first", "panel") or _scope["pending"]) and not _busy
         if st.button(
             _run_label,
             type="primary" if _run_next else "secondary",
@@ -922,6 +947,9 @@ def app():
         ):
             if _scope["mode"] == "add":
                 st.session_state["acooc_trigger_add"] = list(_scope["new_locs"])
+            elif _scope["mode"] == "panel":
+                st.session_state["acooc_trigger_panel"] = (
+                    list(_scope["ran_locs"]) + list(_scope["new_locs"]))
             elif _scope["mode"] == "new":
                 _ss = st.session_state
                 _clears = [f"panel check ({', '.join(_short(l) for l in _scope['ran_locs'])})"]
@@ -962,7 +990,8 @@ def app():
                     _ss["acooc_location_tasks"][loc] = celery_app.send_task(
                         "tasks.run_deconvolve_lapis",
                         kwargs={"location": loc, "start_date": _rd0, "end_date": _rd1,
-                                "variants": _rp, "bootstraps": _bs, "bandwidth": _bw}).id
+                                "variants": list(_ss.get("acooc_deconv_panel") or _rp),
+                                "bootstraps": _bs, "bandwidth": _bw}).id
             _ss["acooc_ran_locations"] = sorted(set(_ss.get("acooc_ran_locations") or []) | set(_add))
             if _had_scan:
                 # the new locations' deep scans start when their panel check
@@ -982,6 +1011,32 @@ def app():
                 + ("; the cross-check will be redone for all cities once every deep "
                    "scan is in" if _had_scan else "") + ".")
             logger.info(f"Added to the run: {_add}")
+
+        # the panel changed, same dates (2026-10-23): only the panel check runs
+        # again, for the run's cities (and any city added on the left); the
+        # deconvolution, deep scan and CovvFit stay and say they were made
+        # with the previous panel
+        if st.session_state.get("acooc_trigger_panel"):
+            _locs = list(dict.fromkeys(st.session_state.pop("acooc_trigger_panel")))
+            _ss = st.session_state
+            _rd0, _rd1 = _ss.get("acooc_ran_dates")
+            _ss["acooc_cooc_tasks"] = {
+                loc: celery_app.send_task(
+                    "tasks.run_cooc_completeness_lapis",
+                    kwargs={"location": loc, "start_date": _rd0, "end_date": _rd1,
+                            "variants": all_selected_variants}).id
+                for loc in _locs}
+            _ss["acooc_cooc_results"] = {}
+            (_ss.get("acooc_failed") or {}).pop("completeness", None)
+            _old = list(_ss.get("acooc_ran_panel") or [])
+            _ss["acooc_ran_panel"] = sorted(all_selected_variants)
+            _ss["acooc_ran_locations"] = sorted(_locs)
+            _ss.setdefault("acooc_phase_t0", {})["completeness"] = time.time()
+            _ss["acooc_section"] = "Panel check"
+            _ss["acooc_notice"] = ("Panel check running again with the panel "
+                                   + _panel_diff(_old, all_selected_variants)
+                                   + "; the deconvolution and the deep scan are kept.")
+            logger.info(f"Panel check re-run: {_panel_diff(_old, all_selected_variants)}")
 
         # task submission
         if st.session_state.get("acooc_trigger_run"):
@@ -1006,6 +1061,7 @@ def app():
 
             st.session_state["acooc_location_tasks"] = {}
             st.session_state["acooc_deconv_settings"] = None
+            st.session_state["acooc_deconv_panel"] = None
             st.session_state["acooc_want_scan"] = False
             st.session_state["acooc_stopped"] = False
             st.session_state["acooc_section"] = "Panel check"
@@ -1137,10 +1193,17 @@ def app():
                 _used = st.session_state.get("acooc_deconv_settings")
                 _changed = bool(location_tasks and _used
                                 and tuple(_used) != (bootstraps, bandwidth))
+                # the panel the deconvolution was made with (2026-10-23; older
+                # results: the run's panel) vs the panel on the left now
+                _dpan = list(st.session_state.get("acooc_deconv_panel") or _run_panel)
+                _pchg = bool(location_tasks) and set(_dpan) != set(all_selected_variants)
                 if _scope["pending"]:
                     _why = _scope["block"]
                 elif _open:
                     _why = "Running for " + ", ".join(_l.split("(")[0].strip() for _l in _open)
+                elif _pchg:
+                    _why = ("Made with the previous panel (now "
+                            + _panel_diff(_dpan, all_selected_variants) + "): re-run to apply")
                 elif _changed:
                     _why = (f"Settings changed since the last deconvolution ({_used[0]} → "
                             f"{bootstraps} bootstraps, bandwidth {_used[1]} → {bandwidth}): "
@@ -1152,7 +1215,7 @@ def app():
                 # the next step when the panel check is in and there is no
                 # deconvolution yet, or its settings changed (2026-10-09)
                 _next = (not _scope["pending"] and not _outstanding
-                         and ((not location_tasks) or _changed))
+                         and ((not location_tasks) or _changed or _pchg))
                 _clicked = st.button(_label, key="acooc_btn_deconv", use_container_width=True,
                              type="primary" if _next else "secondary",
                              disabled=bool(_open) or _scope["pending"],
@@ -1173,11 +1236,16 @@ def app():
                         _new[_l] = celery_app.send_task(
                             "tasks.run_deconvolve_lapis",
                             kwargs={"location": _l, "start_date": _run_d0,
-                                    "end_date": _run_d1, "variants": _run_panel,
+                                    "end_date": _run_d1,
+                                    # the panel on the left now, not the panel
+                                    # check's (2026-10-23): deconvolution needs
+                                    # no panel check
+                                    "variants": sorted(all_selected_variants),
                                     "bootstraps": bootstraps, "bandwidth": bandwidth}).id
                     st.session_state["acooc_location_tasks"] = _new
                     st.session_state["location_results"] = {}
                     st.session_state["acooc_deconv_settings"] = (bootstraps, bandwidth)
+                    st.session_state["acooc_deconv_panel"] = sorted(all_selected_variants)
                     _failed.pop("deconvolution", None)
                     st.session_state.setdefault("acooc_phase_t0", {})["deconvolution"] = time.time()
                     logger.info(f"Deconvolution submitted for {len(_new)} location(s)")
@@ -1231,9 +1299,12 @@ def app():
                 _cv_locs = [l for l in st.session_state["acooc_covvfit_locs"] if l in _all_locs]
                 from datetime import date as _date, timedelta as _td
                 _cv_d0 = (_date.fromisoformat(str(_run_d1)[:10]) - _td(days=_past)).isoformat()
-                _now_cvf = (tuple(sorted(_cv_locs)), _past, _h)
+                _cv_panel = sorted(st.session_state.get("acooc_deconv_panel") or _run_panel)
+                _now_cvf = (tuple(sorted(_cv_locs)), _past, _h, tuple(_cv_panel))
                 _used_cvf = st.session_state.get("acooc_covvfit_used")
-                _changed_cvf = bool(_done and _used_cvf and tuple(_used_cvf) != _now_cvf)
+                _changed_cvf = bool(_done and _used_cvf
+                                    and tuple(tuple(x) if isinstance(x, list) else x
+                                              for x in _used_cvf) != _now_cvf)
                 if _scope["pending"]:
                     _why = _scope["block"]
                 elif _open:
@@ -1266,7 +1337,7 @@ def app():
                     _tid = celery_app.send_task(
                         "tasks.run_covvfit_lapis",
                         kwargs={"locations": _cv_locs, "start_date": _cv_d0,
-                                "end_date": _run_d1, "variants": _run_panel,
+                                "end_date": _run_d1, "variants": _cv_panel,
                                 "horizon": _h, "colors": _variant_colors()}).id
                     st.session_state["acooc_covvfit_tasks"] = {_ALL: _tid}
                     st.session_state["acooc_covvfit_used"] = list(_now_cvf)
@@ -1310,8 +1381,24 @@ def app():
                 _done = (bool(st.session_state.get("acooc_xcheck_tasks"))
                          and not _stage_open(*_RUN_STAGES[2])
                          and not _stage_open(*_RUN_STAGES[3]))
+                # 2026-10-23: the deep scan reads what the panel check's panel
+                # doesn't explain, so it follows the panel check's panel. Panel
+                # changed on the left -> re-run the panel check first; a scan
+                # made with an older panel stays and can be re-run.
+                _left_new = set(all_selected_variants) != set(_run_panel)
+                _sp = st.session_state.get("acooc_scanner_panels") or {}
+                _scan_old = _done and any(set(p) != set(_run_panel) for p in _sp.values())
+                _old_pan = next((p for p in _sp.values() if set(p) != set(_run_panel)), [])
                 if _scope["pending"]:
                     _why = _scope["block"]
+                elif _left_new and not _scan_req:
+                    _why = ("Panel changed (" + _panel_diff(_run_panel, all_selected_variants)
+                            + "): re-run the panel check first (▶ on the left)")
+                elif _scan_old and _cooc_outstanding:
+                    _why = "Made with the previous panel: re-run once the panel check is in"
+                elif _scan_old:
+                    _why = ("Made with the previous panel (now "
+                            + _panel_diff(_old_pan, _run_panel) + "): re-run to update")
                 elif _wait_graph:
                     _why = "Waits for the panel check of every city"
                 elif _resume:
@@ -1324,9 +1411,14 @@ def app():
                             "ends (progress above)")
                 else:
                     _why = "Looks outside your panel in every city"
-                if st.button("Resume deep scan" if _resume else "Run deep scan",
+                if st.button("Resume deep scan" if _resume else
+                             "Re-run deep scan" if _scan_old else "Run deep scan",
                              key="acooc_btn_scan", use_container_width=True,
-                             disabled=(_wait_graph or (_scan_req and not _resume)
+                             type="primary" if (_scan_old and not _outstanding) else "secondary",
+                             disabled=(_wait_graph
+                                       or (_scan_req and not _resume and not _scan_old)
+                                       or (_scan_old and _cooc_outstanding)
+                                       or (_left_new and not _scan_req)
                                        or _scope["pending"]),
                              help=("Waits for the panel check of every city."
                                    if _wait_graph else
@@ -1335,6 +1427,13 @@ def app():
                                    if _scan_req and not _resume else
                                    "Looks for variants outside your panel in every city; "
                                    "the cross-check follows.")):
+                    if _scan_old:
+                        # made with an older panel: every city scans again
+                        st.session_state["acooc_scanner_tasks"] = {}
+                        st.session_state["acooc_scanner_results"] = {}
+                        st.session_state["acooc_scanner_panels"] = {}
+                        _failed.pop("scanner", None)
+                        st.session_state.setdefault("acooc_phase_t0", {}).pop("scanner", None)
                     # after a Stop: the stopped locations scan again; the
                     # cross-check (it needs every scan) starts over
                     _st = st.session_state.get("acooc_scanner_tasks", {})
