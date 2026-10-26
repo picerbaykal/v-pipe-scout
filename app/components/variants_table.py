@@ -689,14 +689,9 @@ def _detail_row(gid, v, per_city, cities, sel, n_cols, found=False):
         lines.append(f"<div class='dl'>{nm}{_cal_line(d, top, low)}{txt}</div>")
     nat = _nat_line(per_city, top, low)
     ds = per_city.get(sel) or {}
-    mk_rows, mk_rest = [], []
+    mk_rows = []
     import statistics
-    # seen mutations first, by position on the genome; the rest folded
-    # under one line (2026-10-23)
-    def _pos(x):
-        mm = re.search(r"\d+", str(x.get("marker") or ""))
-        return int(mm.group(0)) if mm else 0
-    for x in sorted(ds.get("detail") or [], key=_pos):
+    for x in ds.get("detail") or []:
         m = x.get("marker")
         shares = [y.get("freq") for dd in per_city.values() for y in (dd.get("detail") or [])
                   if y.get("marker") == m and y.get("freq") is not None]
@@ -707,15 +702,14 @@ def _detail_row(gid, v, per_city, cities, sel, n_cols, found=False):
                else f"<span class='dim' data-tip='{_e(ds.get('parent') or 'its parent')} carries it "
                     f"too: seen alone it can be {_e(ds.get('parent') or 'the parent')}'s reads'>"
                     f" · {_e(ds.get('parent') or 'parent')}'s too</span>")
-        (mk_rows if x.get("status") == "present" else mk_rest).append(
-            f"<tr><td class='mono'>{_ext(_clin_link([m]), m, 'which lineages carry it in clinical sequences (CoV-Spectrum)')}{inh}</td>"
-            f"<td>{_e(_share_text(x))}</td><td>{_e(_answer_text(x))}</td>"
-            f"<td>{_e(_together_text(x))}</td><td>{med}</td></tr>")
+        mk_rows.append(f"<tr><td class='mono'>{_ext(_clin_link([m]), m, 'which lineages carry it in clinical sequences (CoV-Spectrum)')}{inh}</td>"
+                       f"<td>{_e(_share_text(x))}</td><td>{_e(_answer_text(x))}</td>"
+                       f"<td>{_e(_together_text(x))}</td><td>{med}</td></tr>")
     mk = ""
-    if mk_rows or mk_rest:
+    if mk_rows:
         c = _check_cfg_safe()
         th = lambda t, tip: f"<th data-tip='{_e(tip)}'>{_e(t)}</th>"          # noqa: E731
-        head = ("<tr>"
+        mk = ("<table class='mk'><tr>"
               + th("its own mutation", "a mutation of this lineage that few other lineages carry "
                    "(at most 5 outside its family); click for which lineages carry it in "
                    "clinical sequences")
@@ -733,19 +727,9 @@ def _detail_row(gid, v, per_city, cities, sel, n_cols, found=False):
                    "neighbouring position where the lineage has its own mutation: the share "
                    f"that carry the lineage's version there too (needs ≥ {c['link_min'] * 100:g} % "
                    f"of ≥ {c['min_link']} reads)")
-              + th("median of 6 cities", "this mutation's share in each of the six cities, "
-                   "the middle value: if it's high or low everywhere, it's the mutation, not the "
-                   "city")
-              + "</tr>")
-        n_seen = len(mk_rows)
-        mk = (f"<div class='dim' style='font-size:12px;margin-top:6px'>{n_seen} of "
-              f"{n_seen + len(mk_rest)} of its mutations seen in {_e(city_name(sel))}, by position "
-              "on the genome</div>"
-              + ("<table class='mk'>" + head + "".join(mk_rows) + "</table>" if mk_rows else ""))
-        if mk_rest:
-            mk += (f"<details class='mkr'><summary class='dim' style='font-size:12px;cursor:pointer'>"
-                   f"{len(mk_rest)} not seen or couldn't answer ▸</summary>"
-                   "<table class='mk'>" + head + "".join(mk_rest) + "</table></details>")
+              + th("typical share, 6 cities", "the middle value of this mutation's share over "
+                   "the six cities: high or low everywhere means it's the mutation, not the city")
+              + "</tr>" + "".join(mk_rows) + "</table>")
     body = ((("<div class='dim' style='font-size:12px'>All cities: one square per week, "
               "oldest left · striped = fewer than 2 well-covered samples that week</div>" + nat)
              if nat else "")
@@ -1142,44 +1126,60 @@ def _finding_status(v, f, cities, has_children=False):
 
 def _new_grade(f, cities):
     """(confirmed, reason, hover) for a "New" row, from all cities pooled
-    (process.national.grade, 2026-10-23). Confirmed: seen pooled, in >= 2
-    cities or >= 2 weeks, at most 10 % of its mutations clearly missing;
+    (process.national.grade). Confirmed: seen pooled, in >= 2 well-covered
+    cities AND >= 2 weeks, at most 10 % of its mutations clearly missing
+    (2026-10-26; until then cities or weeks, thin cities counted);
     otherwise early, with the first condition it misses."""
     pc = f.get("per_city") or {}
     chk = {c: (pc.get(c) or {}).get("check") for c in cities if (pc.get(c) or {}).get("check")}
-    g = f.get("grade")
-    if g is None and chk:
+    g = None
+    if chk:                     # recomputed: a grade saved before 26 Oct used the old rule
         try:
             from process.national import grade
             g = grade(chk)
         except Exception:
             g = None
+    if g is None:
+        g = f.get("grade")
     seen = [c for c in cities if _state(chk.get(c) or {}) == "present"]
-    codes = ", ".join(city_code(c) for c in seen)
     if not g:
+        codes = ", ".join(city_code(c) for c in seen)
         return False, (f"seen in {codes}" if seen else "seen"), "no pooled answer (no samples)"
+    if g and "cities_thin" not in g:                 # a grade saved before 26 Oct
+        g = dict(g, cities_thin=[c for c in seen if _thin(chk.get(c) or {})])
+        g["cities"] = [c for c in seen if c not in g["cities_thin"]]
     c = _check_cfg_safe()
-    n_c, wk = len(seen), f"{g['weeks']} of {g['n_weeks']} {_pl(g['n_weeks'], 'week')}"
-    where = f"seen in {n_c} {_pl(n_c, 'city')}" if n_c > 3 else (f"seen in {codes}" if seen else "")
+    well, thin = [x for x in seen if x in g["cities"]], [x for x in seen if x in g["cities_thin"]]
+    n_c, wk = len(well), f"{g['weeks']} of {g['n_weeks']} {_pl(g['n_weeks'], 'week')}"
+    codes = ", ".join(city_code(x) for x in well)
+    thin_txt = (f" (+ {', '.join(city_code(x) for x in thin)} thin)" if thin else "")
+    where = (f"seen in {n_c} {_pl(n_c, 'city')}" if n_c > 3 else (f"seen in {codes}" if well else
+             ("seen only in thin samples" if thin else ""))) + (thin_txt if well else "")
+    rule = (f"confirmed needs all cities pooled to say seen, {c.get('confirm_min_cities', 2)} "
+            f"cities with ≥ {c.get('thin_well_min', 2)} well-covered samples and "
+            f"{c.get('confirm_min_weeks', 2)} weeks, and at most "
+            f"{c.get('confirm_max_missing', 0.1) * 100:g} % of its mutations clearly missing")
     if g["confirmed"]:
         return True, f"{where}, {wk}" if where else wk, (
             f"confirmed: all cities pooled say seen ({c.get('confirm_pooled_freq', 0.05) * 100:g} %), "
-            f"in {n_c} {_pl(n_c, 'city')} and {wk}, {len(g['missing'])} of {g['n_measured']} "
-            "mutations clearly missing")
-    early = ("early: found, not confirmed yet · check the next samples · confirmed needs all "
-             f"cities pooled to say seen, {c.get('confirm_min_cities', 2)} cities or "
-             f"{c.get('confirm_min_weeks', 2)} weeks, and at most "
-             f"{c.get('confirm_max_missing', 0.1) * 100:g} % of its mutations clearly missing")
+            f"in {n_c} well-covered {_pl(n_c, 'city')} and {wk}, {len(g['missing'])} of "
+            f"{g['n_measured']} mutations clearly missing")
+    early = "early: found, not confirmed yet · check the next samples · " + rule
     if not g["ok_missing"]:
-        k = len(g["missing"])
+        k, inh = len(g["missing"]), g.get("missing_inherited") or []
+        par = next(((chk.get(x) or {}).get("parent") for x in cities if (chk.get(x) or {}).get("parent")), "")
+        inh_txt = ("" if not inh else (f", all inherited from {par}" if len(inh) == k and par else
+                   f", {len(inh)} inherited{' from ' + par if par else ''}"))
         return False, (f"{where} · " if where else "") + (
-            f"{k} of its {g['n_measured']} mutations missing"), (
+            f"{k} of its {g['n_measured']} mutations missing{inh_txt}"), (
             early + f" · missing: under {c.get('absent_freq', 0.01) * 100:g} % of the reads of all "
             f"cities together: {', '.join(g['missing'][:8])}; a real lineage carries all its "
-            "mutations")
+            "mutations, those it inherits included")
     if not g["pooled_seen"]:
         return False, f"{where} · not clear with all cities pooled", early
-    return False, f"{where} only, {wk}", early
+    if n_c < c.get("confirm_min_cities", 2):
+        return False, (f"{where} only, {wk}" if well else f"{where}, {wk}"), early
+    return False, f"{where}, {wk}", early
 
 
 def _finding_overview(v, f, cities, current_panel, has_children=False):
@@ -1895,8 +1895,8 @@ _LEGEND_ROWS = (
     + "</div><div class='row'><span class='t'>Tree</span>"
     + _ld(f"background:{GREEN}", "in panel, seen somewhere")
     + _ld(f"background:{AMBER}", "in panel, not seen in any city")
-    + _ld(f"background:{RED}", "new · confirmed: seen with all cities pooled, in ≥ 2 cities or "
-          "weeks, ≤ 10 % of its mutations missing (+ Add)")
+    + _ld(f"background:{RED}", "new · confirmed: seen with all cities pooled, in ≥ 2 "
+          "well-covered cities and ≥ 2 weeks, ≤ 10 % of its mutations missing (+ Add)")
     + _ld(f"border:2px solid {RED}", "new · early: found, not confirmed yet (+ Add, check the "
           "next samples)")
     + _ld("border:2px solid #9ca3af", "possible: suggested, only partly seen")

@@ -421,7 +421,14 @@ CHECK_DEFAULTS = {
     # and 8359C plus Zürich's 28904T, in no city together)
     "confirm_pooled_freq": 0.05,  # confirmed: all cities pooled say seen at this share,
     "confirm_min_cities": 2,     #   ... and it's seen in at least this many cities
-    "confirm_min_weeks": 2,      #   ... or in this many weeks of the all-cities line,
+                                 #   with >= thin_well_min well-covered samples
+                                 #   (2026-10-26; PJ.2.1 Sep-Oct: Basel 0 and Chur 1
+                                 #   well covered, its 14697T, 14619C, 10416T 0.0 %
+                                 #   once counted on 1,000+ reads)
+    "confirm_min_weeks": 2,      #   ... and in this many weeks of the all-cities line
+                                 #   (2026-10-26, was "or": RV.2.1.1 Sep-Oct, GE and
+                                 #   ZH in 1 of 4 weeks, came out confirmed while
+                                 #   PJ.2.1, also 1 of 4, stayed early),
     "confirm_max_missing": 0.10,  #   ... and at most this share of its measured
                                  #   mutations is clearly missing (< absent_freq) pooled
                                  #   (PJ.2.1, Sep–Oct: 4 of 18 at 0.0–0.2 %). Confirmed
@@ -429,8 +436,9 @@ CHECK_DEFAULTS = {
                                  #   window; "early" (found, not confirmed): summer 4
                                  #   of 5 real
     "thin_well_min": 2,          # a city with fewer well-covered samples: a seen cell
-                                 #   is striped (display only; counting thin cities
-                                 #   or not gave the same grades, 23 Oct)
+                                 #   is striped, and it doesn't count towards
+                                 #   confirm_min_cities (2026-10-26; until then display
+                                 #   only)
 }
 
 

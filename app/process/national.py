@@ -112,34 +112,50 @@ def grade(per_city: Dict[str, dict], cfg: Optional[dict] = None) -> Optional[dic
     """How sure a found lineage is, from all cities pooled (2026-10-23).
 
     per_city: {city: check_in_data result}. Returns None without samples, else
-      cities       cities whose own check says seen
+      cities       cities whose own check says seen, with at least
+                   check.thin_well_min well-covered samples (2026-10-26)
+      cities_thin  cities whose check says seen on thinner samples (shown,
+                   not counted)
       pooled_seen  all cities pooled say seen at check.confirm_pooled_freq (5 %)
       weeks, n_weeks  weeks of the all-cities line that say seen, of all weeks
       missing, n_measured  its mutations clearly missing pooled (< 1 %), of
                    those measured
-      confirmed    pooled_seen, and in >= check.confirm_min_cities cities or
+      missing_inherited  of those, the ones it inherits (not its own markers),
+                   when the result names its own markers
+      confirmed    pooled_seen, and in >= check.confirm_min_cities cities AND
                    >= check.confirm_min_weeks weeks, and missing <=
                    check.confirm_max_missing of n_measured
-    bench_scorecard (6 cities, 7 Jun – 5 Sep and 8 Mar – 6 Jun): confirmed held
-    no gone or not-in-Europe lineage; found-and-not-confirmed ("early") held
-    the one not-in-Europe false alarm (RF.5.1, Zürich) and real first
-    sightings (TK.1, PQ.16.1.1, RV.2.1.1). Finding stays per city: pooling
-    only grades (finding by pooling added up mutations from different
-    cities, XFG.6.3.3)."""
+    Until 2026-10-26 cities OR weeks, and thin cities counted: RV.2.1.1
+    (Sep-Oct, 1 of 4 weeks) was confirmed while PJ.2.1 (1 of 4 weeks) was
+    early; PJ.2.1's "seen in BS, GR, TI" rested on Basel (0 well covered)
+    and Chur (1).
+    bench_scorecard (6 cities, 7 Jun - 5 Sep and 8 Mar - 6 Jun, 23 Oct, with
+    "or"): confirmed held no gone or not-in-Europe lineage; found-and-not-
+    confirmed ("early") held the one not-in-Europe false alarm (RF.5.1,
+    Zurich) and real first sightings (TK.1, PQ.16.1.1, RV.2.1.1). Finding
+    stays per city: pooling only grades (finding by pooling added up
+    mutations from different cities, XFG.6.3.3)."""
     from process.cooc import _check_cfg
     c = _check_cfg(cfg)
     conf = national(per_city, c["confirm_pooled_freq"])
     if not conf:
         return None
     a = conf["answer"]
-    cities = sorted(k for k, d in (per_city or {}).items() if (d or {}).get("state") == "present")
+    well_min = int(c.get("thin_well_min", 2))
+    seen = {k: d for k, d in (per_city or {}).items() if (d or {}).get("state") == "present"}
+    thin = lambda d: d.get("n_well") is not None and d["n_well"] < well_min  # noqa: E731
+    cities = sorted(k for k, d in seen.items() if not thin(d))
+    cities_thin = sorted(k for k, d in seen.items() if thin(d))
     weeks = sum(w["answer"]["verdict"] == "present" for w in conf["weeks"])
     missing = sorted(m for m, x in (a.get("markers") or {}).items() if x.get("status") == "absent")
+    own = next((set(d["own"]) for d in (per_city or {}).values() if d and d.get("own") is not None), None)
+    inherited = [m for m in missing if own is not None and m not in own]
     n_meas = a.get("n_measured", 0)
     pooled_seen = a["verdict"] == "present"
     ok_missing = len(missing) <= int(c["confirm_max_missing"] * n_meas)
-    confirmed = bool(pooled_seen and ok_missing and (len(cities) >= c["confirm_min_cities"]
-                                                     or weeks >= c["confirm_min_weeks"]))
-    return {"cities": cities, "pooled_seen": pooled_seen, "weeks": weeks, "n_weeks": len(conf["weeks"]),
-            "missing": missing, "n_measured": n_meas, "ok_missing": ok_missing,
+    confirmed = bool(pooled_seen and ok_missing and len(cities) >= c["confirm_min_cities"]
+                     and weeks >= c["confirm_min_weeks"])
+    return {"cities": cities, "cities_thin": cities_thin, "pooled_seen": pooled_seen,
+            "weeks": weeks, "n_weeks": len(conf["weeks"]), "missing": missing,
+            "missing_inherited": inherited, "n_measured": n_meas, "ok_missing": ok_missing,
             "confirmed": confirmed}
