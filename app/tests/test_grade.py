@@ -108,3 +108,20 @@ def test_seen_cell_in_a_thin_city_is_striped():
     assert vt._scale(thin)[0] == vt.S_YES + vt._LOWQ_CELL
     assert vt._scale(well)[0] == vt.S_YES
     assert "striped: 0 of 3 samples well covered" in vt._cell_tip("TA.1", "Basel", thin)
+
+
+def test_together_hover_names_the_cooccurring_mutations():
+    # TA.1, Zürich: 23157G's reads reach 23148C and 23401T (W-ASAP amplicon 75,
+    # Jaccard 1.0); 6196A's reach only XFG's 6183G (amplicon 20, .97)
+    vt = _vt()
+    from collections import Counter
+    sigs = {"TA.1": {"23148C", "23157G", "23401T", "23005A", "6196A", "6183G", "21249A"},
+            "P": {"23148C", "23005A", "6183G"}}
+    sigs.update({f"L{i}": {"23005A", "6183G"} for i in range(600)})
+    par = {"TA.1": "P"}
+    vt._pango_sig = lambda: (sigs, par, Counter(m for v in sigs.values() for m in v))
+    tip = vt._together_tip("TA.1", {"marker": "23157G", "link": 0.99, "link_n": 4012})
+    assert tip.startswith("99 % of 4,012 reads carrying 23157G")
+    assert "23148C (in 2 lineages)" in tip and "23401T (new in TA.1, in 1 lineage)" in tip
+    assert "1 common one (in 602 lineages: 23005A)" in tip
+    assert "judged on its share alone" in vt._together_tip("TA.1", {"marker": "21249A"})

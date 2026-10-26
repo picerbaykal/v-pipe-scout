@@ -608,6 +608,76 @@ def _together_text(x):
     return "–"
 
 
+# ── Which mutations "reads together" is about (2026-10-26) ──────────────────
+# The check counts, for a marker, the reads that also reach another position of
+# the lineage and match it there (process.cooc.accumulate_check_stats). Those
+# neighbours are the lineage's own mutations within a read's reach: the same
+# combination W-ASAP shows per amplicon (TA.1, Zürich, Sep–Oct: 6196A with
+# 6183G, its amplicon 20 at Jaccard .97; 23157G with 23148C and 23401T, its
+# amplicon 75 at 1.0). The hover names them, with how many lineages carry each:
+# the marker is the specific part, a neighbour carried by thousands of lineages
+# only places it on the right background.
+NB_SPAN = 300      # bases one read covers (process.variant_explorer.marker_blocks)
+NB_RARE = 500      # neighbours carried by fewer lineages are named one by one
+_NB_CACHE: dict = {}
+
+
+def _pango_sig():
+    """(signatures, parent, carriers) from the page's pango loader, or None."""
+    try:
+        from subpages.abundance_cooc import cached_get_pango_loader
+        from process.variant_explorer import _indices
+        _raw, sigs, parent, _t = _indices(cached_get_pango_loader())
+    except Exception:
+        return None
+    k = id(sigs)
+    if k not in _NB_CACHE:
+        from collections import Counter
+        _NB_CACHE.clear()
+        _NB_CACHE[k] = (sigs, parent, Counter(m for v in sigs.values() for m in v))
+    return _NB_CACHE[k]
+
+
+def _neighbours(v, m):
+    """[(mutation, inherited from the parent, lineages carrying it)] of `v`
+    within NB_SPAN bases of marker `m`, nearest first; None without pango data."""
+    ps = _pango_sig()
+    if not ps:
+        return None
+    sigs, parent, car = ps
+    pos = lambda t: int("".join(ch for ch in t if ch.isdigit()) or 0)   # noqa: E731
+    p, psig = pos(m), sigs.get(parent.get(v, ""), set())
+    nb = [t for t in sigs.get(v, set()) if t != m and 0 < abs(pos(t) - p) <= NB_SPAN]
+    return [(t, t in psig, car.get(t, 0)) for t in sorted(nb, key=lambda t: abs(pos(t) - p))]
+
+
+def _together_tip(v, x):
+    """The hover of 'reads together': which of the lineage's mutations the
+    marker's reads were checked against."""
+    m = x.get("marker", "")
+    nb = _neighbours(v, m)
+    if nb is None:
+        return ""
+    if not nb:
+        return (f"no other {v} mutation within a read's reach ({NB_SPAN} bases) of {m}: "
+                "judged on its share alone")
+    rare = sorted([t for t in nb if t[2] < NB_RARE], key=lambda t: t[2])
+    common = [t for t in nb if t[2] >= NB_RARE]
+    named = ", ".join(f"{t} ({'' if inh else 'new in ' + v + ', '}in {n:,} "
+                      f"{_pl(n, 'lineage')})" for t, inh, n in rare)
+    lo, hi = (min(t[2] for t in common), max(t[2] for t in common)) if common else (0, 0)
+    more = (f"{len(common)} common {_pl(len(common), 'one')} (in "
+            f"{lo:,}{'' if lo == hi else f'–{hi:,}'} lineages: "
+            f"{', '.join(t[0] for t in common[:4])}{' …' if len(common) > 4 else ''})"
+            if common else "")
+    head = (f"{100 * x['link']:.0f} % of {x['link_n']:,} reads carrying {m} also carry {v}'s "
+            "mutations they reach. " if x.get("link") is not None and x.get("link_n") else "")
+    return (head + f"{v}'s mutations within a read's reach ({NB_SPAN} bases): "
+            + "; ".join(t for t in (named, more) if t)
+            + f". {m} is the specific part; a common one only shows it sits on the "
+            "lineage's background, not on another branch's")
+
+
 # ── All cities, one square per week (2026-10-22): on top of the city lines in
 #    a row's details. Each square is the cells' vote on every sample of every
 #    city that week (process.national); striped = fewer than 2 well-covered
@@ -704,7 +774,8 @@ def _detail_row(gid, v, per_city, cities, sel, n_cols, found=False):
                     f" · {_e(ds.get('parent') or 'parent')}'s too</span>")
         mk_rows.append(f"<tr><td class='mono'>{_ext(_clin_link([m]), m, 'which lineages carry it in clinical sequences (CoV-Spectrum)')}{inh}</td>"
                        f"<td>{_e(_share_text(x))}</td><td>{_e(_answer_text(x))}</td>"
-                       f"<td>{_e(_together_text(x))}</td><td>{med}</td></tr>")
+                       f"<td data-tip='{_e(_together_tip(v, x))}'>{_e(_together_text(x))}</td>"
+                       f"<td>{med}</td></tr>")
     mk = ""
     if mk_rows:
         c = _check_cfg_safe()
