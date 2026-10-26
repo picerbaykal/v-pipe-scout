@@ -381,6 +381,11 @@ CHECK_DEFAULTS = {
     # Part A — marker selection (worker; changing needs a re-scan)
     "out_other_max": 5,      # carriers outside the family that didn't inherit it
     "pair_max": 200,         # specific pairs counted per lineage, most specific first
+    "pair_min_hit": 50,      # a pair is seen on a sample only with >= this many reads
+                             #   carrying both (2026-10-26): BA.3.2, Lugano 12 Sep,
+                             #   gone since June, was "seen" on 10 and 7 reads (10 %
+                             #   of 103, 6 % of 109); the real ones carry hundreds to
+                             #   thousands (TA.1's weakest, Zürich 20 Sep: 1,000)
     "pair_span": 300,        # specific pairs: two of a lineage's mutations at most
                              #   this many bases apart, so one read can carry both
                              #   (process.variant_explorer.marker_blocks uses 300)
@@ -715,7 +720,8 @@ def pair_evidence(per_date: Dict[str, Dict[str, List[float]]],
     one: one stretch is one bit of genome, however many pairs it holds).
 
     A pair is seen on a sample when >= check.min_cov reads cover both
-    positions and >= check.present_freq of them carry both. A SAMPLE counts
+    positions, >= check.present_freq of them carry both, and at least
+    check.pair_min_hit reads do. A SAMPLE counts
     as positive when its seen pairs fall in 2 or more different stretches:
     two independent genome fragments carrying the lineage's own combinations.
     One stretch alone can be another lineage's reads that the pango
@@ -762,7 +768,8 @@ def pair_evidence(per_date: Dict[str, Dict[str, List[float]]],
                 continue
             any_meas = True
             f = x[1] / x[0]
-            if f >= c["present_freq"] and (i not in best or x[0] > best[i][2]):
+            if (f >= c["present_freq"] and x[1] >= c.get("pair_min_hit", 50)
+                    and (i not in best or x[0] > best[i][2])):
                 best[i] = [k, round(f, 4), int(x[0])]
         if any_meas:
             measured.append(d)
