@@ -706,6 +706,76 @@ def accumulate_check_stats(rows: List[dict],
                         cell[3] += cnt
 
 
+def pair_evidence(per_date: Dict[str, Dict[str, List[float]]],
+                  quality: Optional[Dict[str, dict]] = None,
+                  cfg: Optional[dict] = None) -> Optional[dict]:
+    """Specific co-occurrences seen in one city (2026-10-26, step 3): the
+    pairs accumulate_check_stats counted ("a+b" keys), grouped into stretches
+    of genome (pairs starting within check.pair_span of the stretch's first
+    one: one stretch is one bit of genome, however many pairs it holds).
+
+    A pair is seen on a sample when >= check.min_cov reads cover both
+    positions and >= check.present_freq of them carry both. A SAMPLE counts
+    as positive when its seen pairs fall in 2 or more different stretches:
+    two independent genome fragments carrying the lineage's own combinations.
+    One stretch alone can be another lineage's reads that the pango
+    definitions don't foresee (Genève, Sep-Oct: PJ.2.1's 29421T+29510C at
+    99.7 % on 13 Sep with nothing else of PJ.2.1 that day).
+
+    Why: a rare lineage reaches only 1-3 amplicons per sample, so most of its
+    markers read 0 % and the marker vote said "not seen" where its reads
+    were plainly there (PJ.2.1, Zürich 3 Oct: 3 stretches at 43-77 %;
+    Genève 17 Sep: 2 stretches at 46 and 100 %; the vote said 4:14 and 5:14).
+
+    Returns None without pair counts, else
+      positive        dates with >= 2 stretches seen
+      positive_well   of those, the well-covered ones (process.sample_qc)
+      n_stretches     different stretches seen on the positive dates
+      measured        dates where some pair had enough reads
+      per_date        {date: [[pair, share, reads], ...]} the best-read pair
+                      of each stretch seen that day, positive dates only"""
+    from process.sample_qc import well_covered
+    c = _check_cfg(cfg)
+    span = int(c.get("pair_span", 300))
+    keys = sorted({k for cells in (per_date or {}).values() for k in (cells or {}) if "+" in k},
+                  key=lambda k: (int(_SUB_RE.match(k.split("+")[0]).group(1))
+                                 if _SUB_RE.match(k.split("+")[0]) else 0))
+    if not keys:
+        return None
+    sid, start, cur = {}, None, -1
+    for k in keys:
+        mm = _SUB_RE.match(k.split("+")[0])
+        if not mm:
+            continue
+        p = int(mm.group(1))
+        if start is None or p > start + span:
+            start, cur = p, cur + 1
+        sid[k] = cur
+    positive, measured, per_out, seen_all = [], [], {}, set()
+    for d in sorted(per_date or {}):
+        cells = per_date[d] or {}
+        best: Dict[int, list] = {}
+        any_meas = False
+        for k, i in sid.items():
+            x = cells.get(k)
+            if not x or x[0] < c["min_cov"]:
+                continue
+            any_meas = True
+            f = x[1] / x[0]
+            if f >= c["present_freq"] and (i not in best or x[0] > best[i][2]):
+                best[i] = [k, round(f, 4), int(x[0])]
+        if any_meas:
+            measured.append(d)
+        if len(best) >= 2:
+            positive.append(d)
+            seen_all |= set(best)
+            per_out[d] = [best[i] for i in sorted(best)]
+    q = quality or {}
+    return {"positive": positive,
+            "positive_well": [d for d in positive if well_covered(q.get(d))],
+            "n_stretches": len(seen_all), "measured": measured, "per_date": per_out}
+
+
 def _accumulate_pairs(rows: List[dict], pos_set: Set[int], pairs: Dict[str, List[str]],
                       stats: Dict[str, Dict[str, Dict[str, List[int]]]]) -> None:
     """The pair half of accumulate_check_stats (2026-10-26)."""
