@@ -207,3 +207,23 @@ def test_coocs_one_read_can_join_count_once():
                          "7842G+7851T": [428, 77, 77, 77]}}
     ev = pair_evidence(pd, {d: WELL for d in pd})
     assert ev["positive"] == ["2026-09-12"] and ev["n_stretches"] == 2
+
+
+COMMON = {"241T", "24469A", "2790T", "28881A", "29510C"}   # > 2,000 pango lineages
+
+
+def test_a_sample_needs_one_cooc_without_a_common_partner():
+    from process.cooc import pair_evidence
+    # ST.1, Zürich 29 Sep: 232C and 24703C, each with a near-universal partner
+    st1 = {"2026-09-29": {"232C+241T": [55597, 35582, 35582, 35582],
+                          "24469A+24703C": [6346, 2031, 2031, 2031]}}
+    ev = pair_evidence(st1, {"2026-09-29": WELL}, common=COMMON)
+    assert ev["positive"] == [] and ev["measured"] == ["2026-09-29"]
+    # without the list, as before: counted
+    assert pair_evidence(st1, {"2026-09-29": WELL})["positive"] == ["2026-09-29"]
+    # TA.1, Zürich 3 Oct: 23148C+23401T is a true cooc, 24469A+24604G may join it
+    ta1 = {"2026-10-03": {"23148C+23401T": [128114, 127858, 127858, 127858],
+                          "24469A+24604G": [2333, 2333, 2333, 2333]}}
+    ev = pair_evidence(ta1, {"2026-10-03": WELL}, common=COMMON)
+    assert ev["positive"] == ["2026-10-03"]
+    assert [x[3] for x in ev["per_date"]["2026-10-03"]] == [True, False]

@@ -386,6 +386,12 @@ CHECK_DEFAULTS = {
                              #   gone since June, was "seen" on 10 and 7 reads (10 %
                              #   of 103, 6 % of 109); the real ones carry hundreds to
                              #   thousands (TA.1's weakest, Zürich 20 Sep: 1,000)
+    "pair_common": 2000,     # a mutation carried by more pango lineages is common
+                             #   background (241T, 24469A, 2790T, 28881A, 29510C); a
+                             #   sample needs at least one cooc with no such mutation
+                             #   (2026-10-26: ST.1, Zürich 29 Sep, rested on 232C+241T
+                             #   and 24469A+24703C, its single mutations in disguise;
+                             #   XFG's 6183G, in ~1,800, stays: W-ASAP keeps 6183G+6196A)
     "pair_span": 300,        # specific pairs: two of a lineage's mutations at most
                              #   this many bases apart, so one read can carry both
                              #   (process.variant_explorer.marker_blocks uses 300)
@@ -713,7 +719,8 @@ def accumulate_check_stats(rows: List[dict],
 
 def pair_evidence(per_date: Dict[str, Dict[str, List[float]]],
                   quality: Optional[Dict[str, dict]] = None,
-                  cfg: Optional[dict] = None) -> Optional[dict]:
+                  cfg: Optional[dict] = None,
+                  common: Optional[Set[str]] = None) -> Optional[dict]:
     """Specific co-occurrences seen in one city (2026-10-26, step 3): the
     pairs accumulate_check_stats counted ("a+b" keys), grouped into fragments:
     seen pairs closer than check.pair_span bases, chained, could sit on one
@@ -739,8 +746,12 @@ def pair_evidence(per_date: Dict[str, Dict[str, List[float]]],
       positive_well   of those, the well-covered ones (process.sample_qc)
       n_stretches     different stretches seen on the positive dates
       measured        dates where some pair had enough reads
-      per_date        {date: [[pair, share, reads], ...]} the best-read pair
-                      of each stretch seen that day, positive dates only"""
+      per_date        {date: [[pair, share, reads, true], ...]} the best-read
+                      pair of each fragment seen that day, positive dates only;
+                      true = neither mutation is in `common`
+    common (2026-10-26): mutations carried by more than check.pair_common pango
+    lineages; a positive sample needs at least one cooc without them. None:
+    no such test (no pango data)."""
     from process.sample_qc import well_covered
     c = _check_cfg(cfg)
     span = int(c.get("pair_span", 300))
@@ -784,15 +795,18 @@ def pair_evidence(per_date: Dict[str, Dict[str, List[float]]],
             any_meas = True
             f = x[1] / x[0]
             if f >= c["present_freq"] and x[1] >= c.get("pair_min_hit", 50):
-                seen.append((k, [k, round(f, 4), int(x[0])]))
+                # true: neither mutation is common background (`common`)
+                true = not (common and any(m in common for m in k.split("+")))
+                seen.append((k, [k, round(f, 4), int(x[0]), true]))
         if any_meas:
             measured.append(d)
         groups = _fragments(seen)
-        if len(groups) >= 2:
+        if len(groups) >= 2 and any(v[3] for g in groups for _k, v in g):
             positive.append(d)
             seen_pairs += seen
             # the best-read pair of each fragment
-            per_out[d] = [max((v for _k, v in g), key=lambda v: v[2]) for g in groups]
+            # the best-read pair of each fragment, a true one first
+            per_out[d] = [max((v for _k, v in g), key=lambda v: (v[3], v[2])) for g in groups]
     q = quality or {}
     return {"positive": positive,
             "positive_well": [d for d in positive if well_covered(q.get(d))],

@@ -62,6 +62,28 @@ def _indices(pango_loader):
     return _CACHE[k]
 
 
+_COMMON: Dict[tuple, set] = {}
+
+
+def common_mutations(limit: int = 2000) -> Optional[set]:
+    """Mutations carried by more than `limit` pango lineages, from the tree file
+    in use (api.pango_loader.tree_info); None when the tree can't be read
+    (2026-10-26, process.cooc.pair_evidence)."""
+    try:
+        from api.pango_loader import PangoLoader, tree_info
+        t = tree_info()
+        key = (t["id"], int(limit))
+        if key not in _COMMON:
+            from collections import Counter
+            _raw, sigs, _p, _t = _indices(PangoLoader(t["file"]))
+            car = Counter(m for s in sigs.values() for m in s)
+            _COMMON.clear()
+            _COMMON[key] = {m for m, n in car.items() if n > limit}
+        return _COMMON[key]
+    except Exception:
+        return None
+
+
 def variant_markers(variant: str, pango_loader, panel: Optional[List[str]] = None) -> List[str]:
     """★ markers of `variant` as the panel check would compute them if it were
     added to `panel` (most specific first)."""
@@ -334,7 +356,7 @@ def check_in_data(markers: List[str], per_date: Dict[str, Dict[str, list]],
     # sample make the city "seen" even when most single markers read 0 %. They
     # only add: a city the markers call seen stays seen (until the scorecard).
     from process.cooc import pair_evidence
-    pev = pair_evidence(pd_all, quality, c)
+    pev = pair_evidence(pd_all, quality, c, common=common_mutations(c.get("pair_common", 2000)))
     state_markers = state
     if pev and pev["positive"] and state != "present":
         state = "present"

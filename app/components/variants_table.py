@@ -476,7 +476,9 @@ def _pairs_text(pev, limit=3):
     q = pev.get("positive_well") or []
     out = []
     for dt in sorted(pev.get("positive") or [], reverse=True)[:limit]:
-        prs = ", ".join(f"{k} {100 * f:.0f} % of {n:,}" for k, f, n in pev["per_date"].get(dt, []))
+        prs = ", ".join(f"{x[0]} {100 * x[1]:.0f} % of {x[2]:,}"
+                        + ("" if len(x) < 4 or x[3] else " (common partner)")
+                        for x in pev["per_date"].get(dt, []))
         out.append(f"{_short_date(dt)} ({'well covered' if dt in q else 'thin'}): {prs}")
     return " · ".join(out)
 
@@ -500,10 +502,12 @@ def _cell_tip(v, city, d, extra=""):
                      "Its own combinations on the same reads (pair · share · reads):"]
             q = pev.get("positive_well") or []
             for dt in sorted(pev["positive"], reverse=True)[:4]:
-                prs = " · ".join(f"{pk} {100 * f:.0f} % of {r:,}" for pk, f, r in pev["per_date"].get(dt, []))
+                prs = " · ".join(f"{x[0]} {100 * x[1]:.0f} % of {x[2]:,}"
+                                 + ("" if len(x) < 4 or x[3] else " (common partner)")
+                                 for x in pev["per_date"].get(dt, []))
                 lines.append(f"  {_short_date(dt)} ({'well covered' if dt in q else 'thin'}): {prs}")
-            lines.append(f"{n} {'stretch' if n == 1 else 'stretches'} of genome in all; a sample "
-                         "counts with 2 or more")
+            lines.append(f"{n} separate {'cooc' if n == 1 else 'coocs'} in all; a sample counts with "
+                         "2 or more, at least one without a common partner")
             if not q:
                 lines.append("Striped: only on thin samples, weak on its own")
             lines.append(single)
@@ -2083,8 +2087,8 @@ _LEGEND_ROWS = (
 # always in view, with the cell colours you need while reading the tree.
 SHORT_LEGEND = (
     "<div class='lg lgs'><div class='row'>"
-    + "<span class='i'><b>cells</b>: samples where its own mutations sit together on the "
-      "same reads, on 2 or more stretches of genome / samples read</span>"
+    + "<span class='i'><b>cells</b>: samples with 2 or more separate coocs (its own mutations "
+      "together on the same reads) only its family has / samples read</span>"
     + f"<span class='i'><i class='c' style='width:auto;padding:0 6px;{S_YES}'>2/8</i>seen</span>"
     + f"<span class='i'><i class='c' style='width:auto;padding:0 6px;{S_YES}{_LOWQ_CELL}'>1/8</i>"
       "seen, only on thin samples</span>"
