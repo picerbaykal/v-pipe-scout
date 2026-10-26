@@ -329,7 +329,18 @@ def check_in_data(markers: List[str], per_date: Dict[str, Dict[str, list]],
                 row[m] = [round(v * k, 2) for v in x]
         if row:
             samples[str(d)[:10]] = row
-    return {"state": state, "n_present": res["n_present"], "n_measured": res["n_measured"],
+    # specific co-occurrences (2026-10-26, process.cooc.pair_evidence): two
+    # independent stretches carrying the lineage's own combinations on one
+    # sample make the city "seen" even when most single markers read 0 %. They
+    # only add: a city the markers call seen stays seen (until the scorecard).
+    from process.cooc import pair_evidence
+    pev = pair_evidence(pd_all, quality, c)
+    state_markers = state
+    if pev and pev["positive"] and state != "present":
+        state = "present"
+    return {"state": state, "state_markers": state_markers, "pairs": pev,
+            "n_present": res["n_present"],
+            "n_measured": res["n_measured"],
             "n_markers": res["n_markers"], "timeline": tl,
             "day_detail": detail, "detail": _marker_detail(markers, pd_all, res, c),
             "quality": q, "n_well": len(good) if q else None, "n_samples": len(tl),

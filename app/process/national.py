@@ -143,7 +143,14 @@ def grade(per_city: Dict[str, dict], cfg: Optional[dict] = None) -> Optional[dic
     a = conf["answer"]
     well_min = int(c.get("thin_well_min", 2))
     seen = {k: d for k, d in (per_city or {}).items() if (d or {}).get("state") == "present"}
-    thin = lambda d: d.get("n_well") is not None and d["n_well"] < well_min  # noqa: E731
+    def thin(d):
+        # seen through specific co-occurrences only (2026-10-26): thin when
+        # every sample that showed them was thin (Zürich PJ.2.1: 3 Oct well
+        # covered counts; a city with only a thin positive sample doesn't)
+        pev = d.get("pairs") or {}
+        if d.get("state_markers") not in (None, "present") and pev.get("positive"):
+            return not pev.get("positive_well")
+        return d.get("n_well") is not None and d["n_well"] < well_min
     cities = sorted(k for k, d in seen.items() if not thin(d))
     cities_thin = sorted(k for k, d in seen.items() if thin(d))
     weeks = sum(w["answer"]["verdict"] == "present" for w in conf["weeks"])

@@ -182,7 +182,13 @@ S_NEAR1 = _dashed("#16a34a")
 
 
 def _lab_html(label) -> str:
-    """'0:24 (15)' with the bracket smaller and lighter: the score stands out."""
+    """'0:24 (15)' with the bracket smaller and lighter: the score stands out.
+    '3\non 2 samples' (specific co-occurrences, 2026-10-26): the second line
+    small, under the number."""
+    if "\n" in str(label):
+        top, sub = str(label).split("\n", 1)
+        return (f"{_e(top)}<span class='cu' style='display:block;font-size:10px;"
+                f"line-height:1.1'>{_e(sub)}</span>")
     return re.sub(r" \((\d+)\)$", r"<span class='cu'>(\1)</span>", _e(label))
 
 
@@ -240,6 +246,9 @@ def _pl(n, word):
 S_YES = _fill(GREEN, "#fff")
 S_NO = _fill("#f3f4f6", "#4b5563") + "box-shadow:inset 0 0 0 1px #d1d5db;"
 S_OPEN = "background:#fff;color:#374151;border:1.5px dashed #9ca3af;"
+# seen by its single mutations, but no sample with specific co-occurrences
+# (2026-10-26): light, outlined green, weaker than the filled green
+S_SINGLE = "background:#f0fdf4;color:#15803d;box-shadow:inset 0 0 0 1.5px #86efac;"
 # kept for the legend of older pieces and the deep scan's own cells
 S_PRESENT_LIGHT = "background:#fff;color:#14532d;box-shadow:inset 0 0 0 1.5px #16a34a;"
 S_NOTFOUND_LIGHT = "background:#fff;color:#78350f;box-shadow:inset 0 0 0 1.5px #f59e0b;"
@@ -331,6 +340,29 @@ def _scale(d, found=False):
     The cell (style, label) shows the answer only (2026-10-20); the dot and
     name colours of the tree are unchanged."""
     n_mk, p, a, u = _vote_counts(d)
+    pev = d.get("pairs") or {}
+    if pev.get("positive"):
+        # specific co-occurrences (2026-10-26): how many stretches of genome
+        # carried the lineage's own combinations, on how many samples
+        k = len(pev["positive"])
+        lab = f"{pev['n_stretches']}\non {k} {_pl(k, 'sample')}"
+        thin = not pev.get("positive_well")
+        sty = S_YES + _LOWQ_CELL if thin else S_YES
+        col = RED if found else GREEN
+        return (sty, lab, (("#fca5a5" if found else "#86efac") if thin else col),
+                (RED if found else "#15803d"), None)
+    if pev and pev.get("measured"):
+        # pairs counted, no sample with 2 stretches (2026-10-26): one measure
+        # in every cell. Seen by single mutations only -> light green with the
+        # old count; otherwise 0 and on how many samples the pairs were read
+        if d.get("state_markers") == "present":
+            return (S_SINGLE, _counts_label(d), ("#fca5a5" if found else "#86efac"),
+                    (RED if found else "#15803d"), None)
+        k = len(pev["measured"])
+        lab = f"0\n{k} {_pl(k, 'sample')}"
+        if not found:
+            return S_NO, lab, AMBER, AMBER_T, 0.0
+        return S_NO, lab, PALE_BG, RED, 0.0
     if n_mk == 0:
         return S_NOMARK, "·", GREY, "#6b7280", None
     lab = _counts_label(d)
@@ -431,9 +463,46 @@ def _marker_syms(d, n_max=6):
     return " · ".join(out[:n_max]) + more
 
 
+def _pairs_text(pev, limit=3):
+    """'3 Oct (well covered): 22879A+22899C 77 % of 10,098, 23854A+24077A 60 %
+    of 14,802 · 25 Sep (thin): …' — the specific co-occurrences behind a cell."""
+    q = pev.get("positive_well") or []
+    out = []
+    for dt in sorted(pev.get("positive") or [], reverse=True)[:limit]:
+        prs = ", ".join(f"{k} {100 * f:.0f} % of {n:,}" for k, f, n in pev["per_date"].get(dt, []))
+        out.append(f"{_short_date(dt)} ({'well covered' if dt in q else 'thin'}): {prs}")
+    return " · ".join(out)
+
+
 def _cell_tip(v, city, d, extra=""):
     """'XFG · Basel — mixed (1 ✓ 1 ✗ of 2 ★) · 2 well-covered samples · 4214C
     50 % ✓ · 8350C 0 % ✗' (+ why it was checked)."""
+    pev = d.get("pairs") or {}
+    if pev.get("positive"):
+        k, n = len(pev["positive"]), pev["n_stretches"]
+        mk = _vote_counts(d)
+        vote = (f" · its single mutations alone: {mk[1]} seen, {mk[2]} not seen"
+                if mk[0] else "")
+        return (f"{v} · {city} — seen: {n} {'stretch' if n == 1 else 'stretches'} of genome "
+                "carry combinations "
+                f"only its family has, on {k} {_pl(k, 'sample')} (2 or more stretches on one "
+                f"sample count) · {_pairs_text(pev)}{vote}"
+                + (" · striped: only on thin samples" if not pev.get("positive_well") else "")
+                + extra)
+    if pev.get("measured"):
+        k = len(pev["measured"])
+        mk = _vote_counts(d)
+        if d.get("state_markers") == "present":
+            head = (f"{v} · {city} — seen by its single mutations only ({mk[1]} seen, {mk[2]} "
+                    f"not seen, of {mk[0]}); no sample with 2 or more stretches of genome "
+                    f"carrying combinations only its family has (pairs read on {k} "
+                    f"{_pl(k, 'sample')}): weaker evidence, single mutations can be shared")
+        else:
+            head = (f"{v} · {city} — not seen: no sample with 2 or more stretches carrying "
+                    f"combinations only its family has (pairs read on {k} "
+                    f"{_pl(k, 'sample')}) · its single mutations alone: {mk[1]} seen, {mk[2]} "
+                    "not seen")
+        return head + extra
     n_mk, p, a, u = _vote_counts(d)
     if n_mk == 0:
         return f"{v} · {city} — no mutation of its own"
@@ -624,18 +693,23 @@ _NB_CACHE: dict = {}
 
 def _pango_sig():
     """(signatures, parent, carriers) from the page's pango loader, or None."""
+    # the tree file the page uses (api.pango_loader.tree_info), loaded once per
+    # file; not imported from the page module, which would run the page
     try:
-        from subpages.abundance_cooc import cached_get_pango_loader
+        from api.pango_loader import PangoLoader, tree_info
         from process.variant_explorer import _indices
-        _raw, sigs, parent, _t = _indices(cached_get_pango_loader())
+        t = tree_info()
+        if _NB_CACHE.get("tree") != t["id"]:
+            _NB_CACHE.clear()
+            _NB_CACHE["tree"], _NB_CACHE["loader"] = t["id"], PangoLoader(t["file"])
+        _raw, sigs, parent, _t = _indices(_NB_CACHE["loader"])
     except Exception:
         return None
-    k = id(sigs)
-    if k not in _NB_CACHE:
+    if _NB_CACHE.get("sigs") is not sigs:
         from collections import Counter
-        _NB_CACHE.clear()
-        _NB_CACHE[k] = (sigs, parent, Counter(m for v in sigs.values() for m in v))
-    return _NB_CACHE[k]
+        _NB_CACHE["sigs"] = sigs
+        _NB_CACHE["car"] = Counter(m for v in sigs.values() for m in v)
+    return sigs, parent, _NB_CACHE["car"]
 
 
 def _neighbours(v, m):
@@ -801,6 +875,12 @@ def _detail_row(gid, v, per_city, cities, sel, n_cols, found=False):
               + th("typical share, 6 cities", "the middle value of this mutation's share over "
                    "the six cities: high or low everywhere means it's the mutation, not the city")
               + "</tr>" + "".join(mk_rows) + "</table>")
+    pev = ds.get("pairs") or {}
+    if pev.get("positive"):
+        mk += ("<div style='font-size:12.5px;margin-top:6px'><b>Specific co-occurrences in "
+               f"{_e(city_name(sel))}</b> <span class='dim'>(mutations together on the same reads, "
+               "in combinations only its family has; a sample counts with 2 or more stretches "
+               f"of genome)</span>: {_e(_pairs_text(pev, limit=8))}</div>")
     body = ((("<div class='dim' style='font-size:12px'>All cities: one square per week, "
               "oldest left · striped = fewer than 2 well-covered samples that week</div>" + nat)
              if nat else "")
@@ -1983,7 +2063,11 @@ _LEGEND_ROWS = (
 # always in view, with the cell colours you need while reading the tree.
 SHORT_LEGEND = (
     "<div class='lg lgs'><div class='row'>"
-    + "<span class='i'>cells: its own mutations seen : not seen (couldn't answer)</span>"
+    + "<span class='i'>cells: stretches of genome with its own combinations, on how many "
+      "samples · or, without pair counts, its own mutations seen : not seen (couldn't "
+      "answer)</span>"
+    + f"<span class='i'><span class='c' style='{S_SINGLE}'>4:1</span> seen by single "
+      "mutations only</span>"
     + "<span class='i'>" + _lc({"n_markers": 3, "n_measured": 3, "n_present": 3}) + "seen</span>"
     + "<span class='i'>" + _lc({"n_markers": 2, "n_measured": 2, "n_present": 0}) + "not seen</span>"
     + "<span class='i'>" + _lc({"n_markers": 2, "n_measured": 1, "n_present": 1})
