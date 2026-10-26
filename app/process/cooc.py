@@ -715,9 +715,10 @@ def pair_evidence(per_date: Dict[str, Dict[str, List[float]]],
                   quality: Optional[Dict[str, dict]] = None,
                   cfg: Optional[dict] = None) -> Optional[dict]:
     """Specific co-occurrences seen in one city (2026-10-26, step 3): the
-    pairs accumulate_check_stats counted ("a+b" keys), grouped into stretches
-    of genome (pairs starting within check.pair_span of the stretch's first
-    one: one stretch is one bit of genome, however many pairs it holds).
+    pairs accumulate_check_stats counted ("a+b" keys), grouped into fragments:
+    seen pairs closer than check.pair_span bases, chained, could sit on one
+    read and count once (2026-10-26; before, grouping by where each pair
+    started split one fragment in two: Lugano TA.1 21 and 29 Sep).
 
     A pair is seen on a sample when >= check.min_cov reads cover both
     positions, >= check.present_freq of them carry both, and at least
@@ -748,39 +749,55 @@ def pair_evidence(per_date: Dict[str, Dict[str, List[float]]],
                                  if _SUB_RE.match(k.split("+")[0]) else 0))
     if not keys:
         return None
-    sid, start, cur = {}, None, -1
-    for k in keys:
-        mm = _SUB_RE.match(k.split("+")[0])
-        if not mm:
-            continue
-        p = int(mm.group(1))
-        if start is None or p > start + span:
-            start, cur = p, cur + 1
-        sid[k] = cur
-    positive, measured, per_out, seen_all = [], [], {}, set()
+    def _pos(k):
+        out = []
+        for m in k.split("+"):
+            mm = _SUB_RE.match(m)
+            if mm:
+                out.append(int(mm.group(1)))
+        return (min(out), max(out)) if out else (0, 0)
+
+    def _fragments(pairs):
+        """Seen pairs -> groups that one read could join: pairs closer than
+        pair_span bases, chained (Lugano TA.1, 21 Sep: 23277A+23401T and
+        23401T+23423T are one fragment, not two; 2026-10-26)."""
+        items = sorted(pairs, key=lambda kv: _pos(kv[0]))
+        groups, last_end = [], None
+        for k, val in items:
+            lo, hi = _pos(k)
+            if groups and lo - last_end <= span:
+                groups[-1].append((k, val))
+                last_end = max(last_end, hi)
+            else:
+                groups.append([(k, val)])
+                last_end = hi
+        return groups
+
+    positive, measured, per_out, seen_pairs = [], [], {}, []
     for d in sorted(per_date or {}):
         cells = per_date[d] or {}
-        best: Dict[int, list] = {}
-        any_meas = False
-        for k, i in sid.items():
+        seen, any_meas = [], False
+        for k in keys:
             x = cells.get(k)
             if not x or x[0] < c["min_cov"]:
                 continue
             any_meas = True
             f = x[1] / x[0]
-            if (f >= c["present_freq"] and x[1] >= c.get("pair_min_hit", 50)
-                    and (i not in best or x[0] > best[i][2])):
-                best[i] = [k, round(f, 4), int(x[0])]
+            if f >= c["present_freq"] and x[1] >= c.get("pair_min_hit", 50):
+                seen.append((k, [k, round(f, 4), int(x[0])]))
         if any_meas:
             measured.append(d)
-        if len(best) >= 2:
+        groups = _fragments(seen)
+        if len(groups) >= 2:
             positive.append(d)
-            seen_all |= set(best)
-            per_out[d] = [best[i] for i in sorted(best)]
+            seen_pairs += seen
+            # the best-read pair of each fragment
+            per_out[d] = [max((v for _k, v in g), key=lambda v: v[2]) for g in groups]
     q = quality or {}
     return {"positive": positive,
             "positive_well": [d for d in positive if well_covered(q.get(d))],
-            "n_stretches": len(seen_all), "measured": measured, "per_date": per_out}
+            "n_stretches": len(_fragments(seen_pairs)), "measured": measured,
+            "per_date": per_out}
 
 
 def _accumulate_pairs(rows: List[dict], pos_set: Set[int], pairs: Dict[str, List[str]],

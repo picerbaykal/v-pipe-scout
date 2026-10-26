@@ -176,3 +176,34 @@ def test_a_handful_of_reads_is_not_a_sighting():
     pd = {"2026-09-12": {"21588T+21624C": [103, 10, 10, 10], "22996C+23055G": [109, 7, 7, 7]}}
     ev = pair_evidence(pd, {"2026-09-12": WELL})
     assert ev["positive"] == [] and ev["measured"] == ["2026-09-12"]
+
+
+def test_undecided_single_mutations_are_not_shown_as_not_seen():
+    import importlib.util
+    from pathlib import Path
+    from process.variant_explorer import check_in_data
+    spec = importlib.util.spec_from_file_location(
+        "vt_pairs3", Path(__file__).resolve().parents[1] / "components" / "variants_table.py")
+    vt = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(vt)
+    dates = ["2026-09-20", "2026-10-03"]
+    # XFG, Basel: one marker seen, one with too few reads -> undecided
+    pd = {d: {"4214C": [1000, 990, 990, 990], "8350C": [30, 30, 30, 30],
+              "100A+200C": [500, 0, 0, 0]} for d in dates}
+    r = check_in_data(["4214C", "8350C"], pd, dates, quality={d: WELL for d in dates})
+    sty, lab, *_ = vt._scale(r)
+    assert r["state_markers"] != "absent" and sty == vt.S_OPEN and lab == "0/2"
+
+
+def test_coocs_one_read_can_join_count_once():
+    # TA.1, Lugano: 21 Sep two pairs sharing 23401T = one fragment (W-ASAP:
+    # amplicon 75 only); 12 Sep 6183G+6196A and 7842G+7851T = two
+    from process.cooc import pair_evidence
+    pd = {"2026-09-21": {"23277A+23401T": [128297, 87242, 87242, 87242],
+                         "23401T+23423T": [128314, 87253, 87253, 87253]},
+          "2026-09-29": {"23157G+23222A": [99952, 99952, 99952, 99952],
+                         "23401T+23423T": [99920, 99920, 99920, 99920]},
+          "2026-09-12": {"6183G+6196A": [184, 53, 53, 53],
+                         "7842G+7851T": [428, 77, 77, 77]}}
+    ev = pair_evidence(pd, {d: WELL for d in pd})
+    assert ev["positive"] == ["2026-09-12"] and ev["n_stretches"] == 2

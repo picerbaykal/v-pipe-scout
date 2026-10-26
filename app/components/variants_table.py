@@ -194,7 +194,7 @@ def _lab_html(label) -> str:
 
 def _cell(label, style, tip, sel) -> str:
     return (f"<td class='cc{' sel' if sel else ''}'><span class='c' style='{style}' "
-            f"data-tip='{_e(tip)}'>{_lab_html(label)}</span></td>")
+            f"data-tip='{_e(tip).replace(chr(10), '&#10;')}'>{_lab_html(label)}</span></td>")
 
 
 def _empty(tip, sel):
@@ -363,6 +363,10 @@ def _scale(d, found=False):
         if d.get("state_markers") == "present":
             return (S_SINGLE, lab, ("#fca5a5" if found else "#86efac"),
                     (RED if found else "#15803d"), None)
+        if d.get("state_markers") != "absent":
+            # single mutations undecided (a tie, too few reads): no answer,
+            # not "not seen" (XFG in Basel, Sep-Oct: 1:0 (1), dominant there)
+            return S_OPEN, lab, GREY, (RED if found else "#6b7280"), None
         if not found:
             return S_NO, lab, AMBER, AMBER_T, 0.0
         return S_NO, lab, PALE_BG, RED, 0.0
@@ -509,6 +513,11 @@ def _cell_tip(v, city, d, extra=""):
                      f"sample ({n_read} {_pl(n_read, 'sample')} read)",
                      "A single mutation can come from another lineage's reads: check the next "
                      "samples"]
+        elif d.get("state_markers") != "absent":
+            lines = [f"{v} · {city} — undecided",
+                     f"Its own combinations on the same reads: none on 2 or more stretches of one "
+                     f"sample ({n_read} {_pl(n_read, 'sample')} read)", single,
+                     "Too little to say seen or not seen"]
         else:
             lines = [f"{v} · {city} — not seen",
                      f"Its own combinations on the same reads: none on 2 or more stretches of one "
@@ -2082,6 +2091,7 @@ SHORT_LEGEND = (
     + f"<span class='i'><i class='c' style='width:auto;padding:0 6px;{S_SINGLE}'>0/8</i>"
       "only single mutations seen (weaker)</span>"
     + f"<span class='i'><i class='c' style='width:auto;padding:0 6px;{S_NO}'>0/8</i>not seen</span>"
+    + f"<span class='i'><i class='c' style='width:auto;padding:0 6px;{S_OPEN}'>0/4</i>undecided</span>"
     + "<span class='i dim'>results without pair counts: " + _lc({"n_markers": 3, "n_measured": 3, "n_present": 3})
     + "seen : not seen (couldn't answer)</span>"
     + "<span class='i'><span class='cal'><i style='background:" + GREEN + ";" + _LOWQ
