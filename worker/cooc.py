@@ -60,6 +60,21 @@ from process.amplicons import (
 from process.cooc import (annotate_cooc_dataframe, panel_completeness_by_date,
                           specific_markers, accumulate_check_stats,
                           aggregate_unexplained, lineages_below_all)
+
+
+def _specific_pairs(vs: Dict[str, set], location: str) -> Dict[str, List[str]]:
+    """{variant: ["a+b", ...]} — process.cooc.specific_pairs, at most
+    check.pair_max per variant, most specific first (2026-10-26). Counted in the
+    reads next to the markers; nothing votes on them yet. {} on any error, so
+    the check never breaks because of it."""
+    try:
+        from process.cooc import _check_cfg, specific_pairs
+        n = int(_check_cfg().get("pair_max", 200))
+        sp = specific_pairs(vs, get_all_lineage_signatures(), get_panel_parent_map())
+        return {v: [d["pair"] for d in ps[:n]] for v, ps in sp.items()}
+    except Exception as e:
+        logger.warning(f"[cooc][{location}] specific pairs failed: {e}")
+        return {}
 from utils.config import get_wiseloculus_url
 
 logger = logging.getLogger(__name__)
@@ -303,11 +318,12 @@ def lineages_check(location: str, start_date: datetime, end_date: datetime,
     pango_loader = PangoLoader(get_pango_summary_path())
     all_sigs, parents = get_all_lineage_signatures(), get_panel_parent_map()
     panel = list(panel or [])
-    sigs, markers, panel_sigs = {}, {}, {}
+    sigs, markers, panel_sigs, pairs = {}, {}, {}, {}
     for v in dict.fromkeys(variants):
         vs = _build_variant_signatures(list(dict.fromkeys(panel + [v])), pango_loader,
                                        _COWWID_VARIANTS)
         sigs[v] = vs.get(v, set())
+        pairs[v] = _specific_pairs(vs, location).get(v, [])
         for p in panel:
             panel_sigs.setdefault(p, vs.get(p, set()))
         try:
@@ -316,7 +332,8 @@ def lineages_check(location: str, start_date: datetime, end_date: datetime,
             logger.warning(f"[cooc][{location}] markers of {v} failed: {e}")
             markers[v] = []
     client = WiseLoculusLapis(get_wiseloculus_url())
-    out = {"dates": [], "per_variant": {v: {"markers": markers[v], "per_date": {}}
+    out = {"dates": [], "per_variant": {v: {"markers": markers[v], "pairs": pairs.get(v, []),
+                                            "per_date": {}}
                                         for v in markers}}
     todo = [v for v in markers if markers[v]]
     try:
@@ -348,13 +365,14 @@ def lineages_check(location: str, start_date: datetime, end_date: datetime,
         n_q, done_q = len(batches) * len(dates), [0]
         vsig = {v: sigs[v] for v in todo}
         vmk = {v: markers[v] for v in todo}
+        vpr = {v: pairs.get(v, []) for v in todo}
 
         async def _one(session, bpos, d):
             try:
                 async with sem:
                     rows = await client._fetch_cooccurrence_for_date(session, location, d, bpos)
                 if rows:
-                    accumulate_check_stats(rows, bpos, vsig, vmk, stats)
+                    accumulate_check_stats(rows, bpos, vsig, vmk, stats, pairs=vpr)
             finally:
                 done_q[0] += 1
                 if progress_callback:
@@ -386,11 +404,11 @@ def variant_check(location: str, start_date: datetime, end_date: datetime,
                   variant: str, panel: List[str],
                   progress_callback: Optional[Callable] = None) -> dict:
     """"Investigate a variant" -> "Check in data": one lineage (lineages_check).
-    Returns {variant, markers, dates, per_date}."""
+    Returns {variant, markers, pairs, dates, per_date}."""
     r = lineages_check(location, start_date, end_date, [variant], panel, progress_callback)
     pv = r["per_variant"].get(variant, {"markers": [], "per_date": {}})
-    return {"variant": variant, "markers": pv["markers"], "dates": r["dates"],
-            "per_date": pv["per_date"]}
+    return {"variant": variant, "markers": pv["markers"], "pairs": pv.get("pairs", []),
+            "dates": r["dates"], "per_date": pv["per_date"]}
 
 
 def coverage_from_rows(rows: List[dict], positions) -> Dict[str, int]:
@@ -501,6 +519,11 @@ def run_cooc_panel_completeness(
         logger.warning(f"[cooc][{location}] specific_markers failed: {e}")
         check_markers = {v: [] for v in variants}
     check_stats: Dict[str, dict] = {}
+    check_pairs = {v: p for v, p in _specific_pairs(variant_signatures, location).items()
+                   if check_markers.get(v)}
+    logger.info(
+        f"[cooc][{location}] specific pairs counted: "
+        + ", ".join(f"{v}={len(p)}" for v, p in check_pairs.items()))
     logger.info(
         f"[cooc][{location}] check markers: "
         + ", ".join(f"{v}={len(m)}" for v, m in check_markers.items())
@@ -640,7 +663,7 @@ def run_cooc_panel_completeness(
             # New check (Part B): raw per-date marker counts. Pure and
             # synchronous, so no interleaving between concurrent tasks.
             accumulate_check_stats(rows, batch_positions, variant_signatures,
-                                   check_markers, check_stats)
+                                   check_markers, check_stats, pairs=check_pairs)
             comp_positions = [p for p in batch_positions if p in completeness_positions]
             if not comp_positions:
                 return
@@ -715,6 +738,7 @@ def run_cooc_panel_completeness(
 
     panel_check = {
         v: {"markers": list(check_markers.get(v, [])),
+            "pairs": list(check_pairs.get(v, [])),
             "per_date": check_stats.get(v, {})}
         for v in variants
     }

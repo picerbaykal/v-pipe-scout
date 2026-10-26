@@ -380,6 +380,10 @@ _CHECK_UNCOVERED = {"N", "-"}
 CHECK_DEFAULTS = {
     # Part A — marker selection (worker; changing needs a re-scan)
     "out_other_max": 5,      # carriers outside the family that didn't inherit it
+    "pair_max": 200,         # specific pairs counted per lineage, most specific first
+    "pair_span": 300,        # specific pairs: two of a lineage's mutations at most
+                             #   this many bases apart, so one read can carry both
+                             #   (process.variant_explorer.marker_blocks uses 300)
     # Part B — the vote (UI; a streamlit restart is enough)
     "min_cov": 100,          # reads covering a marker (whole window) to measure it
     "present_freq": 0.05,    # present: >= this share of covering reads carry it ...
@@ -569,6 +573,65 @@ def specific_markers(variant_signatures: Dict[str, Set[str]],
     return out
 
 
+def specific_pairs(variant_signatures: Dict[str, Set[str]],
+                   lineage_signatures: Dict[str, Set[str]],
+                   parent_map: Dict[str, str],
+                   cfg: Optional[dict] = None) -> Dict[str, List[dict]]:
+    """Specific co-occurrences a lineage can show (2026-10-26): pairs of its
+    mutations close enough for one read to carry both (check.pair_span) that
+    at most markers.out_other_max lineages outside its family carry together,
+    the ★ marker rule applied to the pair. Lists only; nothing counts them yet
+    (next: the worker tallies reads carrying both, accumulate_check_stats).
+
+    Why: a mutation too common to be a marker can be unique with its
+    neighbour. TA.1: 23148C (36 lineages) + 23401T (61) are carried together
+    by none outside its family; W-ASAP shows them on amplicon 75, Jaccard 1.0.
+    7851T + 7869T: amplicon 26, Jaccard .92. Neither pair has a marker, so the
+    check never looked at them.
+
+    variant -> [{"pair": "23148C+23401T", "a", "b", "n_out", "markers": k}],
+      n_out    lineages outside the family carrying both (recombinants made
+               from the lineage that inherited both don't count, as for markers)
+      markers  how many of the two are ★ markers (0: new evidence; 1-2: a
+               marker with a specific neighbour)
+    sorted by n_out, then position. Same arguments as specific_markers."""
+    from process.recombinants import get_recombinants
+    c = _check_cfg(cfg)
+    span = int(c.get("pair_span", 300))
+    idx = _carrier_index(lineage_signatures)
+    kids = _children_map(parent_map)
+    rc = get_recombinants(parent_map, lineage_signatures)
+    marks = specific_markers(variant_signatures, lineage_signatures, parent_map, cfg)
+    out: Dict[str, List[dict]] = {}
+    for v, sig in variant_signatures.items():
+        fam = _lineage_family(v, parent_map, kids)
+        own = {rc.rec_root(v)} if v in parent_map else set()
+        others: Set[str] = set()                # carried together by another panel variant
+        for w, s in variant_signatures.items():
+            if w != v and w not in fam:
+                others.add(w)
+        subs = sorted(((int(_SUB_RE.match(m).group(1)), m) for m in (sig or ())
+                       if _SUB_RE.match(m)))
+        mk = set(marks.get(v) or [])
+        pairs = []
+        for i, (pa, a) in enumerate(subs):
+            for pb, b in subs[i + 1:]:
+                if pb - pa > span:
+                    break
+                both = (idx.get(a, set()) & idx.get(b, set())) - fam
+                if any(w in both or ((variant_signatures.get(w) or set()) >= {a, b})
+                       for w in others):
+                    continue
+                n_out = sum(1 for l in both if not (rc.tolerated(l, v, a, own)
+                                                     and rc.tolerated(l, v, b, own)))
+                if n_out <= c["out_other_max"]:
+                    pairs.append({"pair": f"{a}+{b}", "a": a, "b": b, "n_out": n_out,
+                                  "markers": (a in mk) + (b in mk)})
+        out[v] = sorted(pairs, key=lambda d: (d["n_out"], int(_SUB_RE.match(d["a"]).group(1)),
+                                              int(_SUB_RE.match(d["b"]).group(1))))
+    return out
+
+
 def _sig_map(sig: Set[str]) -> Dict[int, str]:
     out = {}
     for m in sig or ():
@@ -582,7 +645,8 @@ def accumulate_check_stats(rows: List[dict],
                            positions: List[int],
                            variant_signatures: Dict[str, Set[str]],
                            markers: Dict[str, List[str]],
-                           stats: Dict[str, Dict[str, Dict[str, List[int]]]]) -> None:
+                           stats: Dict[str, Dict[str, Dict[str, List[int]]]],
+                           pairs: Optional[Dict[str, List[str]]] = None) -> None:
     """Part B tally from RAW LAPIS rows (one batch of one date).
 
     stats[variant][date][marker] = [cov, hit, link_n, link_ok]
@@ -590,10 +654,20 @@ def accumulate_check_stats(rows: List[dict],
       hit     of those, reads carrying the marker base
       link_n  of hit, reads that also cover >=1 other signature position
       link_ok of link_n, reads where every covered neighbour has the variant base
+    pairs (2026-10-26): {variant: ["23148C+23401T", ...]} from specific_pairs;
+    each is tallied under its own key, the same four numbers:
+      cov     reads covering BOTH positions
+      hit     of those, reads carrying BOTH mutations
+      link_n, link_ok  = hit (the pair is its own co-occurrence)
+    so process.cooc.check_verdicts can read a pair like a marker. Nothing
+    reads them yet: the cells vote on `markers` only. A pair whose two
+    positions fall in different batches is not counted.
     Pure; no IO. Positions outside this batch are ignored."""
     if not rows:
         return
     pos_set = set(positions)
+    if pairs:
+        _accumulate_pairs(rows, pos_set, pairs, stats)
     prepared = []
     for v, mks in markers.items():
         if not mks:
@@ -630,6 +704,42 @@ def accumulate_check_stats(rows: List[dict],
                     cell[2] += cnt
                     if all(cov_pos[q] == sm[q] for q in nb):
                         cell[3] += cnt
+
+
+def _accumulate_pairs(rows: List[dict], pos_set: Set[int], pairs: Dict[str, List[str]],
+                      stats: Dict[str, Dict[str, Dict[str, List[int]]]]) -> None:
+    """The pair half of accumulate_check_stats (2026-10-26)."""
+    prepared = []
+    for v, prs in pairs.items():
+        pp = []
+        for key in prs or ():
+            a, _, b = key.partition("+")
+            ma, mb = _SUB_RE.match(a), _SUB_RE.match(b)
+            if not (ma and mb):
+                continue
+            pa, pb = int(ma.group(1)), int(mb.group(1))
+            if pa in pos_set and pb in pos_set:
+                pp.append((f"[{pa}]", ma.group(2), f"[{pb}]", mb.group(2), key))
+        if pp:
+            prepared.append((v, pp))
+    if not prepared:
+        return
+    for row in rows:
+        cnt = int(row.get("count", 0) or 0)
+        if cnt <= 0:
+            continue
+        date = str(row.get("date", ""))[:10]
+        for v, pp in prepared:
+            for ka, ba, kb, bb, key in pp:
+                xa, xb = row.get(ka), row.get(kb)
+                if xa in _CHECK_UNCOVERED or xb in _CHECK_UNCOVERED or xa is None or xb is None:
+                    continue
+                cell = stats.setdefault(v, {}).setdefault(date, {}).setdefault(key, [0, 0, 0, 0])
+                cell[0] += cnt
+                if xa == ba and xb == bb:
+                    cell[1] += cnt
+                    cell[2] += cnt
+                    cell[3] += cnt
 
 
 def own_markers(variant: str, markers: Optional[List[str]],
