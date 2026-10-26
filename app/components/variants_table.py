@@ -344,8 +344,11 @@ def _scale(d, found=False):
     if pev.get("positive"):
         # specific co-occurrences (2026-10-26): how many stretches of genome
         # carried the lineage's own combinations, on how many samples
-        k = len(pev["positive"])
-        lab = f"{pev['n_stretches']}\non {k} {_pl(k, 'sample')}"
+        # one short label for every cell with pair counts (2026-10-26): samples
+        # carrying its own combinations on 2+ stretches / samples where pairs
+        # were read. The stretches are in the hover.
+        k, n = len(pev["positive"]), len(pev.get("measured") or pev["positive"])
+        lab = f"{k}/{n}"
         thin = not pev.get("positive_well")
         sty = S_YES + _LOWQ_CELL if thin else S_YES
         col = RED if found else GREEN
@@ -355,11 +358,11 @@ def _scale(d, found=False):
         # pairs counted, no sample with 2 stretches (2026-10-26): one measure
         # in every cell. Seen by single mutations only -> light green with the
         # old count; otherwise 0 and on how many samples the pairs were read
-        if d.get("state_markers") == "present":
-            return (S_SINGLE, _counts_label(d), ("#fca5a5" if found else "#86efac"),
-                    (RED if found else "#15803d"), None)
         k = len(pev["measured"])
-        lab = f"0\n{k} {_pl(k, 'sample')}"
+        lab = f"0/{k}"
+        if d.get("state_markers") == "present":
+            return (S_SINGLE, lab, ("#fca5a5" if found else "#86efac"),
+                    (RED if found else "#15803d"), None)
         if not found:
             return S_NO, lab, AMBER, AMBER_T, 0.0
         return S_NO, lab, PALE_BG, RED, 0.0
@@ -2063,10 +2066,10 @@ _LEGEND_ROWS = (
 # always in view, with the cell colours you need while reading the tree.
 SHORT_LEGEND = (
     "<div class='lg lgs'><div class='row'>"
-    + "<span class='i'>cells: stretches of genome with its own combinations, on how many "
-      "samples · or, without pair counts, its own mutations seen : not seen (couldn't "
-      "answer)</span>"
-    + f"<span class='i'><span class='c' style='{S_SINGLE}'>4:1</span> seen by single "
+    + "<span class='i'>cells: samples with its own combinations on 2 or more stretches of "
+      "genome / samples read (2/8) · without pair counts: its own mutations seen : not seen "
+      "(couldn't answer)</span>"
+    + f"<span class='i'><span class='c' style='{S_SINGLE}'>0/8</span> seen by single "
       "mutations only</span>"
     + "<span class='i'>" + _lc({"n_markers": 3, "n_measured": 3, "n_present": 3}) + "seen</span>"
     + "<span class='i'>" + _lc({"n_markers": 2, "n_measured": 2, "n_present": 0}) + "not seen</span>"

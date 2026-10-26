@@ -47,6 +47,12 @@ def panel_verdicts(cooc_res: dict, variants: list, own: dict = None) -> dict:
         if nd == 0:
             state, reason = "no_marker", ("every mutation is shared with another panel "
                                           "variant or common outside its family")
+        elif (_cid.get("pairs") or {}).get("positive"):
+            # specific co-occurrences seen (2026-10-26, process.cooc.pair_evidence)
+            _pv = _cid["pairs"]
+            state, reason = "present", (
+                f"its own combinations on 2 or more stretches on {len(_pv['positive'])} of "
+                f"{len(_pv['measured'])} samples — markers: {np_} of {nm} present — {mtxt}")
         elif nm == 0:
             state, reason = "no_data", f"too few reads on its markers — {mtxt}"
         else:
@@ -67,21 +73,20 @@ def panel_verdicts(cooc_res: dict, variants: list, own: dict = None) -> dict:
                   "samples": _cid.get("samples") or {},
                   # its own markers, not its parent's (2026-10-23)
                   "own": _cid.get("own"), "parent": _cid.get("parent"),
-                  "own_missing": _cid.get("own_missing", False)}
+                  "own_missing": _cid.get("own_missing", False),
+                  # specific co-occurrences and the marker vote alone (2026-10-26)
+                  "pairs": _cid.get("pairs"), "state_markers": _cid.get("state_markers")}
     return out
 
 
-def plus_add(per_city: dict, status: str, min_days: int, pooled: bool = False) -> bool:
+def plus_add(per_city: dict, status: str, min_days: int) -> bool:
     """+ Add (2026-10-02): the ★ check confirms it in at least one city, and it
     is more than one sample (>= min_days evidence days in a city, or 1 day in
     >= 2 cities); never for a "named" (not confirmed) or "family" lineage.
-    per_city: {city: {"days": int, "check": {"state": …}}}.
-    pooled (2026-10-23): all cities pooled say seen (process.national.grade
-    found_pooled) — counts like a city that says seen."""
+    per_city: {city: {"days": int, "check": {"state": …}}}."""
     if status in ("named", "family"):
         return False
-    present = pooled or any((d.get("check") or {}).get("state") == "present"
-                            for d in per_city.values())
+    present = any((d.get("check") or {}).get("state") == "present" for d in per_city.values())
     ok = any((d.get("days") or 0) >= min_days for d in per_city.values())
     samples = ok or sum(1 for d in per_city.values() if (d.get("days") or 0) >= 1) >= 2
     return bool(present and samples)

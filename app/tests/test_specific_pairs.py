@@ -126,7 +126,7 @@ def test_cell_and_grade_use_the_pairs():
         return check_in_data(mk, pd, list(pd), quality={d: q for d in pd})
     zh = city(WELL)
     style, label, *_ = vt._scale(zh, found=True)
-    assert label == "3\non 1 sample"
+    assert label == "1/3"
     assert "22879A+22899C 77 % of 10,097" in vt._cell_tip("PJ.2.1", "Zürich", zh)
     thin = city({"median": 8, "share_100": 0.05})
     g = grade({"ZH": zh, "BS": thin})
@@ -148,10 +148,31 @@ def test_every_cell_with_pair_counts_speaks_one_measure():
           for d in dates}
     r = check_in_data(mk, pd, dates, quality={d: WELL for d in dates})
     sty, lab, *_ = vt._scale(r, found=True)
-    assert sty == vt.S_SINGLE and lab == "3:0"
+    assert sty == vt.S_SINGLE and lab == "0/2"
     assert "single mutations only" in vt._cell_tip("ST.1", "Zürich", r)
     # markers not seen, pairs read, none -> 0 and the samples measured
     pd = {d: {**{m: [1000, 0, 0, 0] for m in mk}, "100A+200C": [500, 0, 0, 0]} for d in dates}
     r = check_in_data(mk, pd, dates, quality={d: WELL for d in dates})
     sty, lab, *_ = vt._scale(r, found=True)
-    assert lab == "0\n2 samples" and "not seen" in vt._cell_tip("X", "Zürich", r)
+    assert lab == "0/2" and "not seen" in vt._cell_tip("X", "Zürich", r)
+
+
+def test_panel_rows_carry_the_pairs():
+    from process.family import panel_verdicts
+    mk = ["m1", "m2", "m3", "m4"]
+    pd = {d: {m: [1000, 0, 0, 0] for m in mk} for d in ZH_PJ}
+    for d, cells in ZH_PJ.items():
+        pd[d].update(cells)
+    res = {"panel_check": {"PJ.2.1": {"markers": mk, "per_date": pd}},
+           "dates": list(pd), "sample_qc": {d: WELL for d in pd}}
+    out = panel_verdicts(res, ["PJ.2.1"])["PJ.2.1"]
+    assert out["state"] == "present" and out["state_markers"] == "absent"
+    assert out["pairs"]["positive"] == ["2026-10-03"]
+
+
+def test_a_handful_of_reads_is_not_a_sighting():
+    # BA.3.2, Lugano 12 Sep (gone since June): 10 % of 103 and 6 % of 109
+    from process.cooc import pair_evidence
+    pd = {"2026-09-12": {"21588T+21624C": [103, 10, 10, 10], "22996C+23055G": [109, 7, 7, 7]}}
+    ev = pair_evidence(pd, {"2026-09-12": WELL})
+    assert ev["positive"] == [] and ev["measured"] == ["2026-09-12"]

@@ -148,7 +148,7 @@ def grade(per_city: Dict[str, dict], cfg: Optional[dict] = None) -> Optional[dic
         # every sample that showed them was thin (Zürich PJ.2.1: 3 Oct well
         # covered counts; a city with only a thin positive sample doesn't)
         pev = d.get("pairs") or {}
-        if d.get("state_markers") not in (None, "present") and pev.get("positive"):
+        if pev.get("positive"):                  # the same samples the cell shows
             return not pev.get("positive_well")
         return d.get("n_well") is not None and d["n_well"] < well_min
     cities = sorted(k for k, d in seen.items() if not thin(d))
