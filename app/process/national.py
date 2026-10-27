@@ -291,3 +291,40 @@ def weekly(raw: Dict[str, dict], d0: str, d1: str, cfg: Optional[dict] = None) -
         n += 1
     return {"weeks": weeks, "in_a_row": n, "need": need,
             "short": len(weeks) < need, "ready": n >= need}
+
+
+def row_status(wk: Optional[dict]) -> Optional[dict]:
+    """The row's status from its weekly grades (2026-10-27): the decision
+    looks at the last weeks, whatever range was chosen; a longer range only
+    adds history (cells show the whole range).
+
+      add       the last check.add_weeks weeks confirmed in a row
+      watch     the newest week confirmed (not yet in a row), or found
+                there and never confirmed in the chosen dates
+      fading    confirmed in an earlier week of the chosen dates, the newest
+                week not confirmed
+      earlier   never confirmed, not found in the newest week
+
+    Returns {kind, in_a_row, need, last_confirmed, last_found} or None
+    without weekly grades (dates shorter than one window)."""
+    weeks = (wk or {}).get("weeks") or []
+    if not weeks:
+        return None
+    need = int((wk or {}).get("need", 3))
+    n = int((wk or {}).get("in_a_row", 0))
+    conf = [w["end"] for w in weeks if w["status"] == "confirmed"]
+    found = [w["end"] for w in weeks if w["status"] != "none"]
+    newest = weeks[-1]["status"]
+    if n >= need:
+        kind = "add"
+    elif newest == "confirmed":
+        kind = "watch"
+    elif conf:
+        kind = "fading"
+    elif newest == "watch":
+        kind = "watch"
+    else:
+        kind = "earlier"
+    return {"kind": kind, "in_a_row": n, "need": need,
+            "last_confirmed": conf[-1] if conf else None,
+            "last_found": found[-1] if found else None}

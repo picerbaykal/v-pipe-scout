@@ -2598,7 +2598,34 @@ def app():
                         _sq = (_cr_all.get(_c) or {}).get("sample_qc") or {}
                         if _sq:
                             _qual[_c] = (sum(1 for _q in _sq.values() if _wc(_q)), len(_sq))
+                    # weekly grades of the panel lineages too (2026-10-27): the
+                    # weeks strip and "not confirmed since …" on their rows
+                    _pweekly = {}
+                    _wc = st.session_state.setdefault("acooc_weekly_cache", {})
+                    for _pv in _run_panel:
+                        _rw = {}
+                        for _c in _cities_all:
+                            _cr = _cr_all.get(_c) or {}
+                            _ci = (_cr.get("panel_check") or {}).get(_pv) or {}
+                            if _ci.get("markers"):
+                                _rw[_c] = {"markers": _ci["markers"], "per_date": _ci.get("per_date") or {},
+                                           "dates": [str(d)[:10] for d in (_cr.get("dates") or [])],
+                                           "quality": _cr.get("sample_qc"),
+                                           "own": (_own_map or {}).get(_pv)}
+                        if not _rw:
+                            continue
+                        _key = ("w1-panel", _pv, _run_d0, _run_d1,
+                                tuple(sorted((c, len(r["per_date"])) for c, r in _rw.items())))
+                        if _key not in _wc:
+                            try:
+                                from process.national import weekly as _weekly
+                                _wc[_key] = _weekly(_rw, _run_d0, _run_d1)
+                            except Exception as _e:
+                                logger.warning(f"weekly grade {_pv}: {_e}")
+                                _wc[_key] = None
+                        _pweekly[_pv] = _wc[_key]
                     _view = _vt.build(_cities_all, _tcity, _rows, _verdicts_by_city, _findings,
+                                      panel_weekly=_pweekly, dates=(_run_d0, _run_d1),
                                       quality=_qual,
                                       current_panel=set(all_selected_variants),
                                       ot=curated_variants, novel=_nov_list, broad=_broad,

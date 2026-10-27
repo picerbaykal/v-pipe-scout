@@ -65,6 +65,9 @@ CSS = """
 .vt td.nomk { color:#8b8f97; font-size:13px; padding-left:8px; }
 .vt td.ov { white-space:normal; padding:2px 8px; min-width:250px; max-width:300px; }
 .vt .ovb { display:inline-block; font-size:12.5px; line-height:1.3; padding:2px 7px; border-radius:5px; }
+.vt .wks { display:inline-flex; gap:1px; margin-left:8px; vertical-align:middle; white-space:nowrap; }
+.vt .wks i { display:inline-block; width:7px; height:10px; border-radius:2px; }
+.vt .wks .wkm { font-size:11px; color:#9ca3af; margin-right:2px; line-height:10px; }
 .vt .ovb b { font-weight:600; }
 .vt .ovb .add { margin-left:6px; }
 .vt td.cc .c { cursor:pointer; }
@@ -831,7 +834,7 @@ def _detail_row(gid, v, per_city, cities, sel, n_cols, found=False):
         sty = " style='color:#31333f;font-weight:600'" if c == sel else ""
         txt = f"<span class='dim'{sty}>{_e(_city_line(d))}</span>"
         lines.append(f"<div class='dl'>{nm}{_cal_line(d, top, low)}{txt}</div>")
-    nat = _nat_line(per_city, top, low)
+    nat = ""      # the old all-cities marker-vote week line (2026-10-27: the weeks strip replaces it)
     ds = per_city.get(sel) or {}
     mk_rows = []
     import statistics
@@ -1217,7 +1220,7 @@ def _city_seen(d):
     return _state(d or {}) == "present"
 
 
-def _panel_overview(per_city, cities):
+def _panel_overview(per_city, cities, wk=None):
     res = [per_city[c] for c in cities if per_city.get(c)]
     if not res:
         return (_ovb("<b>In panel</b> · no result"), "", GREY, "#6b7280", "dashed")
@@ -1240,9 +1243,22 @@ def _panel_overview(per_city, cities):
         return city_code(c) + (" thin" if pev.get("positive") and not pev.get("positive_well")
                                else "")
     where = f" ({', '.join(_tag(c) for c in seen)})" if 0 < len(seen) <= 3 else ""
+    # not confirmed in the newest weeks (2026-10-27): information only
+    note, tip = "", ""
+    try:
+        from process.national import row_status
+        rs = row_status(wk)
+    except Exception:
+        rs = None
+    if rs and wk["weeks"][-1]["status"] != "confirmed":
+        note = (f" · not confirmed since {_short_date(rs['last_confirmed'])}"
+                if rs.get("last_confirmed") else " · not confirmed in these dates")
+        tip = ("not confirmed in the 4 weeks up to the newest Sunday (≥ 2 well-covered cities "
+               "with its coocs, ≥ 2 weeks); information only: a lineage on its way out keeps "
+               "its place in the panel until you remove it")
     return (_ovb(f"<b style='color:#1f2328'>In panel</b> · seen in {len(seen)} of "
-                 f"{len(meas)}{where}"),
-            "", GREEN if seen else "#d1d5db", "#15803d" if seen else "#6b7280", "filled")
+                 f"{len(meas)}{where}{note}") + _weeks_strip(wk),
+            tip, GREEN if seen else "#d1d5db", "#15803d" if seen else "#6b7280", "filled")
 
 
 def _absent_line(chk):
@@ -1367,11 +1383,17 @@ def _short_reason(f, cities):
     pc = f.get("per_city") or {}
     chk = {c: (pc.get(c) or {}).get("check") for c in cities if (pc.get(c) or {}).get("check")}
     g = None
-    try:
-        from process.national import grade
-        g = grade(chk) if chk else None
-    except Exception:
-        g = None
+    # the newest 4-week window (2026-10-27): the status is about the last
+    # weeks, not the whole chosen range
+    wks = (f.get("weekly") or {}).get("weeks") or []
+    if wks and wks[-1].get("grade"):
+        g = wks[-1]["grade"]
+    if g is None:
+        try:
+            from process.national import grade
+            g = grade(chk) if chk else None
+        except Exception:
+            g = None
     g = g or f.get("grade") or {}
     c = _check_cfg_safe() or {}
     if g and c.get("confirm_use_missing", False) and not g.get("ok_missing", True):
@@ -1411,6 +1433,47 @@ def _counted_text(chk, cities):
     n = sum(len(v) for v in by_day.values())
     return (f"its {n} {_pl(n, 'sample')} with coocs, oldest first: "
             + " · ".join(f"{_short_date(d)} {', '.join(sorted(cs))}" for d, cs in sorted(by_day.items())))
+
+
+def _weeks_strip(wk, keep=12):
+    """The weekly grades as small squares, newest right (2026-10-27): each =
+    the 4 weeks up to that Sunday; solid confirmed, light found, empty not
+    found. More than `keep` weeks: '⋯' first, its hover sums up the older."""
+    weeks = (wk or {}).get("weeks") or []
+    if len(weeks) < 2:
+        return ""
+    sty = {"confirmed": f"background:{GREEN}", "watch": "background:#c0dd97",
+           "none": "background:#fff;box-shadow:inset 0 0 0 1px #d1d5db"}
+    word = {"confirmed": "confirmed", "watch": "found, not confirmed", "none": "not found"}
+    days = (_check_cfg_safe() or {}).get("add_days", 28)
+    old, shown = weeks[:-keep] if len(weeks) > keep else [], weeks[-keep:]
+    out = []
+    if old:
+        oc = [w for w in old if w["status"] == "confirmed"]
+        tip = (f"{len(old)} older {_pl(len(old), 'week')}: {len(oc)} confirmed"
+               + (f", last confirmed {_short_date(oc[-1]['end'])}" if oc else ""))
+        out.append(f"<span class='wkm' data-tip='{_e(tip)}'>⋯</span>")
+    for w in shown:
+        g = w.get("grade") or {}
+        where = ", ".join(city_code(c) for c in g.get("cities") or [])
+        tip = (f"{days} days to {_short_date(w['end'])}: {word.get(w['status'], '')}"
+               + (f" · seen in {where}" if where else ""))
+        out.append(f"<i style='{sty.get(w['status'], '')}' data-tip='{_e(tip)}'></i>")
+    return f"<span class='wks'>{''.join(out)}</span>"
+
+
+def _frames_note(findings, panel_weekly, dates):
+    """'cells: chosen dates … · status: last weeks, up to …' (2026-10-27)"""
+    if not dates:
+        return ""
+    ends = [w["end"] for wk in list((panel_weekly or {}).values())
+            + [f.get("weekly") for f in (findings or {}).values()] if wk
+            for w in (wk.get("weeks") or [])[-1:]]
+    last = max(ends) if ends else None
+    return (f"<div class='dim' style='font-size:12.5px;margin:4px 0 2px'>cells: the chosen dates, "
+            f"{_e(_short_date(dates[0]))} – {_e(_short_date(dates[1]))} · status: the last weeks"
+            + (f", up to {_e(_short_date(last))}" if last else "")
+            + " (each square: the 4 weeks up to a Sunday)</div>")
 
 
 def _add_note(findings):
@@ -1511,14 +1574,35 @@ def _finding_overview(v, f, cities, current_panel, has_children=False):
         wk = f.get("weekly")
         hover = (f"suggested by the reads, not in the panel · {why} · {tip}"
                  + (" · " + _weeks_text(wk) if wk else ""))
-        if f.get("add_ready"):
+        try:
+            from process.national import row_status
+            rs = row_status(wk)
+        except Exception:
+            rs = None
+        strip = _weeks_strip(wk)
+        if f.get("add_ready") or (rs and rs["kind"] == "add"):
             btn = ("<span class='added'>added · re-run needed</span>" if v in current_panel
                    else f"<button class='add' data-add='{_e(v)}'>+ Add</button>")
             n = (wk or {}).get("in_a_row", 0)
             return (kind, _ovb(f"<b>Add to panel</b> · {n} weeks in a row{btn}",
-                               "background:#fef2f2;color:#b91c1c;"), hover, RED, RED, "filled")
-        return (kind, _ovb(f"<b>Watch</b> <span style='color:#4b5563'>· {_e(_short_reason(f, cities))}</span>",
-                           "background:#eff6ff;color:#1d4ed8;"), hover, RED, RED, "ring")
+                               "background:#fef2f2;color:#b91c1c;") + strip, hover, RED, RED, "filled")
+        if rs and rs["kind"] == "fading":
+            return (kind, _ovb(f"<b>Fading</b> · last confirmed {_e(_short_date(rs['last_confirmed']))}",
+                               "color:#6b7280;box-shadow:inset 0 0 0 1px #e5e7eb;") + strip,
+                    hover + " · fading: confirmed in an earlier week of the chosen dates, not in the "
+                    "newest; no + Add while it isn't confirmed again", "#d1d5db", "#6b7280", "ring")
+        if rs and rs["kind"] == "earlier":
+            return (kind, _ovb(f"<b>Earlier only</b> · last seen "
+                               f"{_e(_short_date(rs['last_found'])) if rs.get('last_found') else '–'}",
+                               "color:#6b7280;box-shadow:inset 0 0 0 1px #e5e7eb;") + strip,
+                    hover + " · earlier only: seen in the chosen dates, never confirmed, and not "
+                    "in the newest 4 weeks", "#d1d5db", "#6b7280", "ring")
+        # confirmed in the newest weeks, not yet in a row: say how far it got
+        reason = (f"{rs['in_a_row']} of {rs['need']} weeks"
+                  if rs and (wk or {}).get("weeks") and wk["weeks"][-1]["status"] == "confirmed"
+                  else _short_reason(f, cities))
+        return (kind, _ovb(f"<b>Watch</b> <span style='color:#4b5563'>· {_e(reason)}</span>",
+                           "background:#eff6ff;color:#1d4ed8;") + strip, hover, RED, RED, "ring")
     if kind in ("folded", "suggested"):
         # no coocs of its own (2026-10-27): grey, the reason in the cells' words
         return (kind, _ovb(_e(why), "color:#6b7280;"),
@@ -1853,7 +1937,8 @@ def _near_rows(r, v, changes, cities, sel, gid, n_cols):
 def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
           novel=(), broad=(), novel_rest=None, near=None, near_min_days=2,
           novel_hotspot=None, data_until=None, novel_info=None,
-          broad_total=None, named_hidden=0, quality=None) -> str:
+          broad_total=None, named_hidden=0, quality=None, panel_weekly=None,
+          dates=None) -> str:
     """cities: city names in column order; sel: the chosen city.
     rows: components.abundance_cooc_tree.tree_rows(...).
     verdicts: {city: {variant: {state, reason, n_present, n_measured, n_markers}}}.
@@ -1928,7 +2013,7 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
             # the dot, the name and the overview follow all cities, not the
             # selected one (2026-10-20); amber only for "in panel, not
             # seen in any city"
-            ov, ovtip, dcol, ncol, dk = _panel_overview(pc, cities)
+            ov, ovtip, dcol, ncol, dk = _panel_overview(pc, cities, (panel_weekly or {}).get(v))
             tip = f"{v}: in the panel" + (f" · {ovtip}" if ovtip else "")
             name = f"<span class='nm' style='color:{ncol}'>{_e(v)}</span>{chips}"
             tc = _tree_cell(r, dcol, dk, name, tip)
@@ -2117,7 +2202,7 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
             body.append(f"<tr class='note'><td colspan='{n_cols}'>+ more small unassigned patterns "
                         f"({novel_rest} reads, summed over cities and days) — not listed</td></tr>")
 
-    return (CSS + SHORT_LEGEND + _add_note(findings)
+    return (CSS + SHORT_LEGEND + _frames_note(findings, panel_weekly, dates) + _add_note(findings)
             + f"<div class='vtw'><table class='vt'><thead>{head}</thead>"
               f"<tbody>{''.join(body)}</tbody></table></div>")
 
