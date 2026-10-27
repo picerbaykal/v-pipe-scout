@@ -11,6 +11,21 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
+def _sample_qc(location, d0, d1):
+    """{date: coverage summary} of each sample in d0..d1 (process.sample_qc,
+    reads at 119 positions); {} when it fails — never breaks a task."""
+    import sys
+    sys.path.insert(0, "/app_shared")
+    try:
+        from api.wiseloculus import WiseLoculusLapis
+        from utils.config import get_wiseloculus_url
+        from process.sample_qc import sample_quality
+        return sample_quality(WiseLoculusLapis(get_wiseloculus_url()), location, (d0, d1))
+    except Exception as e:
+        logger.warning(f"[sample quality] {location}: {e}")
+        return {}
+
 from celery.signals import worker_process_init
 
 
@@ -503,6 +518,12 @@ def run_cooc_deep_scan_lapis(self, location: str, start_date: str, end_date: str
                     list(variants), list(variants))
             except Exception as e:
                 logger.warning(f"[deep scan] panel weekly check failed in {location}: {e}")
+            # each sample's coverage on the weeks before the chosen dates too
+            # (2026-10-27): without it those samples never counted as well
+            # covered, so the weeks squares saw only the chosen dates' samples
+            _dc = min(d0, datetime.fromisoformat(check_start_date))
+            if _dc < d0:
+                result["sample_qc_ext"] = _sample_qc(location, _dc, d0)
         _p(5, "Deep scan complete.")
         return result
     except Exception as e:
@@ -574,6 +595,10 @@ def run_cooc_variant_check_lapis(self, location: str, start_date: str, end_date:
         r = variant_check(location, datetime.fromisoformat(start_date),
                           datetime.fromisoformat(end_date), variant, panel,
                           progress_callback=_p)
+        # its own sample coverage (2026-10-27), so Check in data works
+        # without a run; the page prefers the run's where it has one
+        r["sample_qc"] = _sample_qc(location, datetime.fromisoformat(start_date),
+                                    datetime.fromisoformat(end_date))
         _p(2, "Done.")
         return r
     except Exception as e:

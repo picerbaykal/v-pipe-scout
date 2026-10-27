@@ -1129,8 +1129,17 @@ def app():
                                           "Lineages": " ○"})
             st.markdown("<hr style='margin:2px 0 10px;opacity:.12;'>", unsafe_allow_html=True)
             if _sec0 == "Investigate a variant":
+                # no run needed (2026-10-27): the sidebar's cities, dates and
+                # panel; the worker reads each sample's coverage itself
                 render_variant_explorer(pango_loader=cached_get_pango_loader(),
-                                        panel=all_selected_variants)
+                                        panel=all_selected_variants,
+                                        cities=list(selected_locations) or None,
+                                        start_date=start_date.isoformat(),
+                                        end_date=end_date.isoformat(),
+                                        celery_app=celery_app,
+                                        clinical=_explorer_clinical(start_date.isoformat(),
+                                                                    end_date.isoformat()),
+                                        pango_parent=st.session_state.get("acooc_pango_parent"))
             else:
                 st.info({
                     "Panel check": "Press ▶ Run (step 5 on the left) to check whether your "
@@ -2245,6 +2254,16 @@ def app():
                         return f"{_n/1_000:.0f}K"
                     return str(_n)
 
+                def _q_week(_loc):
+                    """the run's sample coverage plus the deep scan's for the
+                    weeks before the chosen dates (2026-10-27), for the
+                    weekly grade: without it those samples never counted
+                    as well covered"""
+                    _sr = _scan_res_all.get(_loc)
+                    _q = dict(((_sr if isinstance(_sr, dict) else {}).get("sample_qc_ext")) or {})
+                    _q.update((_cr_all.get(_loc) or {}).get("sample_qc") or {})
+                    return _q or None
+
                 if _scan_res_all:
                     # ══ Option C scanner rendering ══════════════════════════════
                     # signatures for heatmap classification (lazy, cached in session)
@@ -2307,7 +2326,7 @@ def app():
                             if _pv and _pv.get("markers"):
                                 return {"markers": _pv["markers"], "per_date": _pv.get("per_date") or {},
                                         "dates": _src.get("dates") or [],
-                                        "quality": (_cr_all.get(_loc) or {}).get("sample_qc"),
+                                        "quality": _q_week(_loc),
                                         "own": _own(_node)}
                         return None
 
@@ -2518,7 +2537,7 @@ def app():
                             _rw = {c: r for c, r in _rw.items() if r}
                             # "w1": bump when process.national.weekly changes, so a
                             # rerun after a code change doesn't reuse old weeks
-                            _key = ("w2", _slot.get("node"), _check_d0, _run_d1,
+                            _key = ("w3", _slot.get("node"), _check_d0, _run_d1,
                                     tuple(sorted((c, len(r["per_date"])) for c, r in _rw.items())))
                             _wc = st.session_state.setdefault("acooc_weekly_cache", {})
                             if _key not in _wc:
@@ -2654,7 +2673,7 @@ def app():
                             if _ev.get("markers"):
                                 _rw[_c] = {"markers": _ev["markers"], "per_date": _ev.get("per_date") or {},
                                            "dates": [str(d)[:10] for d in (_ext.get("dates") or [])],
-                                           "quality": _cr.get("sample_qc"),
+                                           "quality": _q_week(_c),
                                            "own": (_own_map or {}).get(_pv)}
                                 continue
                             _ci = (_cr.get("panel_check") or {}).get(_pv) or {}
@@ -2668,7 +2687,7 @@ def app():
                         _ext_any = any(((_scan_res_all.get(c) or {}).get("panel_check_ext"))
                                        for c in _cities_all if isinstance(_scan_res_all.get(c), dict))
                         _pd0 = _check_d0 if _ext_any else _run_d0
-                        _key = ("w2-panel", _pv, _pd0, _run_d1,
+                        _key = ("w3-panel", _pv, _pd0, _run_d1,
                                 tuple(sorted((c, len(r["per_date"])) for c, r in _rw.items())))
                         if _key not in _wc:
                             try:

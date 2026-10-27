@@ -98,8 +98,7 @@ def _check_section(variant, panel, cities, start_date, end_date, celery_app, key
     rules (process.variant_explorer.judge) and draws it as a tree row
     (components.variants_table.investigate_view)."""
     if not (cities and start_date and end_date and celery_app):
-        st.caption("Run the analysis (or wait for the panel check to finish) to check it "
-                   "in the data of your cities.")
+        st.caption("Choose cities and dates on the left to check it in their data.")
         return
     from process.national import check_start
     k = f"{key_prefix}_check"
@@ -172,7 +171,11 @@ def _check_section(variant, panel, cities, start_date, end_date, celery_app, key
             if r and r.get("markers"):
                 raw[c] = {"markers": r["markers"], "per_date": r.get("per_date") or {},
                           "dates": list(r.get("dates") or []),
-                          "quality": (quality or {}).get(c), "own": own}
+                          # the run's coverage where it has one, else the
+                          # worker's own (Check in data without a run)
+                          "quality": {**(r.get("sample_qc") or {}),
+                                      **((quality or {}).get(c) or {})} or None,
+                          "own": own}
         cur["judged"] = judge(raw, win[0], win[1], d_check)
     from components import variants_table as _vt
     shown = [c for c in cities if c in cur["raw"]]
