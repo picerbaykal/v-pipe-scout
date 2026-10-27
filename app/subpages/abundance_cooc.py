@@ -2677,7 +2677,12 @@ def app():
                             st.session_state["acooc_pango_parent"] = _vx_idx(cached_get_pango_loader())[2]
                         except Exception:
                             st.session_state["acooc_pango_parent"] = {}
+                    from process.sample_qc import well_covered as _wc_q
+                    _swell = {_c: {str(_d)[:10]: bool(_wc_q(_q)) for _d, _q in
+                                   ((_cr_all.get(_c) or {}).get("sample_qc") or {}).items()}
+                              for _c in _cities_all}
                     _view = _vt.build(_cities_all, _tcity, _rows, _verdicts_by_city, _findings,
+                                      sample_well=_swell if any(_swell.values()) else None,
                                       clinical={k: x for k, x in _clin.items() if x is not None} or None,
                                       pango_parent=st.session_state["acooc_pango_parent"],
                                       panel_weekly=_pweekly, dates=(_run_d0, _run_d1),

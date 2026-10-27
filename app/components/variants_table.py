@@ -2189,7 +2189,7 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
           novel=(), broad=(), novel_rest=None, near=None, near_min_days=2,
           novel_hotspot=None, data_until=None, novel_info=None,
           broad_total=None, named_hidden=0, quality=None, panel_weekly=None,
-          dates=None, clinical=None, pango_parent=None) -> str:
+          dates=None, clinical=None, pango_parent=None, sample_well=None) -> str:
     """cities: city names in column order; sel: the chosen city.
     rows: components.abundance_cooc_tree.tree_rows(...).
     verdicts: {city: {variant: {state, reason, n_present, n_measured, n_markers}}}.
@@ -2403,8 +2403,16 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
 
     # ── unnamed signal ──
     ed = nn["ed"]
-    rec = [(m, d) for m, d in novel if max(d.values(), default=0) >= ed]
-    one = [(m, d) for m, d in novel if 0 < max(d.values(), default=0) < ed]
+    # recurring (2026-10-27): evidence days on well-covered samples in >= 2
+    # different weeks, any city; days on thin samples are shown, not counted
+    _w = {tuple(m): _novel_weight(novel_info, sample_well, m) for m, d in novel}
+    if sample_well is not None:
+        rec = [(m, d) for m, d in novel if _w[tuple(m)][0] >= 2]
+        one = [(m, d) for m, d in novel if _w[tuple(m)][0] < 2 and max(d.values(), default=0) > 0]
+        rec.sort(key=lambda x: (-_w[tuple(x[0])][1], -_w[tuple(x[0])][0]))
+    else:                     # no per-sample coverage: as before
+        rec = [(m, d) for m, d in novel if max(d.values(), default=0) >= ed]
+        one = [(m, d) for m, d in novel if 0 < max(d.values(), default=0) < ed]
     low = [(m, d) for m, d in novel if max(d.values(), default=0) == 0]
     if novel or broad or novel_rest or novel_hotspot:
         body.append(f"<tr class='sec'><td colspan='{n_cols}'>Unassigned patterns</td></tr>")
@@ -2412,19 +2420,26 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
 
         def nov_ev_for(m, d):
             info = (novel_info.get(tuple(m)) or {}).get(sel)
+            nw, nc = _w.get(tuple(m), (0, 0))
+            where = (f"<span class='dim'> · well-covered evidence in {nc} {_pl(nc, 'city')}, "
+                     f"{nw} {_pl(nw, 'week')}</span>" if sample_well is not None and nw else "")
             if not info:
                 n_other = sum(1 for c, x in d.items() if c != sel)
                 return (f"<span class='dim'>not in this city"
                         + (f" · in {n_other} other {_pl(n_other, 'city')}" if n_other else "")
-                        + "</span>")
-            return _novel_evidence(m, info)
+                        + "</span>" + where)
+            return _novel_evidence(m, info) + where
+        _rlab = ("· on well-covered samples in ≥ 2 weeks · watch the next samples"
+                 if sample_well is not None else f"· on ≥ {ed} days in a city · watch the next samples")
         body += _group("nrec", f"<b style='color:{BLUE}'>Unassigned, recurring ({len(rec)})</b> "
-                       f"<span class='dim'>· on ≥ {ed} days in a city — check the trend: possible new variant</span>", n_cols,
+                       f"<span class='dim'>{_rlab}</span>", n_cols,
                        [_pattern_row(m, d, cities, sel, S_NOVEL, S_NOVEL1, BLUE, nov_ev_for(m, d), "seen")
                         for m, d in rec], open_=True)
-        one_lab = "1 day" if ed == 2 else f"1–{ed - 1} days"
+        one_lab = ("seen, not recurring" if sample_well is not None
+                   else "1 day" if ed == 2 else f"1–{ed - 1} days")
         body += _group("none", f"<b style='color:{BLUE}'>Unassigned, {one_lab} ({len(one)})</b> "
-                       "<span class='dim'>· watch</span>", n_cols,
+                       + ("<span class='dim'>· evidence in 1 week only, or only on thin samples</span>"
+                          if sample_well is not None else "<span class='dim'>· watch</span>"), n_cols,
                        [_pattern_row(m, d, cities, sel, S_NOVEL, S_NOVEL1, BLUE, nov_ev_for(m, d), "seen")
                         for m, d in one])
         body += _group("nlow", f"<b style='color:{BLUE}'>Unassigned, no evidence day ({len(low)})</b> "
@@ -2457,6 +2472,21 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
     return (CSS + SHORT_LEGEND + _frames_note(findings, panel_weekly, dates) + _add_note(findings)
             + f"<div class='vtw'><table class='vt'><thead>{head}</thead>"
               f"<tbody>{''.join(body)}</tbody></table></div>")
+
+
+def _novel_weight(novel_info, sample_well, muts):
+    """(weeks, cities) with an evidence day on a well-covered sample"""
+    from datetime import date as _dd, timedelta as _tt
+    wk, cs = set(), set()
+    for c, inf in ((novel_info or {}).get(tuple(muts)) or {}).items():
+        well = (sample_well or {}).get(c) or {}
+        for day, mark in (inf or {}).get("timeline") or []:
+            day = str(day)[:10]
+            if mark == "day" and well.get(day):
+                x = _dd.fromisoformat(day)
+                wk.add((x - _tt(days=x.weekday())).isoformat())
+                cs.add(c)
+    return len(wk), len(cs)
 
 
 def _novel_evidence(muts, info):
