@@ -61,6 +61,7 @@ services:
       - REDIS_PORT=6379
       - REDIS_PASSWORD=${REDIS_PASSWORD:-defaultpassword123}
       - PYTHONPATH=/app:/app_shared
+      - CELERY_CONCURRENCY=3
 
 
 volumes:

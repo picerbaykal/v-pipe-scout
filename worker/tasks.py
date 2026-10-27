@@ -30,6 +30,15 @@ app = Celery(
     backend=os.environ.get('CELERY_RESULT_BACKEND', 'redis://redis:6379/0')
 )
 
+# How many tasks run at once (2026-10-27): without a setting Celery starts one
+# process per CPU (2 here), so the deep scan's 6 cities ran as 3 rounds of 2.
+# The scan waits on LAPIS ~70 % of the time, so more processes than CPUs is
+# fine. A --concurrency on the worker command line still wins over this.
+# prefetch 1: a process takes the next task only when it is free, so long
+# scans spread over all processes instead of queueing behind one.
+app.conf.worker_concurrency = int(os.environ.get("CELERY_CONCURRENCY", "6"))
+app.conf.worker_prefetch_multiplier = 1
+
 # Initialize Redis client for storing progress updates
 redis_client = redis.Redis(
     host=os.environ.get('REDIS_HOST', 'redis'),
