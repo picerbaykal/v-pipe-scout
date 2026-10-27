@@ -78,6 +78,7 @@ def test_the_row_says_why():
     vt = _vt()
     q = {"2026-09-30": {"median": 5000, "share_100": 0.9}}
     r = check_in_data(MK, _cells(20), ["2026-09-30"], quality=q, own=OWN)
+    r.pop("pairs_checked", None)        # a result from before pair counts
     f = {"status": "confirmed", "addable": False,
          "per_city": {"Zürich (ZH)": {"days": 3, "check": r}}}
     kind, why = vt._finding_status("SB.1.1", f, ["Zürich (ZH)"])

@@ -22,7 +22,12 @@ def _city(days, share=0.3, q=WELL, zero=()):
     """one city: {date: share}; markers in `zero` at 0 %"""
     h = int(share * 1000)
     pd = {d: {m: [1000, 0, 0, 0] if m in zero else [1000, h, h, h] for m in MK} for d in days}
-    return check_in_data(MK, pd, list(pd), quality={d: q for d in days})
+    r = check_in_data(MK, pd, list(pd), quality={d: q for d in days})
+    # single mutations only, read as a result from before pair counts (the
+    # marker vote decides); with pair counts looked for and none read, a city
+    # is never seen (2026-10-27, test_no_pairs_is_never_seen)
+    r.pop("pairs_checked", None)
+    return r
 
 
 W1, W2 = ["2026-09-15", "2026-09-16"], ["2026-09-22", "2026-09-23"]
@@ -31,6 +36,25 @@ W1, W2 = ["2026-09-15", "2026-09-16"], ["2026-09-22", "2026-09-23"]
 def test_two_cities_two_weeks_confirm():
     g = grade({"GE": _city(W1 + W2), "ZH": _city(W1 + W2)})
     assert g["confirmed"] and g["cities"] == ["GE", "ZH"] and g["weeks"] == 2
+
+
+def test_no_pairs_is_never_seen():
+    # 2026-10-27: lineage A, no pair of its own mutations: its single
+    # mutations voted present, but it can't be checked with coocs
+    def _np(days):
+        r = _city(days)
+        r["pairs_checked"] = True
+        return r
+    g = grade({"GE": _np(W1 + W2), "ZH": _np(W1 + W2)})
+    assert not (g or {}).get("cities") and not (g or {}).get("confirmed")
+    vt = _vt()
+    assert vt._scale(_np(W1))[1] == "·"
+    assert "can't be checked with coocs" in vt._cell_tip("A", "Basel", _np(W1))
+    C = ["Genève (GE)", "Zürich (ZH)"]
+    f = {"per_city": {c: {"days": 3, "check": _np(W1 + W2)} for c in C}}
+    assert vt._finding_status("A", f, C) == ("folded", "can't be checked with coocs: no pairs")
+    ov = vt._panel_overview({c: _np(W1 + W2) for c in C}, C)[0]
+    assert "can't be checked with coocs" in ov
 
 
 def test_two_cities_one_week_is_early():

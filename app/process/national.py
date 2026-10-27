@@ -120,11 +120,15 @@ def city_seen(d: Optional[dict]) -> bool:
     """Does this city count as seen (2026-10-26)? With pair counts, only when a
     sample had its own coocs (process.cooc.pair_evidence: the solid green
     cell); single mutations alone (light green) don't count. Without pair
-    counts (older results), the marker vote as before."""
+    counts (older results), the marker vote as before. Pair counts looked for
+    but none read (no pair of its own mutations, or no reads at them;
+    2026-10-27): not seen — single mutations never count."""
     d = d or {}
     pev = d.get("pairs") or {}
     if pev.get("measured") or pev.get("positive"):
         return bool(pev.get("positive"))
+    if d.get("pairs_checked"):
+        return False
     return d.get("state") == "present"
 
 

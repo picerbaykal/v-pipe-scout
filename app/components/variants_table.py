@@ -350,6 +350,13 @@ def _thin(d):
     return nw is not None and nw < int(_check_cfg_safe().get("thin_well_min", 2))
 
 
+def _no_pairs(d):
+    """pair counts looked for, none read (2026-10-27): no pair of its own
+    mutations, or no reads at them — the coocs can't judge this city"""
+    pev = (d or {}).get("pairs") or {}
+    return bool((d or {}).get("pairs_checked")) and not (pev.get("measured") or pev.get("positive"))
+
+
 def _scale(d, found=False):
     """(cell style, label, dot colour, name colour, share present or None)
     for one city's check result. found: a lineage not in the panel.
@@ -386,7 +393,9 @@ def _scale(d, found=False):
         if not found:
             return S_NO, lab, AMBER, AMBER_T, 0.0
         return S_NO, lab, PALE_BG, RED, 0.0
-    if n_mk == 0:
+    if n_mk == 0 or _no_pairs(d):
+        # no pairs read (2026-10-27): grey "·", the single mutations are in
+        # the hover and the details only, never counted
         return S_NOMARK, "·", GREY, "#6b7280", None
     lab = _counts_label(d)
     m = p + a
@@ -503,6 +512,13 @@ def _cell_tip(v, city, d, extra=""):
     """'XFG · Basel — mixed (1 ✓ 1 ✗ of 2 ★) · 2 well-covered samples · 4214C
     50 % ✓ · 8350C 0 % ✗' (+ why it was checked)."""
     pev = d.get("pairs") or {}
+    if _no_pairs(d):
+        nk, sp, sa, su = _vote_counts(d)
+        return (f"{v} · {city} — can't be checked with coocs: no reads at a pair of its own "
+                "mutations (two within 300 bases, or it has none)"
+                + (f"\nIts single mutations: {sp} seen, {sa} not seen"
+                   + (f", {su} couldn't answer" if su else "") + f" — of {nk}, not counted"
+                   if nk else "") + extra)
     if pev.get("positive") or pev.get("measured"):
         # one line per point (2026-10-26; the tip keeps line breaks)
         nk, sp, sa, su = _vote_counts(d)
@@ -1402,7 +1418,7 @@ def _panel_warn(per_city, in_panel):
     gave, now said once, with the counts)."""
     if not in_panel:
         return ""
-    res = [x for x in per_city.values() if x and _vote_counts(x)[0]]
+    res = [x for x in per_city.values() if x and _vote_counts(x)[0] and not _no_pairs(x)]
     if not res or any(_state(x) == "present" for x in res):
         return ""
     n_abs = sum(1 for x in res if _state(x) == "absent")
@@ -1425,6 +1441,8 @@ def _city_seen(d):
     pev = (d or {}).get("pairs") or {}
     if pev.get("measured") or pev.get("positive"):
         return bool(pev.get("positive"))
+    if _no_pairs(d):
+        return False
     return _state(d or {}) == "present"
 
 
@@ -1437,13 +1455,19 @@ def _panel_overview(per_city, cities, wk=None):
                 "no mutation of its own: all its mutations are shared with other lineages in "
                 "the panel, so its share in Deconvolution can't be checked here",
                 GREY, "#6b7280", "filled")
+    if all(_no_pairs(x) for x in res):
+        return (_ovb("<b>In panel</b> · can't be checked with coocs", "color:#6b7280;"),
+                "no reads at a pair of its own mutations in any city (two within 300 bases, "
+                "or it has none): its single mutations alone are not counted",
+                GREY, "#6b7280", "filled")
     if _panel_warn(per_city, True):
         return (_ovb("<b>In panel</b> · not seen in any city",
                      f"background:#fffbeb;color:{AMBER_T};"),
                 _panel_warn(per_city, True).replace("<b style='color:" + AMBER_T + "'>", "")
                 .replace("</b>", "").rstrip(" ·"),
                 AMBER, AMBER_T, "filled")
-    meas = [c for c in cities if per_city.get(c) and _vote_counts(per_city[c])[0]]
+    meas = [c for c in cities if per_city.get(c) and _vote_counts(per_city[c])[0]
+            and not _no_pairs(per_city[c])]
     seen = [c for c in meas if _city_seen(per_city[c])]
     # a city seen only on thin samples says so (2026-10-26)
     def _tag(c):
@@ -1504,6 +1528,8 @@ def _cell_word(d):
     pev = d.get("pairs") or {}
     if pev.get("positive"):
         return "coocs" if pev.get("positive_well") else "coocs on thin samples"
+    if _no_pairs(d):
+        return "no coocs read"
     sm = d.get("state_markers") or d.get("state") or (_state(d) if d else None)
     if d.get("own_missing"):
         return f"only {d.get('parent') or 'its parent'}'s mutations"
@@ -1537,6 +1563,9 @@ def _finding_status(v, f, cities, has_children=False):
         return "named", ""
     pc = f.get("per_city") or {}
     chk = {c: (pc.get(c) or {}).get("check") for c in cities if (pc.get(c) or {}).get("check")}
+    if chk and all(_no_pairs(x) for x in chk.values()):
+        return (("suggested" if has_children else "folded"),
+                "can't be checked with coocs: no pairs")
     seen = [c for c in cities if _city_seen(chk.get(c) or {})]
     n_pos = sum(len(((chk.get(c) or {}).get("pairs") or {}).get("positive") or []) for c in seen)
     if seen:

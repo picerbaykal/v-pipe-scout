@@ -360,7 +360,10 @@ def check_in_data(markers: List[str], per_date: Dict[str, Dict[str, list]],
     state_markers = state
     if pev and pev["positive"] and state != "present":
         state = "present"
-    return {"state": state, "state_markers": state_markers, "pairs": pev,
+    # pairs_checked (2026-10-27): pair counts were looked for; "pairs" None
+    # then means no reads at any pair of its own mutations (or it has none),
+    # and the city can't be judged with coocs (process.national.city_seen)
+    return {"state": state, "state_markers": state_markers, "pairs": pev, "pairs_checked": True,
             "n_present": res["n_present"],
             "n_measured": res["n_measured"],
             "n_markers": res["n_markers"], "timeline": tl,
