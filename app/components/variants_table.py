@@ -1226,6 +1226,15 @@ def _ovb(text, style="color:#4b5563;"):
     return f"<span class='ovb' style='{style}'>{text}</span>"
 
 
+def _city_seen(d):
+    """process.national.city_seen, with the cell's own vote for results that
+    carry counts but no state (2026-10-26)."""
+    pev = (d or {}).get("pairs") or {}
+    if pev.get("measured") or pev.get("positive"):
+        return bool(pev.get("positive"))
+    return _state(d or {}) == "present"
+
+
 def _panel_overview(per_city, cities):
     res = [per_city[c] for c in cities if per_city.get(c)]
     if not res:
@@ -1242,8 +1251,13 @@ def _panel_overview(per_city, cities):
                 .replace("</b>", "").rstrip(" ·"),
                 AMBER, AMBER_T, "filled")
     meas = [c for c in cities if per_city.get(c) and _vote_counts(per_city[c])[0]]
-    seen = [c for c in meas if _state(per_city[c]) == "present"]
-    where = f" ({', '.join(city_code(c) for c in seen)})" if 0 < len(seen) <= 3 else ""
+    seen = [c for c in meas if _city_seen(per_city[c])]
+    # a city seen only on thin samples says so (2026-10-26)
+    def _tag(c):
+        pev = per_city[c].get("pairs") or {}
+        return city_code(c) + (" thin" if pev.get("positive") and not pev.get("positive_well")
+                               else "")
+    where = f" ({', '.join(_tag(c) for c in seen)})" if 0 < len(seen) <= 3 else ""
     return (_ovb(f"<b style='color:#1f2328'>In panel</b> · seen in {len(seen)} of "
                  f"{len(meas)}{where}"),
             "", GREEN if seen else "#d1d5db", "#15803d" if seen else "#6b7280", "filled")
@@ -1316,7 +1330,7 @@ def _new_grade(f, cities):
             g = None
     if g is None:
         g = f.get("grade")
-    seen = [c for c in cities if _state(chk.get(c) or {}) == "present"]
+    seen = [c for c in cities if _city_seen(chk.get(c) or {})]
     if not g:
         codes = ", ".join(city_code(c) for c in seen)
         return False, (f"seen in {codes}" if seen else "seen"), "no pooled answer (no samples)"

@@ -108,16 +108,40 @@ def sudden(nat: Optional[dict], quiet_weeks: int = 2, min_cities: int = 2) -> Op
             "quiet": [(w["start"], w["n_well"]) for w in before]}
 
 
+def city_seen(d: Optional[dict]) -> bool:
+    """Does this city count as seen (2026-10-26)? With pair counts, only when a
+    sample had its own coocs (process.cooc.pair_evidence: the solid green
+    cell); single mutations alone (light green) don't count. Without pair
+    counts (older results), the marker vote as before."""
+    d = d or {}
+    pev = d.get("pairs") or {}
+    if pev.get("measured") or pev.get("positive"):
+        return bool(pev.get("positive"))
+    return d.get("state") == "present"
+
+
+def _pair_weeks(per_city: Dict[str, dict]) -> Optional[set]:
+    """Mondays of the well-covered samples that counted, over all cities;
+    None when no city has pair counts."""
+    if not any(((d or {}).get("pairs") or {}).get("measured") for d in (per_city or {}).values()):
+        return None
+    return {_monday(x) for d in (per_city or {}).values()
+            for x in (((d or {}).get("pairs") or {}).get("positive_well") or [])}
+
+
 def grade(per_city: Dict[str, dict], cfg: Optional[dict] = None) -> Optional[dict]:
     """How sure a found lineage is, from all cities pooled (2026-10-23).
 
     per_city: {city: check_in_data result}. Returns None without samples, else
-      cities       cities whose own check says seen, with at least
+      cities       cities seen (city_seen: their own coocs, or the marker vote
+                   for results without pair counts), with at least
                    check.thin_well_min well-covered samples (2026-10-26)
       cities_thin  cities whose check says seen on thinner samples (shown,
                    not counted)
       pooled_seen  all cities pooled say seen at check.confirm_pooled_freq (5 %)
-      weeks, n_weeks  weeks of the all-cities line that say seen, of all weeks
+      weeks, n_weeks  weeks with a well-covered sample that counted (pair
+                   counts), else weeks of the all-cities line that say seen; of
+                   all weeks
       missing, n_measured  its mutations clearly missing pooled (< 1 %), of
                    those measured
       missing_inherited  of those, the ones it inherits (not its own markers),
@@ -142,7 +166,7 @@ def grade(per_city: Dict[str, dict], cfg: Optional[dict] = None) -> Optional[dic
         return None
     a = conf["answer"]
     well_min = int(c.get("thin_well_min", 2))
-    seen = {k: d for k, d in (per_city or {}).items() if (d or {}).get("state") == "present"}
+    seen = {k: d for k, d in (per_city or {}).items() if city_seen(d)}
     def thin(d):
         # seen through specific co-occurrences only (2026-10-26): thin when
         # every sample that showed them was thin (Zürich PJ.2.1: 3 Oct well
@@ -153,7 +177,11 @@ def grade(per_city: Dict[str, dict], cfg: Optional[dict] = None) -> Optional[dic
         return d.get("n_well") is not None and d["n_well"] < well_min
     cities = sorted(k for k, d in seen.items() if not thin(d))
     cities_thin = sorted(k for k, d in seen.items() if thin(d))
-    weeks = sum(w["answer"]["verdict"] == "present" for w in conf["weeks"])
+    # weeks: with pair counts, the weeks with a well-covered sample that
+    # counted (2026-10-26); before, the all-cities marker vote per week
+    pw = _pair_weeks(per_city)
+    weeks = (len(pw) if pw is not None
+             else sum(w["answer"]["verdict"] == "present" for w in conf["weeks"]))
     missing = sorted(m for m, x in (a.get("markers") or {}).items() if x.get("status") == "absent")
     own = next((set(d["own"]) for d in (per_city or {}).values() if d and d.get("own") is not None), None)
     inherited = [m for m in missing if own is not None and m not in own]

@@ -227,3 +227,24 @@ def test_a_sample_needs_one_cooc_without_a_common_partner():
     ev = pair_evidence(ta1, {"2026-10-03": WELL}, common=COMMON)
     assert ev["positive"] == ["2026-10-03"]
     assert [x[3] for x in ev["per_date"]["2026-10-03"]] == [True, False]
+
+
+def test_light_green_cities_do_not_count_for_the_grade():
+    # ST.1: Zürich has single mutations only (light green); Lugano one counted sample
+    from process.national import city_seen, grade
+    from process.variant_explorer import check_in_data
+    mk = ["m1", "m2", "m3"]
+    d1, d2 = "2026-09-29", "2026-10-03"
+    single = {d: {**{m: [1000, 300, 300, 300] for m in mk}, "100A+200C": [500, 0, 0, 0]}
+              for d in (d1, d2)}
+    zh = check_in_data(mk, single, [d1, d2], quality={d1: WELL, d2: WELL})
+    assert zh["state"] == "present" and not city_seen(zh)
+    pairs = {d: {**{m: [1000, 0, 0, 0] for m in mk},
+                 "100A+200C": [1000, 400, 400, 400], "900G+950T": [1000, 400, 400, 400]}
+             for d in (d1,)}
+    pairs[d2] = {m: [1000, 0, 0, 0] for m in mk}
+    pairs[d2]["100A+200C"] = [1000, 0, 0, 0]
+    ti = check_in_data(mk, pairs, [d1, d2], quality={d1: WELL, d2: WELL})
+    assert city_seen(ti)
+    g = grade({"ZH": zh, "TI": ti})
+    assert g["cities"] == ["TI"] and g["weeks"] == 1 and not g["confirmed"]
