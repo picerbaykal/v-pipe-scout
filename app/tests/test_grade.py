@@ -100,7 +100,7 @@ def test_row_names_thin_cities_and_inherited_missing():
                       C[1]: {"days": 3, "check": _own(_city(W1 + W2, zero=("m4",)), own, "PJ.2")}},
          "addable": True}
     kind, ov, tip, _dot, _n, dk = vt._finding_overview("PJ.2.1", f, C, [])
-    assert "Watch" in ov and "· 1 of 4 missing" in ov
+    assert "Watch" in ov and "· 1 of 4 mutations absent" in ov
     assert "seen in TI (+ BS thin)" in tip
     assert "1 of its 4 mutations missing, all inherited from PJ.2" in tip
 

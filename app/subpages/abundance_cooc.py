@@ -2476,7 +2476,9 @@ def app():
                         if _status != "named":
                             _rw = {c: _raw(c, _slot.get("node")) for c in _pc}
                             _rw = {c: r for c, r in _rw.items() if r}
-                            _key = (_slot.get("node"), _run_d0, _run_d1,
+                            # "w1": bump when process.national.weekly changes, so a
+                            # rerun after a code change doesn't reuse old weeks
+                            _key = ("w1", _slot.get("node"), _run_d0, _run_d1,
                                     tuple(sorted((c, len(r["per_date"])) for c, r in _rw.items())))
                             _wc = st.session_state.setdefault("acooc_weekly_cache", {})
                             if _key not in _wc:

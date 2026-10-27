@@ -875,6 +875,12 @@ def _detail_row(gid, v, per_city, cities, sel, n_cols, found=False):
               + th("typical share, 6 cities", "the middle value of this mutation's share over "
                    "the six cities: high or low everywhere means it's the mutation, not the city")
               + "</tr>" + "".join(mk_rows) + "</table>")
+    # its mutations on the samples with its coocs, all cities (2026-10-27): the
+    # same lines for panel and found lineages, in the details only
+    al, ct = _absent_line(per_city), _counted_text(per_city, cities)
+    if al or ct:
+        mk = ("<div style='font-size:12.5px;margin:6px 0'><b>All cities</b> · "
+              + " · ".join(_e(x) for x in (ct, al) if x) + "</div>") + mk
     pev = ds.get("pairs") or {}
     if pev.get("positive"):
         mk += ("<div style='font-size:12.5px;margin-top:6px'><b>Specific co-occurrences in "
@@ -1239,6 +1245,32 @@ def _panel_overview(per_city, cities):
             "", GREEN if seen else "#d1d5db", "#15803d" if seen else "#6b7280", "filled")
 
 
+def _absent_line(chk):
+    """The same line for every row (2026-10-27): its mutations on the samples
+    where its coocs were seen, all cities together (process.national.grade):
+    'its mutations on its 13 samples with coocs: 2 measured, 0 absent'. A
+    lineage carries all its mutations; several absent on its own samples
+    means the reads are probably a close relative (PJ.2.1, Sep-Oct: 4 of 19,
+    all inherited from PJ.2)."""
+    try:
+        from process.national import grade
+        g = grade({c: d for c, d in (chk or {}).items() if d})
+    except Exception:
+        g = None
+    if not g or not g.get("n_measured"):
+        return ""
+    n = g.get("n_counted")
+    where = (f"on its {n} {_pl(n, 'sample')} with coocs" if n
+             else "on all samples (no sample with coocs)")
+    miss, inh = g.get("missing") or [], g.get("missing_inherited") or []
+    par = next(((d or {}).get("parent") for d in (chk or {}).values() if (d or {}).get("parent")), "")
+    txt = f"its mutations {where}, all cities together: {g['n_measured']} measured, {len(miss)} absent"
+    if miss:
+        txt += (": " + ", ".join(miss[:8]) + (" …" if len(miss) > 8 else "")
+                + (f" (all inherited from {par})" if inh and len(inh) == len(miss) and par else ""))
+    return txt + f" (absent = under {(_check_cfg_safe() or {}).get('absent_freq', 0.01) * 100:g} % of the reads)"
+
+
 def _cell_word(d):
     """A city's cell in words (2026-10-27), as the legend names the colours."""
     d = d or {}
@@ -1363,14 +1395,14 @@ def _short_reason(f, cities):
     return f"{wk.get('in_a_row', 0)} of {wk.get('need', 3)} weeks"
 
 
-def _counted_text(f, cities):
+def _counted_text(chk, cities):
     """'its 6 samples with coocs: 13 Sep GE · 3 Oct BS, GR, TI, ZH · 4 Oct ZH'
     (2026-10-27): when they were, newest last, so a run of recent samples
-    (an arrival) and scattered single ones read differently."""
-    pc = f.get("per_city") or {}
+    (an arrival) and scattered single ones read differently.
+    chk: {city: check_in_data result}."""
     by_day = {}
     for c in cities:
-        pev = (((pc.get(c) or {}).get("check") or {}).get("pairs") or {})
+        pev = ((chk or {}).get(c) or {}).get("pairs") or {}
         for d in pev.get("positive") or []:
             by_day.setdefault(str(d)[:10], []).append(city_code(c))
     if not by_day:
@@ -1470,9 +1502,8 @@ def _finding_overview(v, f, cities, current_panel, has_children=False):
         # sentence goes to the hover
         conf, why, tip = _new_grade(f, cities)
         wk = f.get("weekly")
-        ct = _counted_text(f, cities)
         hover = (f"suggested by the reads, not in the panel · {why} · {tip}"
-                 + (" · " + ct if ct else "") + (" · " + _weeks_text(wk) if wk else ""))
+                 + (" · " + _weeks_text(wk) if wk else ""))
         if f.get("add_ready"):
             btn = ("<span class='added'>added · re-run needed</span>" if v in current_panel
                    else f"<button class='add' data-add='{_e(v)}'>+ Add</button>")

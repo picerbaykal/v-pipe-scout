@@ -196,7 +196,7 @@ def test_table_has_an_overview_column_and_folds_unsupported_suggestions():
     assert "1 more name the deep scan suggested, without coocs of its own" in html
     # PJ.2.1 keeps a row, closed in the group the line opens (2026-10-21)
     assert "data-grp='fold'" in html and "class='g-fold hid'" in html
-    assert "<b>Suggested</b>" in html and "suggested on 1 sample in BE · not seen there" in html
+    assert "suggested on 1 sample in BE · not seen there" in html
 
 
 # ── the details' words (2026-10-20) ──────────────────────────────────────

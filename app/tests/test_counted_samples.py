@@ -58,7 +58,7 @@ def test_a_mutation_absent_on_its_own_samples_still_counts():
     assert g["missing"] == ["9000A"] and g["n_measured"] == 5
 
 
-def test_the_row_says_where_and_when():
+def test_the_row_says_where():
     path = Path(__file__).resolve().parents[1] / "components" / "variants_table.py"
     spec = importlib.util.spec_from_file_location("vt_counted", path)
     vt = importlib.util.module_from_spec(spec)
@@ -67,6 +67,19 @@ def test_the_row_says_where_and_when():
     gone = ("9000A", "5100T")       # 2 of 5 absent on its samples: over 10 %
     f = {"status": "confirmed", "per_city": {
         c: {"days": 2, "check": _city(D, POS[c[-3:-1]], gone=gone)} for c in C}}
-    kind, ov, tip, *_ = vt._finding_overview("X", f, C, [])
+    _kind, ov, *_ = vt._finding_overview("X", f, C, [])
     assert "2 of 5 mutations absent on its 4 samples" in ov
-    assert "its 4 samples with coocs, oldest first: 12 Sep GE · 19 Sep GE · 20 Sep ZH · 27 Sep ZH" in tip
+
+
+def test_details_say_where_and_when_for_panel_and_found_rows():
+    path = Path(__file__).resolve().parents[1] / "components" / "variants_table.py"
+    spec = importlib.util.spec_from_file_location("vt_counted2", path)
+    vt = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(vt)
+    C = ["Genève (GE)", "Zürich (ZH)"]
+    per = {c: _city(D, POS[c[-3:-1]], gone=("9000A",)) for c in C}
+    html = vt._detail_row("g", "X", per, C, C[0], 8)
+    assert "its 4 samples with coocs, oldest first: 12 Sep GE · 19 Sep GE · 20 Sep ZH · 27 Sep ZH" in html
+    assert ("its mutations on its 4 samples with coocs, all cities together: 5 measured, "
+            "1 absent: 9000A") in html
+    assert vt._detail_row("g", "X", per, C, C[0], 8, found=True).count("its 4 samples") == 2
