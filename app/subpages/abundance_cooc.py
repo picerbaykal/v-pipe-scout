@@ -2545,10 +2545,26 @@ def app():
                             "</span></div>", unsafe_allow_html=True)
                     if "acooc_recomb_parents" not in st.session_state:
                         st.session_state["acooc_recomb_parents"] = recombinant_parents()
+                    # names without coocs of their own (2026-10-27) leave the tree:
+                    # no spine is drawn for them, they cover nothing, and their
+                    # rows go flat into the closed line under the tree
+                    _fold = set()
+                    for _n, _fx in _findings.items():
+                        if _fx.get("status") in ("named", "family"):
+                            continue
+                        try:
+                            if _vt._finding_status(_n, _fx, _cities_all)[0] == "folded":
+                                _fold.add(_n)
+                        except Exception as _e:
+                            logger.warning(f"fold {_n}: {_e}")
                     _rows = tree_rows(_run_panel, curated_variants, cached_get_pango_loader(),
-                                      findings=list(_findings),
+                                      findings=[n for n in _findings if n not in _fold],
                                       recomb_parents=st.session_state["acooc_recomb_parents"])
-                    _family_by_jaccard(_findings, _scan_res_all, _cr_all, _run_panel, _own_map)
+                    _rows = list(_rows) + [
+                        {"node": n, "kind": "finding", "depth": 0, "guides": [], "last": True,
+                         "has_children": False} for n in sorted(_fold)]
+                    _family_by_jaccard(_findings, _scan_res_all, _cr_all, _run_panel, _own_map,
+                                       exclude=_fold)
                     # ── panel variant ± 1 change (the amber band, per change) ──
                     from process.near_changes import near_changes, where_in_tree
                     from process.scanner import (EVIDENCE_MIN_DAYS, EVIDENCE_MIN_READS,

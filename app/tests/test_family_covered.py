@@ -18,7 +18,7 @@ def _chk(n_well, detail):
             "detail": [{"marker": m, "status": s} for m, s in detail.items()]}
 
 
-def _case(n_well_x, share_d):
+def _case(n_well_x, share_d, exclude=None):
     pd_x = {"2026-09-10": {m: [1000, 200, 200, 200] for m in XM}}          # X 20 %
     pd_d = {"2026-09-10": {**{m: [1000, int(share_d * 1000), 0, 0] for m in DM[:3]},
                            "400T": [1000, 20, 0, 0]}}                      # 400T at 2 %
@@ -29,7 +29,7 @@ def _case(n_well_x, share_d):
         "X": {"status": "confirmed", "per_city": {"GE": {"check": _chk(n_well_x, {m: "present" for m in XM})}}},
         "D": {"status": "confirmed", "per_city": {"GE": {"check": _chk(7, {
             "100A": "present", "200C": "present", "300G": "present", "400T": "absent"})}}}}
-    family_rows(findings, {"GE": {"findings_check": fc}}, {}, [])
+    family_rows(findings, {"GE": {"findings_check": fc}}, {}, [], exclude=exclude)
     return findings["X"]
 
 
@@ -48,3 +48,10 @@ def test_x_with_a_real_share_of_its_own_stays():
 def test_a_thin_city_cannot_tell_and_does_not_decide():
     x = _case(0, 0.05)
     assert x["itself"]["GE"] == (None, []) and x["status"] != "family"
+
+
+def test_a_folded_lineage_below_covers_nothing():
+    # 2026-10-27: XFG.6.3.3 "Covered by SW.2.1" while SW.2.1 was folded (coocs
+    # on 1 sample, 4 of 5 mutations missing)
+    assert _case(7, 0.19, exclude={"D"})["status"] != "family"
+    assert _case(7, 0.19, exclude={"X"})["status"] != "family"

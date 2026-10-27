@@ -93,7 +93,7 @@ def plus_add(per_city: dict, status: str, min_days: int) -> bool:
 
 
 def family_rows(findings: dict, scan_res_all: dict, cr_all: dict,
-                       panel: list, own: dict = None) -> None:
+                       panel: list, own: dict = None, exclude=None) -> None:
     """A found lineage whose ★ signal comes from lineages below it
     (2026-10-14). Its ★ markers are carried by all its descendants, so its ★
     check measures the whole family (BA.2.86 "present" in Zürich because JN.1
@@ -111,6 +111,10 @@ def family_rows(findings: dict, scan_res_all: dict, cr_all: dict,
          not a lineage below it
 
     own: as panel_verdicts, so the panel's answers here are the table's.
+    exclude: found lineages folded under the tree (no coocs of their own,
+    2026-10-27): never covered, and never cover a lineage above them
+    (XFG.6.3.3 was "Covered by SW.2.1" while SW.2.1 had coocs on 1 sample
+    with 4 of 5 mutations missing).
 
     on the samples the ★ check uses (the well-covered ones when the city has
     any). "Can't tell" when a share has too few reads or no marker is left.
@@ -130,6 +134,7 @@ def family_rows(findings: dict, scan_res_all: dict, cr_all: dict,
     from process.sample_qc import well_covered
     pf = _check_cfg()["present_freq"]
     panel = list(panel or [])
+    exclude = set(exclude or ())
     pv_cache: dict = {}
 
     def _pstate(loc, v):
@@ -160,7 +165,7 @@ def family_rows(findings: dict, scan_res_all: dict, cr_all: dict,
             nb[x] = max(nb.get(x, 0), len(ds))
     for x in sorted(findings, key=lambda v: nb.get(v, 0)):
         fx = findings[x]
-        if fx.get("status") == "named":
+        if fx.get("status") == "named" or x in exclude:
             continue
         itself, measured, below = {}, [], set()
         for loc, px in (fx.get("per_city") or {}).items():
@@ -180,6 +185,8 @@ def family_rows(findings: dict, scan_res_all: dict, cr_all: dict,
             pc = (cr_all.get(loc) or {}).get("panel_check") or {}
 
             def take(d, loc=loc):
+                if d in exclude:
+                    return False
                 if d in panel:
                     return _pstate(loc, d) == "present"
                 f = findings.get(d) or {}

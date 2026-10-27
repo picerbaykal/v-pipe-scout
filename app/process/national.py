@@ -40,9 +40,12 @@ def _vote(markers: List[str], samples: List[dict], own: Optional[dict] = None,
                           cfg, own=own)
 
 
-def national(per_city: Dict[str, dict], present_freq: Optional[float] = None) -> Optional[dict]:
+def national(per_city: Dict[str, dict], present_freq: Optional[float] = None,
+             only: Optional[Dict[str, set]] = None) -> Optional[dict]:
     """The pooled answer for the chosen dates and one per week, or None
     without samples. present_freq: the "seen" share (default check.present_freq).
+    only: {city: {ISO date}} — pool only these samples (other cities left out;
+    grade(), 2026-10-27: the samples where its coocs were seen).
 
     Returns {answer: check_verdicts(...) for all samples, n_cities,
              weeks: [{start (Monday, ISO), answer, n_samples, n_well,
@@ -61,8 +64,12 @@ def national(per_city: Dict[str, dict], present_freq: Optional[float] = None) ->
             if m not in markers:
                 markers.append(m)
         q = d.get("quality") or {}
+        if only is not None and city not in only:
+            continue
         for dt, cells in (d.get("samples") or {}).items():
             day = str(dt)[:10]
+            if only is not None and day not in only[city]:
+                continue
             samples.append({"date": day, "city": city, "cells": cells,
                             "well": bool(well_covered(q.get(day)))})
     if not markers or not samples:
@@ -130,6 +137,18 @@ def _pair_weeks(per_city: Dict[str, dict]) -> Optional[set]:
             for x in (((d or {}).get("pairs") or {}).get("positive_well") or [])}
 
 
+def counted_samples(per_city: Dict[str, dict]) -> Optional[Dict[str, set]]:
+    """{city: {ISO dates}} of the samples where its own coocs were seen
+    (process.cooc.pair_evidence "positive"); None when no city has pair
+    counts (results before 2026-10-26) or none was seen."""
+    pcs = {c: (d or {}).get("pairs") or {} for c, d in (per_city or {}).items()}
+    if not any(p.get("measured") for p in pcs.values()):
+        return None
+    out = {c: {str(x)[:10] for x in p.get("positive") or []} for c, p in pcs.items()}
+    out = {c: ds for c, ds in out.items() if ds}
+    return out or None
+
+
 def grade(per_city: Dict[str, dict], cfg: Optional[dict] = None) -> Optional[dict]:
     """How sure a found lineage is, from all cities pooled (2026-10-23).
 
@@ -139,11 +158,14 @@ def grade(per_city: Dict[str, dict], cfg: Optional[dict] = None) -> Optional[dic
                    check.thin_well_min well-covered samples (2026-10-26)
       cities_thin  cities whose check says seen on thinner samples (shown,
                    not counted)
-      pooled_seen  all cities pooled say seen at check.confirm_pooled_freq (5 %)
+      pooled_seen  all cities pooled say seen at check.confirm_pooled_freq (5 %);
+                   with pair counts, pooled over the samples where its coocs
+                   were seen (n_counted, counted: {city: dates}; 2026-10-27)
       weeks, n_weeks  weeks with a well-covered sample that counted (pair
                    counts), else weeks of the all-cities line that say seen; of
                    all weeks
-      missing, n_measured  its mutations clearly missing pooled (< 1 %), of
+      missing, n_measured  its mutations clearly missing pooled (< 1 %; the same
+                   samples as pooled_seen), of
                    those measured
       missing_inherited  of those, the ones it inherits (not its own markers),
                    when the result names its own markers
@@ -165,7 +187,14 @@ def grade(per_city: Dict[str, dict], cfg: Optional[dict] = None) -> Optional[dic
     conf = national(per_city, c["confirm_pooled_freq"])
     if not conf:
         return None
-    a = conf["answer"]
+    # its mutations judged on the samples where its coocs were seen
+    # (2026-10-27): pooled over every sample of every city, a rare lineage's
+    # shares are diluted by the samples without it (PJ.2.1, Sep-Oct: coocs on 6
+    # of 48 samples, "4 of 18 absent" on all 48)
+    only = counted_samples(per_city)
+    own_conf = national(per_city, c["confirm_pooled_freq"], only=only) if only else None
+    a = (own_conf or conf)["answer"]
+    n_counted = sum(len(ds) for ds in only.values()) if only and own_conf else None
     well_min = int(c.get("thin_well_min", 2))
     seen = {k: d for k, d in (per_city or {}).items() if city_seen(d)}
     def thin(d):
@@ -194,7 +223,8 @@ def grade(per_city: Dict[str, dict], cfg: Optional[dict] = None) -> Optional[dic
     return {"cities": cities, "cities_thin": cities_thin, "pooled_seen": pooled_seen,
             "weeks": weeks, "n_weeks": len(conf["weeks"]), "missing": missing,
             "missing_inherited": inherited, "n_measured": n_meas, "ok_missing": ok_missing,
-            "confirmed": confirmed}
+            "confirmed": confirmed, "n_counted": n_counted,
+            "counted": {k: sorted(v) for k, v in (only or {}).items()} if n_counted else None}
 
 
 def week_ends(d0: str, d1: str, days: int = 28) -> List[str]:

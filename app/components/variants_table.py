@@ -1263,7 +1263,7 @@ def _finding_status(v, f, cities, has_children=False):
     new        its own coocs in at least one city (the cell's rule,
                process.national.city_seen): Watch, or Add to panel
     folded     no coocs of its own anywhere — or coocs on a single sample with
-               more than half of its measured mutations clearly missing pooled
+               half or more of its measured mutations clearly missing pooled
                (BA.3.2 Genève July 32 of 32, XFW.1.1.1 7 of 9): listed in one
                closed line under the tree, with the reason
     suggested  the same, but other rows hang below it in the tree: stays in
@@ -1289,9 +1289,11 @@ def _finding_status(v, f, cities, has_children=False):
             g = None
         g = g or {}
         miss, n_meas = len(g.get("missing") or []), int(g.get("n_measured") or 0)
-        if n_pos == 1 and n_meas and miss > n_meas / 2:
+        # half or more (2026-10-27; was "more than half": XFG.6.3.3, 2 of 4, on
+        # the same Zürich sample that folded its child SW.2.1, 4 of 5)
+        if n_pos == 1 and n_meas and 2 * miss >= n_meas:
             why = (f"coocs on 1 sample in {city_code(seen[0])} · {miss} of {n_meas} "
-                   "mutations missing")
+                   "mutations absent")
             return ("suggested" if has_children else "folded"), why
         return "new", ""
     sugg = {c: int((pc.get(c) or {}).get("days") or 0) for c in cities
@@ -1326,8 +1328,9 @@ def _weeks_text(wk):
 
 def _short_reason(f, cities):
     """What keeps a found lineage from + Add, in a few words (2026-10-27), the
-    first that applies: mutations missing, thin samples only, 1 city, not
-    clear pooled, then the weeks in a row."""
+    first that applies: mutations absent (on the samples with its coocs),
+    thin samples only, 1 city, 1 week, not clear on its samples, then the
+    weeks in a row."""
     pc = f.get("per_city") or {}
     chk = {c: (pc.get(c) or {}).get("check") for c in cities if (pc.get(c) or {}).get("check")}
     g = None
@@ -1339,18 +1342,42 @@ def _short_reason(f, cities):
     g = g or f.get("grade") or {}
     c = _check_cfg_safe() or {}
     if g and not g.get("ok_missing", True):
-        return f"{len(g.get('missing') or [])} of {g.get('n_measured', 0)} missing"
+        # its mutations on the samples with its coocs, all cities together;
+        # absent = under check.absent_freq (1 %) (2026-10-27)
+        on = (f" on its {g['n_counted']} {_pl(g['n_counted'], 'sample')}" if g.get("n_counted")
+              else " (all samples)")
+        return f"{len(g.get('missing') or [])} of {g.get('n_measured', 0)} mutations absent{on}"
     well, thin = g.get("cities") or [], g.get("cities_thin") or []
     if not well and thin:
         return "thin samples only"
     if len(well) < c.get("confirm_min_cities", 2):
         return "1 city" if well else "not seen"
+    if g and g.get("weeks", 0) < c.get("confirm_min_weeks", 2):
+        return "1 week" if g.get("weeks") else "no well-covered week"
     if g and not g.get("pooled_seen", True):
-        return "unclear pooled"
+        return ("not clear on its samples" if g.get("n_counted")
+                else "not clear with cities pooled")
     wk = f.get("weekly")
     if not wk:
         return "re-run for weeks"
     return f"{wk.get('in_a_row', 0)} of {wk.get('need', 3)} weeks"
+
+
+def _counted_text(f, cities):
+    """'its 6 samples with coocs: 13 Sep GE · 3 Oct BS, GR, TI, ZH · 4 Oct ZH'
+    (2026-10-27): when they were, newest last, so a run of recent samples
+    (an arrival) and scattered single ones read differently."""
+    pc = f.get("per_city") or {}
+    by_day = {}
+    for c in cities:
+        pev = (((pc.get(c) or {}).get("check") or {}).get("pairs") or {})
+        for d in pev.get("positive") or []:
+            by_day.setdefault(str(d)[:10], []).append(city_code(c))
+    if not by_day:
+        return ""
+    n = sum(len(v) for v in by_day.values())
+    return (f"its {n} {_pl(n, 'sample')} with coocs, oldest first: "
+            + " · ".join(f"{_short_date(d)} {', '.join(sorted(cs))}" for d, cs in sorted(by_day.items())))
 
 
 def _add_note(findings):
@@ -1443,8 +1470,9 @@ def _finding_overview(v, f, cities, current_panel, has_children=False):
         # sentence goes to the hover
         conf, why, tip = _new_grade(f, cities)
         wk = f.get("weekly")
+        ct = _counted_text(f, cities)
         hover = (f"suggested by the reads, not in the panel · {why} · {tip}"
-                 + (" · " + _weeks_text(wk) if wk else ""))
+                 + (" · " + ct if ct else "") + (" · " + _weeks_text(wk) if wk else ""))
         if f.get("add_ready"):
             btn = ("<span class='added'>added · re-run needed</span>" if v in current_panel
                    else f"<button class='add' data-add='{_e(v)}'>+ Add</button>")
@@ -1455,9 +1483,9 @@ def _finding_overview(v, f, cities, current_panel, has_children=False):
                            "background:#eff6ff;color:#1d4ed8;"), hover, RED, RED, "ring")
     if kind in ("folded", "suggested"):
         # no coocs of its own (2026-10-27): grey, the reason in the cells' words
-        return (kind, _ovb(f"<b>Suggested</b> · {_e(why)}", "color:#6b7280;"),
+        return (kind, _ovb(_e(why), "color:#6b7280;"),
                 "the deep scan suggested this name, but no city has coocs of its own mutations "
-                "(or only one sample, with most of its mutations missing): not counted; if it is "
+                "(or only one sample, with half or more of its mutations absent): not counted; if it is "
                 "real, the next batch moves it up", "#d1d5db", "#9ca3af", "ring")
 
 
@@ -1981,7 +2009,7 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
         body.append(
             f"<tr class='grp' data-grp='fold'><td colspan='{n_cols}'><span data-tip='Names the deep "
             "scan suggested that no city backs with coocs of their own mutations (or only one "
-            "sample, with most of its mutations missing). Not counted; if one is real, the next "
+            "sample, with half or more of its mutations absent). Not counted; if one is real, the next "
             "batch moves it into the tree. Click to show their rows.'>"
             f"<span class='arr'>▸</span>{len(folded)} more {_pl(len(folded), 'name')} the deep "
             f"scan suggested, without coocs of {'its' if len(folded) == 1 else 'their'} own: "
