@@ -400,13 +400,19 @@ def _data_positions_cached(location, d0, d1, share, cov):
 
 @app.task(bind=True)
 def run_cooc_deep_scan_lapis(self, location: str, start_date: str, end_date: str,
-                             variants: list, reference_locations: list = None):
+                             variants: list, reference_locations: list = None,
+                             check_start_date: str = None):
     """Phase 2 of a run (2026-10-02): read-level scan at today's positions PLUS
     the positions where the data shows a mutation (cooc.data_positions), then
     the scanner on what the panel doesn't explain. Replaces the scanner task fed
     with phase-1 patterns: those only contained listed positions, so a lineage's
     newest mutations and undesignated ones were never seen. The completeness
     graph stays on phase 1. scope.data_positions: false -> today's positions only.
+
+    check_start_date (2026-10-27): the check of the lineages it found reads from
+    this date (earlier than start_date) for the page's weekly grade (+ Add on
+    3 weeks in a row); the scan itself keeps start_date..end_date. The check is
+    2-7 s per city, the scan 34-74 s.
     """
     import sys
     from datetime import datetime
@@ -471,10 +477,23 @@ def run_cooc_deep_scan_lapis(self, location: str, start_date: str, end_date: str
             from cooc import lineages_check
             _p(4, f"Checking ★ markers of {len(nodes)} found lineages...")
             try:
-                result["findings_check"] = lineages_check(location, d0, d1, nodes, variants,
+                dc = d0
+                if check_start_date:
+                    dc = min(d0, datetime.fromisoformat(check_start_date))
+                result["findings_check"] = lineages_check(location, dc, d1, nodes, variants,
                                                           progress_callback=_p, step=4)
             except Exception as e:
                 logger.warning(f"[deep scan] findings check failed in {location}: {e}")
+        # the panel lineages' weekly grade too (2026-10-27): the same cheap
+        # check over the longer dates, for the weeks squares of the panel rows
+        if check_start_date:
+            from cooc import lineages_check as _lc
+            try:
+                result["panel_check_ext"] = _lc(
+                    location, min(d0, datetime.fromisoformat(check_start_date)), d1,
+                    list(variants), list(variants))
+            except Exception as e:
+                logger.warning(f"[deep scan] panel weekly check failed in {location}: {e}")
         _p(5, "Deep scan complete.")
         return result
     except Exception as e:

@@ -100,7 +100,7 @@ def test_row_says_confirmed_or_early_and_why():
     assert "seen in GE, ZH, 2 of 2 weeks" in tip and dk == "ring"
     ready = dict(two, add_ready=True, weekly={"in_a_row": 3, "need": 3, "weeks": []})
     kind, ov, _tip, _dot, _n, dk = vt._finding_overview("TA.1", ready, C, [])
-    assert "Add to panel" in ov and "3 weeks in a row" in ov and "data-add" in ov and dk == "filled"
+    assert "<b>Add</b> · 3 weeks in a row" in ov and "data-add" in ov and dk == "filled"
     wk1 = {"per_city": {c: {"days": 3, "check": _city(W1)} for c in C}, "addable": True}
     kind, ov, tip, _dot, _n, dk = vt._finding_overview("RV.2.1.1", wk1, C, [])
     assert "Watch" in ov and "seen in GE, ZH, 1 of 1 week" in tip and dk == "ring"

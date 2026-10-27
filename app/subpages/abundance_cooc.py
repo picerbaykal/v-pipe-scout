@@ -1174,6 +1174,10 @@ def app():
             _run_panel = list(st.session_state.get("acooc_ran_panel") or all_selected_variants)
             _run_d0, _run_d1 = (st.session_state.get("acooc_ran_dates")
                                 or (start_date.isoformat(), end_date.isoformat()))
+            # the found lineages' check reads at least check.weekly_days back
+            # (2026-10-27), for the weekly grade; cells keep the chosen dates
+            from process.national import check_start as _check_start, trim_check as _trim_check
+            _check_d0 = _check_start(_run_d0, _run_d1)
 
             def _stage_open(stage, tkey, rkey):
                 """Cities whose task of this stage was started and is not yet
@@ -1541,6 +1545,7 @@ def app():
                                 "location": _loc,
                                 "start_date": _run_d0,
                                 "end_date": _run_d1,
+                                "check_start_date": _check_d0,
                                 "variants": _run_panel,
                                 # error hotspots come from every available
                                 # location, not only the run's cities
@@ -1596,7 +1601,7 @@ def app():
                         _xt[_l] = ""
                         continue
                     _xtask = celery_app.send_task("tasks.run_cooc_lineages_check_lapis", kwargs={
-                        "location": _l, "start_date": _run_d0,
+                        "location": _l, "start_date": _check_d0,
                         "end_date": _run_d1, "variants": _miss,
                         "panel": sorted(_ran_pan)})
                     _xt[_l] = _xtask.id
@@ -2197,6 +2202,12 @@ def app():
                 _scan_running = _scan_outstanding
                 _scan_res_all = ({} if _scan_running
                                  else st.session_state.get("acooc_scanner_results", {}) or {})
+                # the check of found lineages may read further back (weekly
+                # grade): cut it to the chosen dates for everything else
+                _scan_res_all = {_l: (dict(_r, findings_check=_trim_check(_r.get("findings_check"), _run_d0, _run_d1),
+                                           findings_check_ext=_r.get("findings_check"))
+                                      if isinstance(_r, dict) else _r)
+                                 for _l, _r in _scan_res_all.items()}
                 _agg_new, _agg_sub, _agg_unres, _agg_mnh, _agg_one = {}, {}, {}, {}, {}
                 _novel_total, _novel_pats = 0, 0
 
@@ -2248,7 +2259,8 @@ def app():
                     def _xcheck(_loc, _node):
                         """Phase 3: the ★ marker check of a lineage named in another
                         city, for this city (None when it wasn't checked here)."""
-                        _x = (st.session_state.get("acooc_xcheck_results", {}) or {}).get(_loc) or {}
+                        _x = _trim_check((st.session_state.get("acooc_xcheck_results", {}) or {}).get(_loc) or {},
+                                         _run_d0, _run_d1) or {}
                         _pv = (_x.get("per_variant") or {}).get(_node)
                         if not _pv or not _pv.get("markers"):
                             return None
@@ -2261,7 +2273,8 @@ def app():
                         """check_in_data's inputs for a found lineage in one city
                         (deep scan first, else the cross-check), for the weekly
                         grade (process.national.weekly, 2026-10-27)"""
-                        for _src in ((_scan_res_all.get(_loc) or {}).get("findings_check") or {},
+                        for _src in ((_scan_res_all.get(_loc) or {}).get("findings_check_ext")
+                                     or (_scan_res_all.get(_loc) or {}).get("findings_check") or {},
                                      (st.session_state.get("acooc_xcheck_results", {}) or {}).get(_loc) or {}):
                             _pv = (_src.get("per_variant") or {}).get(_node)
                             if _pv and _pv.get("markers"):
@@ -2478,13 +2491,13 @@ def app():
                             _rw = {c: r for c, r in _rw.items() if r}
                             # "w1": bump when process.national.weekly changes, so a
                             # rerun after a code change doesn't reuse old weeks
-                            _key = ("w1", _slot.get("node"), _run_d0, _run_d1,
+                            _key = ("w2", _slot.get("node"), _check_d0, _run_d1,
                                     tuple(sorted((c, len(r["per_date"])) for c, r in _rw.items())))
                             _wc = st.session_state.setdefault("acooc_weekly_cache", {})
                             if _key not in _wc:
                                 try:
                                     from process.national import weekly as _weekly
-                                    _wc[_key] = _weekly(_rw, _run_d0, _run_d1) if _rw else None
+                                    _wc[_key] = _weekly(_rw, _check_d0, _run_d1) if _rw else None
                                 except Exception as _e:
                                     logger.warning(f"weekly grade {_slot.get('node')}: {_e}")
                                     _wc[_key] = None
@@ -2606,6 +2619,17 @@ def app():
                         _rw = {}
                         for _c in _cities_all:
                             _cr = _cr_all.get(_c) or {}
+                            # the deep scan's 7-week check of the panel when there
+                            # is one (2026-10-27), else the chosen dates' panel check
+                            _ext = (((_scan_res_all.get(_c) or {}).get("panel_check_ext") or {})
+                                    if isinstance(_scan_res_all.get(_c), dict) else {})
+                            _ev = (_ext.get("per_variant") or {}).get(_pv) or {}
+                            if _ev.get("markers"):
+                                _rw[_c] = {"markers": _ev["markers"], "per_date": _ev.get("per_date") or {},
+                                           "dates": [str(d)[:10] for d in (_ext.get("dates") or [])],
+                                           "quality": _cr.get("sample_qc"),
+                                           "own": (_own_map or {}).get(_pv)}
+                                continue
                             _ci = (_cr.get("panel_check") or {}).get(_pv) or {}
                             if _ci.get("markers"):
                                 _rw[_c] = {"markers": _ci["markers"], "per_date": _ci.get("per_date") or {},
@@ -2614,12 +2638,15 @@ def app():
                                            "own": (_own_map or {}).get(_pv)}
                         if not _rw:
                             continue
-                        _key = ("w1-panel", _pv, _run_d0, _run_d1,
+                        _ext_any = any(((_scan_res_all.get(c) or {}).get("panel_check_ext"))
+                                       for c in _cities_all if isinstance(_scan_res_all.get(c), dict))
+                        _pd0 = _check_d0 if _ext_any else _run_d0
+                        _key = ("w2-panel", _pv, _pd0, _run_d1,
                                 tuple(sorted((c, len(r["per_date"])) for c, r in _rw.items())))
                         if _key not in _wc:
                             try:
                                 from process.national import weekly as _weekly
-                                _wc[_key] = _weekly(_rw, _run_d0, _run_d1)
+                                _wc[_key] = _weekly(_rw, _pd0, _run_d1)
                             except Exception as _e:
                                 logger.warning(f"weekly grade {_pv}: {_e}")
                                 _wc[_key] = None

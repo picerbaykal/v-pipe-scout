@@ -65,9 +65,11 @@ CSS = """
 .vt td.nomk { color:#8b8f97; font-size:13px; padding-left:8px; }
 .vt td.ov { white-space:normal; padding:2px 8px; min-width:250px; max-width:300px; }
 .vt .ovb { display:inline-block; font-size:12.5px; line-height:1.3; padding:2px 7px; border-radius:5px; }
-.vt .wks { display:inline-flex; gap:1px; margin-left:8px; vertical-align:middle; white-space:nowrap; }
-.vt .wks i { display:inline-block; width:7px; height:10px; border-radius:2px; }
-.vt .wks .wkm { font-size:11px; color:#9ca3af; margin-right:2px; line-height:10px; }
+.vt .ovw { display:flex; justify-content:space-between; align-items:center; gap:10px; }
+.vt .ovw .ovb { white-space:nowrap; }
+.vt .wks { display:inline-flex; gap:2px; align-items:center; white-space:nowrap; flex:none; }
+.vt .wks i { display:inline-block; width:12px; height:14px; border-radius:2px; }
+.vt .wks .wkm { font-size:12px; color:#9ca3af; margin-right:2px; }
 .vt .ovb b { font-weight:600; }
 .vt .ovb .add { margin-left:6px; }
 .vt td.cc .c { cursor:pointer; }
@@ -1252,12 +1254,13 @@ def _panel_overview(per_city, cities, wk=None):
         rs = None
     if rs and wk["weeks"][-1]["status"] != "confirmed":
         note = (f" · not confirmed since {_short_date(rs['last_confirmed'])}"
-                if rs.get("last_confirmed") else " · not confirmed in these dates")
+                if rs.get("last_confirmed") else " · not confirmed")
         tip = ("not confirmed in the 4 weeks up to the newest Sunday (≥ 2 well-covered cities "
                "with its coocs, ≥ 2 weeks); information only: a lineage on its way out keeps "
                "its place in the panel until you remove it")
-    return (_ovb(f"<b style='color:#1f2328'>In panel</b> · seen in {len(seen)} of "
-                 f"{len(meas)}{where}{note}") + _weeks_strip(wk),
+    tip = (f"seen in {len(seen)} of {len(meas)} cities{where}" + (" · " + tip if tip else ""))
+    return (_ovw(_ovb(f"<b style='color:#1f2328'>In panel</b> · {len(seen)} of "
+                      f"{len(meas)}{note}"), _weeks_strip(wk)),
             tip, GREEN if seen else "#d1d5db", "#15803d" if seen else "#6b7280", "filled")
 
 
@@ -1435,6 +1438,12 @@ def _counted_text(chk, cities):
             + " · ".join(f"{_short_date(d)} {', '.join(sorted(cs))}" for d, cs in sorted(by_day.items())))
 
 
+def _ovw(label, strip):
+    """status left, weeks squares right-aligned in the overview cell, so the
+    squares line up like a column (2026-10-27)"""
+    return f"<span class='ovw'>{label}{strip}</span>" if strip else label
+
+
 def _weeks_strip(wk, keep=12):
     """The weekly grades as small squares, newest right (2026-10-27): each =
     the 4 weeks up to that Sunday; solid confirmed, light found, empty not
@@ -1584,25 +1593,26 @@ def _finding_overview(v, f, cities, current_panel, has_children=False):
             btn = ("<span class='added'>added · re-run needed</span>" if v in current_panel
                    else f"<button class='add' data-add='{_e(v)}'>+ Add</button>")
             n = (wk or {}).get("in_a_row", 0)
-            return (kind, _ovb(f"<b>Add to panel</b> · {n} weeks in a row{btn}",
-                               "background:#fef2f2;color:#b91c1c;") + strip, hover, RED, RED, "filled")
+            return (kind, _ovw(_ovb(f"<b>Add</b> · {n} weeks in a row{btn}",
+                                    "background:#fef2f2;color:#b91c1c;"), strip),
+                    "add to panel: " + hover, RED, RED, "filled")
         if rs and rs["kind"] == "fading":
-            return (kind, _ovb(f"<b>Fading</b> · last confirmed {_e(_short_date(rs['last_confirmed']))}",
-                               "color:#6b7280;box-shadow:inset 0 0 0 1px #e5e7eb;") + strip,
+            return (kind, _ovw(_ovb(f"<b>Fading</b> · last confirmed {_e(_short_date(rs['last_confirmed']))}",
+                                    "color:#6b7280;box-shadow:inset 0 0 0 1px #e5e7eb;"), strip),
                     hover + " · fading: confirmed in an earlier week of the chosen dates, not in the "
                     "newest; no + Add while it isn't confirmed again", "#d1d5db", "#6b7280", "ring")
         if rs and rs["kind"] == "earlier":
-            return (kind, _ovb(f"<b>Earlier only</b> · last seen "
-                               f"{_e(_short_date(rs['last_found'])) if rs.get('last_found') else '–'}",
-                               "color:#6b7280;box-shadow:inset 0 0 0 1px #e5e7eb;") + strip,
+            return (kind, _ovw(_ovb(f"<b>Earlier only</b> · last seen "
+                                    f"{_e(_short_date(rs['last_found'])) if rs.get('last_found') else '–'}",
+                                    "color:#6b7280;box-shadow:inset 0 0 0 1px #e5e7eb;"), strip),
                     hover + " · earlier only: seen in the chosen dates, never confirmed, and not "
                     "in the newest 4 weeks", "#d1d5db", "#6b7280", "ring")
         # confirmed in the newest weeks, not yet in a row: say how far it got
         reason = (f"{rs['in_a_row']} of {rs['need']} weeks"
                   if rs and (wk or {}).get("weeks") and wk["weeks"][-1]["status"] == "confirmed"
                   else _short_reason(f, cities))
-        return (kind, _ovb(f"<b>Watch</b> <span style='color:#4b5563'>· {_e(reason)}</span>",
-                           "background:#eff6ff;color:#1d4ed8;") + strip, hover, RED, RED, "ring")
+        return (kind, _ovw(_ovb(f"<b>Watch</b> <span style='color:#4b5563'>· {_e(reason)}</span>",
+                                "background:#eff6ff;color:#1d4ed8;"), strip), hover, RED, RED, "ring")
     if kind in ("folded", "suggested"):
         # no coocs of its own (2026-10-27): grey, the reason in the cells' words
         return (kind, _ovb(_e(why), "color:#6b7280;"),

@@ -110,3 +110,18 @@ def test_button_only_when_ready():
     note = vt._add_note({"TK.1": dict(f, weekly=short), "TA.1": dict(f, weekly=short)})
     assert note.count("+ Add needs 3 weeks in a row") == 1 and "choose 42 days or more" in note
     assert vt._add_note({"TA.1": dict(f, weekly=ready)}) == ""
+
+
+def test_last_month_check_reads_seven_weeks():
+    # 2026-10-27: the found lineages' check reads check.weekly_days (49) back,
+    # so 3 weekly windows fit on "last month"; the cells keep the chosen dates
+    from process.national import check_start, trim_check
+    d0 = check_start("2026-09-05", "2026-10-05")
+    assert d0 == "2026-08-18"
+    assert week_ends(d0, "2026-10-05")[-3:] == ["2026-09-20", "2026-09-27", "2026-10-04"]
+    assert check_start("2026-06-07", "2026-10-05") == "2026-06-07"
+    fc = {"dates": ["2026-08-20", "2026-09-10"],
+          "per_variant": {"V": {"markers": ["1A"], "per_date": {"2026-08-20": {}, "2026-09-10": {}}}}}
+    t = trim_check(fc, "2026-09-05", "2026-10-05")
+    assert t["dates"] == ["2026-09-10"] and list(t["per_variant"]["V"]["per_date"]) == ["2026-09-10"]
+    assert fc["dates"] == ["2026-08-20", "2026-09-10"]          # the original is kept

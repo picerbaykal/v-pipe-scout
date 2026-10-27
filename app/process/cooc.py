@@ -485,6 +485,12 @@ CHECK_DEFAULTS = {
     # Batches arrive every 2 weeks: one batch alone gives at most 1 confirmed
     # week (confirmed needs 2 weeks of samples), so 2 and 3 in a row are both
     # reached when the next batch arrives; 3 asks both of its weeks to agree.
+    "weekly_days": 49,           # the found lineages' check reads at least this many
+                                 #   days back (3 windows of 28 days ending on Sundays,
+                                 #   whatever weekday the dates end on), so + Add can be
+                                 #   judged on "last month"; the deep scan keeps the
+                                 #   chosen dates (2026-10-27: the check is 2-7 s per
+                                 #   city, the scan 34-74 s, ~70 % of it LAPIS reading)
     "add_weeks": 3,              # confirmed this many weeks in a row
     "add_days": 28,              # each week graded on the samples of this many days
 }

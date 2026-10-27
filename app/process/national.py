@@ -328,3 +328,31 @@ def row_status(wk: Optional[dict]) -> Optional[dict]:
     return {"kind": kind, "in_a_row": n, "need": need,
             "last_confirmed": conf[-1] if conf else None,
             "last_found": found[-1] if found else None}
+
+
+def check_start(d0: str, d1: str, cfg: Optional[dict] = None) -> str:
+    """Start of the dates the found lineages' check reads (2026-10-27): the
+    chosen start, or check.weekly_days before the end if that is earlier, so
+    + Add (3 weekly windows of 28 days) can be judged on "last month". Only
+    the cheap check reads further back; the deep scan keeps the chosen dates."""
+    from process.cooc import _check_cfg
+    c = _check_cfg(cfg)
+    a = date.fromisoformat(str(d0)[:10])
+    b = date.fromisoformat(str(d1)[:10]) - timedelta(days=int(c.get("weekly_days", 49)) - 1)
+    return min(a, b).isoformat()
+
+
+def trim_check(fc: Optional[dict], d0: str, d1: str) -> Optional[dict]:
+    """A lineages_check result cut to the chosen dates (2026-10-27): the cells,
+    the grade and the family rule see the chosen dates only; the weekly grade
+    gets the untrimmed result."""
+    if not fc:
+        return fc
+    a, b = str(d0)[:10], str(d1)[:10]
+    inside = lambda d: a <= str(d)[:10] <= b                     # noqa: E731
+    out = dict(fc)
+    out["dates"] = [d for d in fc.get("dates") or [] if inside(d)]
+    out["per_variant"] = {
+        v: dict(pv, per_date={d: x for d, x in (pv.get("per_date") or {}).items() if inside(d)})
+        for v, pv in (fc.get("per_variant") or {}).items()}
+    return out

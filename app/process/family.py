@@ -163,25 +163,32 @@ def family_rows(findings: dict, scan_res_all: dict, cr_all: dict,
         for x, ds in (((scan_res_all.get(loc) or {}).get("findings_check") or {})
                       .get("below_all") or {}).items():
             nb[x] = max(nb.get(x, 0), len(ds))
+    # which lineage lies below which is the tree, the same in every city: the
+    # union of the cities' lists (2026-10-27; a city that checked a lineage
+    # only through the cross-check has no list for it: PJ.2 in Basel and Chur)
+    ball_all = {}
+    for loc in (scan_res_all or {}):
+        for k, ds in (((scan_res_all.get(loc) or {}).get("findings_check") or {})
+                      .get("below_all") or {}).items():
+            ball_all.setdefault(k, set()).update(ds)
+    ball_all = {k: sorted(v) for k, v in ball_all.items()}
     for x in sorted(findings, key=lambda v: nb.get(v, 0)):
         fx = findings[x]
         if fx.get("status") == "named" or x in exclude:
             continue
         itself, measured, below = {}, [], set()
+        thin_below = {}       # thin city -> lineages below it seen there (2026-10-27)
+        present = set()
         for loc, px in (fx.get("per_city") or {}).items():
             chk = (px or {}).get("check") or {}
             if chk.get("state") != "present":
                 continue
-            if chk.get("n_well") is not None and chk["n_well"] < 2:
-                itself[loc] = (None, [])          # thin city: can't tell
-                continue
+            present.add(loc)
             fc = (scan_res_all.get(loc) or {}).get("findings_check") or {}
             ball = fc.get("below_all") or {}
             sigs = {k: set(v) for k, v in (fc.get("sigs") or {}).items()}
             pvar = fc.get("per_variant") or {}
             xd = pvar.get(x) or {}
-            if not ball.get(x) or not xd.get("markers"):
-                continue
             pc = (cr_all.get(loc) or {}).get("panel_check") or {}
 
             def take(d, loc=loc):
@@ -197,6 +204,12 @@ def family_rows(findings: dict, scan_res_all: dict, cr_all: dict,
                 stt = _pstate(loc, e) if e in panel else _fstate(loc, e)
                 return stt != "absent"
 
+            if chk.get("n_well") is not None and chk["n_well"] < 2:
+                itself[loc] = (None, [])          # thin city: can't tell
+                thin_below[loc] = list(nearest_below(x, ball_all, take) or []) if ball_all.get(x) else []
+                continue
+            if not ball.get(x) or not xd.get("markers"):
+                continue
             ds = nearest_below(x, ball, take)
             if not ds:
                 continue
@@ -237,3 +250,13 @@ def family_rows(findings: dict, scan_res_all: dict, cr_all: dict,
             fx["addable"] = False
             fx["add_ready"] = False
             fx["descendants"] = sorted(below)
+        elif (not known and thin_below and set(thin_below) == present
+              and all(thin_below.values())):
+            # seen only on thin samples, where nothing can be measured, and a
+            # lineage below it is seen in each of those cities (2026-10-27):
+            # PJ.2, Sep-Oct, Basel and Chur thin, PJ.2.1 seen in both; once the
+            # stricter stretch rule dropped its Zürich sample it stood alone
+            fx["status"] = "family"
+            fx["addable"] = False
+            fx["add_ready"] = False
+            fx["descendants"] = sorted({d for ds in thin_below.values() for d in ds})

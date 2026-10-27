@@ -150,7 +150,7 @@ def test_panel_overview_seen_not_seen_cant_check():
     nb = {c: s for c, s in zip(CITIES, [_sc(3, 1), _sc(1, 0, 3), _sc(2, 2), _sc(4, 0),
                                          _sc(3, 0, 1), _sc(3, 0, 1)])}
     html, _tip, dot, _ink, _k = vt._panel_overview(nb, CITIES)
-    assert "seen in 4 of 6" in html and dot == vt.GREEN
+    assert "In panel</b> · 4 of 6" in html and "seen in 4 of 6" in _tip and dot == vt.GREEN
     lp8 = {c: s for c, s in zip(CITIES, [_sc(0, 4), _sc(0, 0, 4), _sc(0, 4), _sc(0, 0, 4),
                                           _sc(0, 2, 2), _sc(0, 4)])}
     html, tip, dot, _ink, _k = vt._panel_overview(lp8, CITIES)
