@@ -2735,8 +2735,9 @@ def app():
               render_variant_explorer(
                   pango_loader=cached_get_pango_loader(),
                   panel=st.session_state.get("acooc_ran_panel") or all_selected_variants,
-                  # the look-up always works; "Check in data" waits for the run
-                  cities=None if (_cooc_outstanding or _scan_outstanding) else list(location_names), start_date=_rd[0], end_date=_rd[1],
+                  # the look-up always works; "Check in data" waits for the panel
+                  # check only (its sample coverage), not the deep scan (2026-10-27)
+                  cities=None if _cooc_outstanding else list(location_names), start_date=_rd[0], end_date=_rd[1],
                   celery_app=celery_app,
                   # the tree's inputs, so the answer is the tree's (2026-10-27)
                   quality={_l: (_r or {}).get("sample_qc") for _l, _r in

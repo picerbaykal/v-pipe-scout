@@ -98,8 +98,8 @@ def _check_section(variant, panel, cities, start_date, end_date, celery_app, key
     rules (process.variant_explorer.judge) and draws it as a tree row
     (components.variants_table.investigate_view)."""
     if not (cities and start_date and end_date and celery_app):
-        st.caption("Run the analysis (or wait for it to finish) to check it in the "
-                   "data of your cities.")
+        st.caption("Run the analysis (or wait for the panel check to finish) to check it "
+                   "in the data of your cities.")
         return
     from process.national import check_start
     k = f"{key_prefix}_check"
@@ -121,6 +121,7 @@ def _check_section(variant, panel, cities, start_date, end_date, celery_app, key
                     "check_start_date": d_check})
                 tasks[c] = t.id
             st.session_state[k] = {"sig": sig, "tasks": tasks, "raw": {}, "err": {}}
+            # a deep scan still running: these wait in the queue behind it
             st.rerun()
         return
 
