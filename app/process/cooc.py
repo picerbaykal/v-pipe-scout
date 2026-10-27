@@ -825,6 +825,7 @@ def pair_evidence(per_date: Dict[str, Dict[str, List[float]]],
         return groups
 
     positive, measured, per_out, seen_pairs = [], [], {}, []
+    per_all = {}           # every pair seen on a positive date (2026-10-27, the details' table)
     for d in sorted(per_date or {}):
         cells = per_date[d] or {}
         seen, any_meas = [], False
@@ -847,11 +848,12 @@ def pair_evidence(per_date: Dict[str, Dict[str, List[float]]],
             # the best-read pair of each fragment
             # the best-read pair of each fragment, a true one first
             per_out[d] = [max((v for _k, v in g), key=lambda v: (v[3], v[2])) for g in groups]
+            per_all[d] = [v for g in groups for _k, v in g]
     q = quality or {}
     return {"positive": positive,
             "positive_well": [d for d in positive if well_covered(q.get(d))],
             "n_stretches": len(_fragments(seen_pairs)), "measured": measured,
-            "per_date": per_out}
+            "per_date": per_out, "per_date_all": per_all}
 
 
 def _accumulate_pairs(rows: List[dict], pos_set: Set[int], pairs: Dict[str, List[str]],

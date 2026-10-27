@@ -33,6 +33,18 @@ from process.family import (family_rows as _family_by_jaccard,
 from datetime import datetime
 import pandas as pd
 
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _clinical_weekly(d0: str, d1: str, region):
+    """clinical sequences per week and lineage (process.clinical), once a day
+    per date range and region; None when LAPIS can't be reached (2026-10-27)"""
+    from datetime import date as _date, timedelta as _td
+    from process.clinical import fetch_weekly
+    a = _date.fromisoformat(str(d0)[:10])
+    a -= _td(days=a.weekday())                     # from the Monday of the first week
+    return fetch_weekly(a.isoformat(), str(d1)[:10], region)
+
+
 celery_app = Celery(
     'tasks',
     broker=os.environ.get('CELERY_BROKER_URL', 'redis://redis:6379/0'),
@@ -2651,7 +2663,23 @@ def app():
                                 logger.warning(f"weekly grade {_pv}: {_e}")
                                 _wc[_key] = None
                         _pweekly[_pv] = _wc[_key]
+                    # clinical counts for the details' week columns (2026-10-27)
+                    _clin = {}
+                    if get_cooc_setting("clinical.enabled", default=True):
+                        for _reg, _key2 in (("Europe", "Europe"), ("World", None)):
+                            try:
+                                _clin[_reg] = _clinical_weekly(_run_d0, _run_d1, _key2)
+                            except Exception as _e:
+                                logger.warning(f"clinical counts ({_reg}): {_e}")
+                    if "acooc_pango_parent" not in st.session_state:
+                        try:
+                            from process.variant_explorer import _indices as _vx_idx
+                            st.session_state["acooc_pango_parent"] = _vx_idx(cached_get_pango_loader())[2]
+                        except Exception:
+                            st.session_state["acooc_pango_parent"] = {}
                     _view = _vt.build(_cities_all, _tcity, _rows, _verdicts_by_city, _findings,
+                                      clinical={k: x for k, x in _clin.items() if x is not None} or None,
+                                      pango_parent=st.session_state["acooc_pango_parent"],
                                       panel_weekly=_pweekly, dates=(_run_d0, _run_d1),
                                       quality=_qual,
                                       current_panel=set(all_selected_variants),

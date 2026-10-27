@@ -70,7 +70,7 @@ def test_the_row_says_where():
     _kind, ov, tip, *_ = vt._finding_overview("X", f, C, [])
     # 2026-10-27: absent mutations are a note in the hover, not the row's reason
     assert "absent" not in ov
-    assert "note: 2 of its 5 mutations absent on its 4 samples with coocs: 5100T, 9000A" in tip
+    assert "2 of its 5 mutations absent on its samples: 5100T, 9000A → details" in tip
 
 
 def test_details_say_where_and_when_for_panel_and_found_rows():

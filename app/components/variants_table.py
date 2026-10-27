@@ -66,6 +66,17 @@ CSS = """
 .vt td.ov { white-space:normal; padding:2px 8px; min-width:250px; max-width:300px; }
 .vt .ovb { display:inline-block; font-size:12.5px; line-height:1.3; padding:2px 7px; border-radius:5px; }
 .vt .ovw { display:flex; justify-content:space-between; align-items:center; gap:10px; }
+.vt table.wkt { border-collapse:separate; border-spacing:2px 2px; font-size:12px; margin:4px 0 2px; width:auto; }
+.vt table.wkt th { font-weight:400; color:#6b7280; padding:1px 5px; text-align:center;
+                   text-transform:none; letter-spacing:0; border:0 !important; background:none; }
+.vt table.wkt td, .vt tr.dt table.wkt td { padding:2px 6px; text-align:center; border-radius:3px; border:0 !important;
+                   height:auto; line-height:1.35; vertical-align:middle; }
+.vt table.wkt td.rl, .vt tr.dt table.wkt td.rl { text-align:left; padding-right:10px; white-space:nowrap; }
+.vt table.wkt td.rr, .vt tr.dt table.wkt td.rr { text-align:left; color:#6b7280; padding-left:10px; white-space:nowrap; }
+.vt table.wkt tr.sep0:first-of-type td, .vt table.wkt tr.sep0 td { }
+.vt table.wkt i.sq { display:inline-block; width:10px; height:10px; border-radius:2px; margin:0 1px; vertical-align:-1px; }
+.vt .dim i.sq { display:inline-block; width:10px; height:10px; border-radius:2px; margin:0 2px 0 6px; vertical-align:-1px; }
+.vt .dh { font-size:12.5px; font-weight:600; margin:10px 0 2px; }
 .vt .ovw .ovb { white-space:nowrap; }
 .vt .wks { display:inline-flex; gap:2px; align-items:center; white-space:nowrap; flex:none; }
 .vt .wks i { display:inline-block; width:12px; height:14px; border-radius:2px; }
@@ -217,6 +228,8 @@ def _pl(n, word):
         return word
     if word.endswith("y") and word[-2:-1] not in "aeiou":
         return word[:-1] + "ies"           # city → cities, but day → days
+    if word.endswith(("ch", "sh", "s", "x")):
+        return word + "es"                 # stretch → stretches
     return word + "s"
 
 
@@ -480,7 +493,7 @@ def _pairs_text(pev, limit=3):
     out = []
     for dt in sorted(pev.get("positive") or [], reverse=True)[:limit]:
         prs = ", ".join(f"{x[0]} {100 * x[1]:.0f} % of {x[2]:,}"
-                        + ("" if len(x) < 4 or x[3] else " (common partner)")
+                        + ("" if len(x) < 4 or x[3] else " (backbone mutation)")
                         for x in pev["per_date"].get(dt, []))
         out.append(f"{_short_date(dt)} ({'well covered' if dt in q else 'thin'}): {prs}")
     return " · ".join(out)
@@ -506,11 +519,11 @@ def _cell_tip(v, city, d, extra=""):
             q = pev.get("positive_well") or []
             for dt in sorted(pev["positive"], reverse=True)[:4]:
                 prs = " · ".join(f"{x[0]} {100 * x[1]:.0f} % of {x[2]:,}"
-                                 + ("" if len(x) < 4 or x[3] else " (common partner)")
+                                 + ("" if len(x) < 4 or x[3] else " (backbone mutation)")
                                  for x in pev["per_date"].get(dt, []))
                 lines.append(f"  {_short_date(dt)} ({'well covered' if dt in q else 'thin'}): {prs}")
             lines.append(f"{n} separate {'cooc' if n == 1 else 'coocs'} in all; a sample counts with "
-                         "2 or more, at least one without a common partner")
+                         "2 or more, at least one without a backbone mutation")
             if not q:
                 lines.append("Striped: only on thin samples, weak on its own")
             lines.append(single)
@@ -818,94 +831,287 @@ def _nat_line(per_city, top, low=None):
             f"{_e(_NAT_WORD.get(a['verdict'], ''))}</span></div>")
 
 
-def _detail_row(gid, v, per_city, cities, sel, n_cols, found=False):
-    """The row's details (hidden until 'details ▸'): one calendar line per
-    city, the markers with their real reads in the selected city, and their
-    median share across cities."""
-    # not seen = pale, as in the cells: amber means only "in panel, not seen in
-    # any city" (2026-10-20); until 2026-10-22 a not-seen square was amber here
-    top, low = (RED, None) if found else (GREEN, None)
-    lines = []
+_CLIN_WORLD = "https://cov-spectrum.org/explore/World/AllSamples/Past6M/variants?nucMutations={muts}"
+_CLIN_EUROPE = "https://cov-spectrum.org/explore/Europe/AllSamples/Past6M/variants?nucMutations={muts}"
+
+
+def _clin_links(muts, what="its own mutations together"):
+    """'… World ↗ · Europe ↗' on CoV-Spectrum (2026-10-27)"""
+    q = quote_plus(",".join(muts))
+    return (f"<span class='dim'>{_e(what)}, clinical:</span> "
+            + _ext(_CLIN_WORLD.format(muts=q), "World", "clinical sequences carrying all of them, worldwide")
+            + " · " + _ext(_CLIN_EUROPE.format(muts=q), "Europe", "the same, Europe only"))
+
+
+def _sample_kind(d, day):
+    """one sample's square, in the cells' words (2026-10-27)"""
+    pev = (d or {}).get("pairs") or {}
+    pos = {str(x)[:10] for x in pev.get("positive") or []}
+    posw = {str(x)[:10] for x in pev.get("positive_well") or []}
+    mark = dict((str(a)[:10], b) for a, b in ((d or {}).get("timeline") or [])).get(day)
+    if day in pos:
+        return "coocs" if day in posw else "coocs, thin sample"
+    if mark == "present":
+        return "single mutations only"
+    if mark == "absent":
+        return "not seen"
+    return "undecided" if mark in ("mixed", "thin") else "too few reads"
+
+
+def _kind_style():
+    """sample square styles (a function: _LOWQ is defined further down)"""
+    return {"coocs": f"background:{GREEN}",
+               "coocs, thin sample": f"background:{GREEN};" + _LOWQ,
+               "single mutations only": "background:#c0dd97",
+               "not seen": D_PALE,
+               "undecided": "background:#fff;box-shadow:inset 0 0 0 1px #9ca3af;border-radius:2px;"
+                            "outline:1px dashed #9ca3af;outline-offset:-1px",
+               "too few reads": "background:#fff;box-shadow:inset 0 0 0 1px #e5e7eb"}
+
+
+def _week_block(v, per_city, cities, clin=None, parent=None):
+    """One column per week, oldest left (2026-10-27): wastewater (samples with
+    coocs / samples, all cities), Europe and World clinical (sequences of the
+    lineage and its descendants / all), then each city's samples."""
+    from datetime import date as _d, timedelta as _td
+    days = sorted({str(a)[:10] for d in per_city.values() for a, _m in ((d or {}).get("timeline") or [])})
+    if not days:
+        return ""
+    def mon(x):
+        y = _d.fromisoformat(x)
+        return (y - _td(days=y.weekday())).isoformat()
+    weeks, w = [], _d.fromisoformat(mon(days[0]))
+    while w.isoformat() <= mon(days[-1]):
+        weeks.append(w.isoformat())
+        w += _td(days=7)
+    head = "".join(f"<th>{_e(_short_date(x))}</th>" for x in weeks)
+    rows = []
+    # wastewater, all cities
+    cells = []
+    for wk in weeks:
+        n = k = 0
+        for c in cities:
+            for a, _m in ((per_city.get(c) or {}).get("timeline") or []):
+                if mon(str(a)[:10]) == wk:
+                    n += 1
+                    k += _sample_kind(per_city[c], str(a)[:10]).startswith("coocs")
+        shade = ("#97c459" if k >= 3 else "#c0dd97" if k == 2 else "#eaf3de" if k == 1 else "")
+        cells.append(f"<td style='{'background:' + shade if shade else 'color:#9ca3af'}' "
+                     f"data-tip='week of {_short_date(wk)}: {k} of {n} samples with its coocs, all cities'>"
+                     f"{k}/{n}</td>" if n else "<td></td>")
+    rows.append(f"<tr><td class='rl'>wastewater, all cities</td>{''.join(cells)}"
+                "<td class='rr'>samples with coocs</td></tr>")
+    # clinical
+    if clin:
+        try:
+            from process.clinical import family, lineage_weeks
+            fam = family(v, parent or {})
+        except Exception:
+            fam = {v}
+        for reg in ("Europe", "World"):
+            lw = lineage_weeks((clin or {}).get(reg), fam, weeks)
+            if lw is None:
+                continue
+            cells = []
+            for i, wk in enumerate(weeks):
+                k, n = lw[wk]
+                late = i >= len(weeks) - 2
+                thin = n < 20
+                sty = (("background:#c0dd97" if k and n and k / n >= .1 else "background:#eaf3de" if k else "")
+                       + (";" + _LOWQ_EMPTY if (thin or late) else ""))
+                tip = (f"week of {_short_date(wk)}: {k} of {n} clinical sequences ({reg}) are {v} or "
+                       "below it" + (" · fewer than 20 sequences" if thin else "")
+                       + (" · still filling in" if late else ""))
+                cells.append(f"<td style='{sty}' data-tip='{_e(tip)}'>{k}/{n}</td>")
+            rows.append(f"<tr><td class='rl'>{reg} clinical</td>{''.join(cells)}"
+                        f"<td class='rr'>{_e(v)} and below / all sequences</td></tr>")
+    # cities
     for c in cities:
         d = per_city.get(c)
         if not d or not d.get("timeline"):
             continue
-        # short numbers instead of a sentence (2026-10-20); the clicked city bold
-        nm = (f"<b class='dn'>{_e(city_name(c))}</b>" if c == sel
-              else f"<span class='dn'>{_e(city_name(c))}</span>")
-        sty = " style='color:#31333f;font-weight:600'" if c == sel else ""
-        txt = f"<span class='dim'{sty}>{_e(_city_line(d))}</span>"
-        lines.append(f"<div class='dl'>{nm}{_cal_line(d, top, low)}{txt}</div>")
-    nat = ""      # the old all-cities marker-vote week line (2026-10-27: the weeks strip replaces it)
+        cells = []
+        for wk in weeks:
+            sq = []
+            for a, _m in d.get("timeline") or []:
+                day = str(a)[:10]
+                if mon(day) != wk:
+                    continue
+                kind = _sample_kind(d, day)
+                pairs = [x[0] for x in (((d.get("pairs") or {}).get("per_date") or {}).get(day) or [])]
+                tip = f"{city_name(c)}, {_short_date(day)}: {kind}" + (f" · {', '.join(pairs[:4])}" if pairs else "")
+                sq.append(f"<i class='sq' style='{_kind_style().get(kind, '')}' data-tip='{_e(tip)}'></i>")
+            cells.append(f"<td>{''.join(sq)}</td>")
+        pev = d.get("pairs") or {}
+        lab = (f"{len(pev.get('positive') or [])}/{len(pev.get('measured') or d.get('timeline'))}"
+               f" · {d.get('n_well') or 0} well covered")
+        rows.append(f"<tr class='sep0'><td class='rl'>{_e(city_name(c))}</td>{''.join(cells)}"
+                    f"<td class='rr'>{_e(lab)}</td></tr>")
+    legend = ("<div class='dim' style='font-size:11px;margin-top:3px'>one square = one sample, hover for "
+              f"date and coocs · <i class='sq' style='{_kind_style()['coocs']}'></i>coocs "
+              f"<i class='sq' style='{_kind_style()['coocs, thin sample']}'></i>on a thin sample "
+              f"<i class='sq' style='{_kind_style()['single mutations only']}'></i>single mutations only "
+              f"<i class='sq' style='{_kind_style()['not seen']}'></i>not seen "
+              f"<i class='sq' style='{_kind_style()['undecided']}'></i>undecided"
+              + (" · striped clinical week = under 20 sequences or still filling in" if clin else "")
+              + "</div>")
+    return (f"<table class='wkt'><tr><th></th>{head}<th></th></tr>{''.join(rows)}</table>" + legend)
+
+
+def _pair_pos(k):
+    ps = []
+    for m in str(k).split("+"):
+        mm = re.match(r"^(\d+)", m)
+        if mm:
+            ps.append(int(mm.group(1)))
+    return (min(ps), max(ps)) if ps else (0, 0)
+
+
+def _cooc_table(per_city, cities):
+    """Its coocs seen, one row per stretch of genome (2026-10-27): pairs with a
+    gap of at most check.stretch_span bases are one stretch (they count once
+    for a sample); cell = samples where a pair of the stretch was seen · best
+    share; the pairs are in the hover."""
+    seen, backbone = {}, set()                 # pair -> city -> {date: share}
+    for c in cities:
+        pev = (per_city.get(c) or {}).get("pairs") or {}
+        # every pair seen on its counted samples; results saved before only
+        # kept the best-read pair of each stretch
+        pd = pev.get("per_date_all") or pev.get("per_date") or {}
+        for day, lst in pd.items():
+            for x in lst or []:
+                k, share = x[0], float(x[1] or 0)
+                if len(x) > 3 and not x[3]:
+                    backbone.add(k)
+                d = seen.setdefault(k, {}).setdefault(c, {})
+                d[day] = max(d.get(day, 0.0), share)
+    if not seen:
+        return ""
+    span = int((_check_cfg_safe() or {}).get("stretch_span", 400))
+    groups, last = [], None
+    for k in sorted(seen, key=_pair_pos):
+        lo, hi = _pair_pos(k)
+        if groups and lo - last <= span:
+            groups[-1].append(k)
+            last = max(last, hi)
+        else:
+            groups.append([k])
+            last = hi
+    def stat(g, c):
+        days = {}
+        for k in g:
+            for day, sh in (seen[k].get(c) or {}).items():
+                days[day] = max(days.get(day, 0.0), sh)
+        return len(days), (max(days.values()) if days else 0.0)
+    order = sorted(groups, key=lambda g: (-sum(stat(g, c)[0] for c in cities), _pair_pos(g[0])))
+    shown, more = order[:8], max(0, len(order) - 8)
+    head = "".join(f"<th>{_e(city_code(c))}</th>" for c in cities)
+    rows = []
+    n_bb = int((_check_cfg_safe() or {}).get("pair_common", 2000))
+    for g in shown:
+        cells = []
+        for c in cities:
+            n, b = stat(g, c)
+            sty = ("background:#97c459" if n >= 3 else "background:#c0dd97" if n == 2 else
+                   "background:#eaf3de" if n == 1 else "color:#d1d5db")
+            cells.append(f"<td style='{sty}'>{f'{n} · {100 * b:.0f} %' if n else '–'}</td>")
+        lo, hi = _pair_pos(g[0])[0], max(_pair_pos(k)[1] for k in g)
+        weak = all(k in backbone for k in g)
+        tip = ("pairs seen in this stretch: " + "; ".join(
+            k.replace("+", " + ") + (" (backbone mutation)" if k in backbone else "") for k in g)
+            + (f" · backbone mutation: inherited from a deep ancestor and carried by more than "
+               f"{n_bb:,} lineages, so weaker evidence; a sample also needs a stretch without one"
+               if any(k in backbone for k in g) else ""))
+        lab = (f"{lo:,}–{hi:,} · {len(g)} {_pl(len(g), 'pair')}"
+               + (" · with a backbone mutation" if weak else ""))
+        best = max(g, key=lambda k: sum(len(v) for v in seen[k].values()))
+        q = quote_plus(best.replace("+", ","))
+        rows.append(f"<tr><td class='rl' style='{'color:#9ca3af' if weak else ''}' data-tip='{_e(tip)}'>"
+                    f"{_e(lab)}</td>{''.join(cells)}<td class='rr'>"
+                    + _ext(_CLIN_WORLD.format(muts=q), "World", f"clinical sequences carrying {best.replace('+', ' and ')}, worldwide")
+                    + " " + _ext(_CLIN_EUROPE.format(muts=q), "Europe", "the same, Europe only")
+                    + "</td></tr>")
+    return ("<div class='dh'>Its coocs seen, by stretch of genome <span class='dim'>(its own mutations "
+            "together on the same reads; pairs closer than a read count once; cell = samples where "
+            "seen · best share; hover a stretch for its pairs)</span></div>"
+            f"<table class='wkt'><tr><th style='text-align:left'>stretch</th>{head}"
+            "<th style='text-align:left'>clinical</th></tr>"
+            f"{''.join(rows)}</table>"
+            + (f"<div class='dim' style='font-size:11px'>+ {more} more {_pl(more, 'stretch')}</div>"
+               if more else ""))
+
+
+def _why_short(x):
+    """why a mutation couldn't be answered, in a few characters (2026-10-27)"""
+    a = _answer_text(x)
+    if "needs 100" in a or "counted reads" in a or not x.get("cov"):
+        return "<100"
+    if "between" in a:
+        return "1–5 %"
+    if "neighbour" in a or "look like" in a:
+        return "link"
+    return "?"
+
+
+def _mut_grid(v, per_city, cities):
+    """Its mutations × city, share of counted reads (2026-10-27); its own
+    first, the ones it inherits tagged; 8 shown, the rest behind 'show all'."""
+    det = {c: {x.get("marker"): x for x in ((per_city.get(c) or {}).get("detail") or [])} for c in cities}
+    marks = list(dict.fromkeys(m for c in cities for m in det[c]))
+    if not marks:
+        return ""
+    any_d = next((d for d in per_city.values() if d and d.get("own") is not None), {}) or {}
+    own, par = set(any_d.get("own") or []), any_d.get("parent") or ""
+    pos = {m: i for i, m in enumerate(marks)}
+    marks.sort(key=lambda m: (0 if (not own or m in own) else 1, pos[m]))
+    head = "".join(f"<th>{_e(city_code(c))}</th>" for c in cities)
+
+    def row(m):
+        tag = ("" if not own else "<span class='dim'> own</span>" if m in own
+               else f"<span class='dim'> {_e(par or 'parent')}'s</span>")
+        cells = []
+        for c in cities:
+            x = det[c].get(m)
+            if not x:
+                cells.append("<td></td>")
+                continue
+            st, f = x.get("status"), x.get("freq")
+            txt = (_why_short(x) if st not in ("present", "absent") or f is None
+                   else f"{100 * f:.0f} %")
+            sty = ("background:#97c459" if st == "present" and (f or 0) >= .2 else
+                   "background:#c0dd97" if st == "present" else
+                   "color:#9ca3af" if st == "absent" else "color:#9ca3af;font-style:italic")
+            cells.append(f"<td style='{sty}' data-tip='{_e(city_name(c))}: {_e(_share_text(x))} · "
+                         f"{_e(_answer_text(x))}'>{txt}</td>")
+        lk = _ext(_clin_link([m]), m, "which lineages carry it in clinical sequences (CoV-Spectrum)")
+        return f"<tr><td class='rl mono'>{lk}{tag}</td>{''.join(cells)}</tr>"
+    first, rest = marks[:8], marks[8:]
+    t1 = f"<table class='wkt'><tr><th></th>{head}</tr>{''.join(row(m) for m in first)}</table>"
+    t2 = (f"<details><summary class='dim' style='font-size:11.5px;cursor:pointer'>show all "
+          f"{len(marks)}</summary><table class='wkt'><tr><th></th>{head}</tr>"
+          f"{''.join(row(m) for m in rest)}</table></details>" if rest else "")
+    return ("<div class='dh'>Its mutations, share of counted reads <span class='dim'>(couldn't "
+            "answer: &lt;100 = too few counted reads · 1–5 % = in between · link = its reads don't "
+            "look like the lineage nearby; hover for reads)</span></div>" + t1 + t2)
+
+
+def _detail_row(gid, v, per_city, cities, sel, n_cols, found=False, clin=None, parent=None):
+    """The row's details (2026-10-27, reworked as mocked): links, one column
+    per week (wastewater, Europe / World clinical, each city's samples), its
+    coocs seen per city, its mutations × city."""
     ds = per_city.get(sel) or {}
-    mk_rows = []
-    import statistics
-    for x in ds.get("detail") or []:
-        m = x.get("marker")
-        shares = [y.get("freq") for dd in per_city.values() for y in (dd.get("detail") or [])
-                  if y.get("marker") == m and y.get("freq") is not None]
-        med = f"{100 * statistics.median(shares):.0f} %" if shares else "–"
-        # a mutation its parent carries too (2026-10-23): "seen" needs one
-        # that isn't, when those are measured
-        inh = ("" if ds.get("own") is None or m in (ds.get("own") or [])
-               else f"<span class='dim' data-tip='{_e(ds.get('parent') or 'its parent')} carries it "
-                    f"too: seen alone it can be {_e(ds.get('parent') or 'the parent')}'s reads'>"
-                    f" · {_e(ds.get('parent') or 'parent')}'s too</span>")
-        mk_rows.append(f"<tr><td class='mono'>{_ext(_clin_link([m]), m, 'which lineages carry it in clinical sequences (CoV-Spectrum)')}{inh}</td>"
-                       f"<td>{_e(_share_text(x))}</td><td>{_e(_answer_text(x))}</td>"
-                       f"<td data-tip='{_e(_together_tip(v, x))}'>{_e(_together_text(x))}</td>"
-                       f"<td>{med}</td></tr>")
-    mk = ""
-    if mk_rows:
-        c = _check_cfg_safe()
-        th = lambda t, tip: f"<th data-tip='{_e(tip)}'>{_e(t)}</th>"          # noqa: E731
-        mk = ("<table class='mk'><tr>"
-              + th("its own mutation", "a mutation of this lineage that few other lineages carry "
-                   "(at most 5 outside its family); click for which lineages carry it in "
-                   "clinical sequences")
-              + th(f"{city_name(sel)}: share of reads",
-                   "share of the reads at this position that carry the mutation, all samples "
-                   f"of the dates counted, each at most {c['cov_factor']:g} × its median depth "
-                   f"and at most {c['cap_reads']:,} reads; the total in brackets when that cut "
-                   "reads")
-              + th("answer", f"seen: ≥ {c['present_freq'] * 100:g} % (and its reads look like "
-                   f"the lineage nearby) · not seen: < {c['absent_freq'] * 100:g} % · couldn't "
-                   f"answer: under {c['min_cov']} counted reads, between "
-                   f"{c['absent_freq'] * 100:g} and {c['present_freq'] * 100:g} %, or reads that "
-                   "don't look like the lineage nearby")
-              + th("reads together", "of the reads carrying the mutation that also reach a "
-                   "neighbouring position where the lineage has its own mutation: the share "
-                   f"that carry the lineage's version there too (needs ≥ {c['link_min'] * 100:g} % "
-                   f"of ≥ {c['min_link']} reads)")
-              + th("typical share, 6 cities", "the middle value of this mutation's share over "
-                   "the six cities: high or low everywhere means it's the mutation, not the city")
-              + "</tr>" + "".join(mk_rows) + "</table>")
-    # its mutations on the samples with its coocs, all cities (2026-10-27): the
-    # same lines for panel and found lineages, in the details only
+    own = [m for m in (next((d.get("own") for d in per_city.values() if d and d.get("own")), None)
+                       or [x.get("marker") for x in ds.get("detail") or []]) if m]
+    links = ("<div style='font-size:12.5px;margin-bottom:6px'>"
+             + (_clin_links(own[:12]) + " · " if own else "")
+             + _ext(_ww_link(v, sel), f"wastewater, {city_name(sel)} (GenSpectrum)",
+                    "mutation heatmaps of the lineage and its sublineages")
+             + "<span class='dim'> · each mutation per week: Signal over time (Look-up)</span></div>")
     al, ct = _absent_line(per_city), _counted_text(per_city, cities)
-    if al or ct:
-        mk = ("<div style='font-size:12.5px;margin:6px 0'><b>All cities</b> · "
-              + " · ".join(_e(x) for x in (ct, al) if x) + "</div>") + mk
-    pev = ds.get("pairs") or {}
-    if pev.get("positive"):
-        mk += ("<div style='font-size:12.5px;margin-top:6px'><b>Specific co-occurrences in "
-               f"{_e(city_name(sel))}</b> <span class='dim'>(mutations together on the same reads, "
-               "in combinations only its family has; a sample counts with 2 or more stretches "
-               f"of genome)</span>: {_e(_pairs_text(pev, limit=8))}</div>")
-    body = ((("<div class='dim' style='font-size:12px'>All cities: one square per week, "
-              "oldest left · striped = fewer than 2 well-covered samples that week</div>" + nat)
-             if nat else "")
-            + "<div class='dim' style='font-size:12px'>Samples per city, newest right · striped = "
-            "low coverage (counts less) · green = seen on that sample alone · ⋯ = older "
-            "low-coverage samples without it, not shown</div>" + "".join(lines) + mk
-            + "<div style='font-size:12.5px;margin-top:6px'>"
-            + _ext(_ww_link(v, sel), f"{v} in {city_name(sel)} wastewater (GenSpectrum)",
-                   "mutation heatmaps of the lineage and its sublineages")
-            + ((" · " + _ext(_clin_link([x['marker'] for x in ds.get('detail') or []]),
-                             "its own mutations together in clinical data (CoV-Spectrum)",
-                             "sequences carrying all of them: which lineages"))
-               if ds.get("detail") else "")
-            + "<span class='dim'> · each mutation per week: Signal over time (Look-up)</span></div>")
+    allc = (("<div style='font-size:12.5px;margin:6px 0;white-space:normal;max-width:900px'><b>All cities</b> · "
+             + " · ".join(_e(x) for x in (ct, al) if x) + "</div>") if (al or ct) else "")
+    body = (links + _week_block(v, per_city, cities, clin, parent) + allc
+            + _cooc_table(per_city, cities) + _mut_grid(v, per_city, cities))
     return f"<tr class='dt g-{gid} hid'><td colspan='{n_cols}'>{body}</td></tr>"
 
 
@@ -1255,10 +1461,12 @@ def _panel_overview(per_city, cities, wk=None):
     if rs and wk["weeks"][-1]["status"] != "confirmed":
         note = (f" · not confirmed since {_short_date(rs['last_confirmed'])}"
                 if rs.get("last_confirmed") else " · not confirmed")
-        tip = ("not confirmed in the 4 weeks up to the newest Sunday (≥ 2 well-covered cities "
-               "with its coocs, ≥ 2 weeks); information only: a lineage on its way out keeps "
-               "its place in the panel until you remove it")
-    tip = (f"seen in {len(seen)} of {len(meas)} cities{where}" + (" · " + tip if tip else ""))
+        tip = (f"not confirmed in the 4 weeks to {_short_date(wk['weeks'][-1]['end'])}"
+               + (f" (last confirmed {_short_date(rs['last_confirmed'])})" if rs.get("last_confirmed") else "")
+               + " · information only")
+    where_all = ", ".join(_tag(c) for c in seen)
+    tip = (f"In panel: seen in {len(seen)} of {len(meas)} cities"
+           + (f" ({where_all})" if where_all else "") + ("\n" + tip if tip else ""))
     return (_ovw(_ovb(f"<b style='color:#1f2328'>In panel</b> · {len(seen)} of "
                       f"{len(meas)}{note}"), _weeks_strip(wk)),
             tip, GREEN if seen else "#d1d5db", "#15803d" if seen else "#6b7280", "filled")
@@ -1438,6 +1646,42 @@ def _counted_text(chk, cities):
             + " · ".join(f"{_short_date(d)} {', '.join(sorted(cs))}" for d, cs in sorted(by_day.items())))
 
 
+def _short_hover(f, cities, rs, wk, why):
+    """Three short lines for a found row's hover (2026-10-27): the status and
+    its weeks, where it was seen in the chosen dates, and absent mutations
+    if any; everything else is in the details."""
+    weeks = (wk or {}).get("weeks") or []
+    conf = [w["end"] for w in weeks if w["status"] == "confirmed"]
+    if rs and rs["kind"] == "add":
+        last = [_short_date(e) for e in conf[-rs["in_a_row"]:]]
+        l1 = f"Add to panel: confirmed {rs['in_a_row']} weeks in a row ({', '.join(last)})"
+    elif rs and rs["kind"] == "fading":
+        l1 = f"Fading: last confirmed {_short_date(rs['last_confirmed'])}, not since"
+    elif rs and rs["kind"] == "earlier":
+        l1 = (f"Earlier only: last seen {_short_date(rs['last_found'])}, never confirmed"
+              if rs.get("last_found") else "Earlier only: never confirmed")
+    elif rs and weeks and weeks[-1]["status"] == "confirmed":
+        last = [_short_date(e) for e in conf[-rs["in_a_row"]:]]
+        l1 = (f"Watch: confirmed {rs['in_a_row']} of the {rs['need']} weeks needed "
+              f"({', '.join(last)})")
+    else:
+        l1 = (f"Watch: not confirmed in the 4 weeks to {_short_date(weeks[-1]['end'])} · "
+              f"{_short_reason(f, cities)}" if weeks else f"Watch: {_short_reason(f, cities)}")
+    lines = [l1, f"in the chosen dates: {why}" if why else ""]
+    pc = f.get("per_city") or {}
+    chk = {c: (pc.get(c) or {}).get("check") for c in cities if (pc.get(c) or {}).get("check")}
+    try:
+        from process.national import grade
+        g = grade(chk) if chk else None
+    except Exception:
+        g = None
+    miss = (g or {}).get("missing") or []
+    if miss:
+        lines.append(f"{len(miss)} of its {g.get('n_measured', 0)} mutations absent on its "
+                     f"samples: {', '.join(miss[:4])}{' …' if len(miss) > 4 else ''} → details")
+    return "\n".join(x for x in lines if x)
+
+
 def _ovw(label, strip):
     """status left, weeks squares right-aligned in the overview cell, so the
     squares line up like a column (2026-10-27)"""
@@ -1581,13 +1825,12 @@ def _finding_overview(v, f, cities, current_panel, has_children=False):
         # sentence goes to the hover
         conf, why, tip = _new_grade(f, cities)
         wk = f.get("weekly")
-        hover = (f"suggested by the reads, not in the panel · {why} · {tip}"
-                 + (" · " + _weeks_text(wk) if wk else ""))
         try:
             from process.national import row_status
             rs = row_status(wk)
         except Exception:
             rs = None
+        hover = _short_hover(f, cities, rs, wk, why)
         strip = _weeks_strip(wk)
         if f.get("add_ready") or (rs and rs["kind"] == "add"):
             btn = ("<span class='added'>added · re-run needed</span>" if v in current_panel
@@ -1595,18 +1838,16 @@ def _finding_overview(v, f, cities, current_panel, has_children=False):
             n = (wk or {}).get("in_a_row", 0)
             return (kind, _ovw(_ovb(f"<b>Add</b> · {n} weeks in a row{btn}",
                                     "background:#fef2f2;color:#b91c1c;"), strip),
-                    "add to panel: " + hover, RED, RED, "filled")
+                    hover, RED, RED, "filled")
         if rs and rs["kind"] == "fading":
             return (kind, _ovw(_ovb(f"<b>Fading</b> · last confirmed {_e(_short_date(rs['last_confirmed']))}",
                                     "color:#6b7280;box-shadow:inset 0 0 0 1px #e5e7eb;"), strip),
-                    hover + " · fading: confirmed in an earlier week of the chosen dates, not in the "
-                    "newest; no + Add while it isn't confirmed again", "#d1d5db", "#6b7280", "ring")
+                    hover, "#d1d5db", "#6b7280", "ring")
         if rs and rs["kind"] == "earlier":
             return (kind, _ovw(_ovb(f"<b>Earlier only</b> · last seen "
                                     f"{_e(_short_date(rs['last_found'])) if rs.get('last_found') else '–'}",
                                     "color:#6b7280;box-shadow:inset 0 0 0 1px #e5e7eb;"), strip),
-                    hover + " · earlier only: seen in the chosen dates, never confirmed, and not "
-                    "in the newest 4 weeks", "#d1d5db", "#6b7280", "ring")
+                    hover, "#d1d5db", "#6b7280", "ring")
         # confirmed in the newest weeks, not yet in a row: say how far it got
         reason = (f"{rs['in_a_row']} of {rs['need']} weeks"
                   if rs and (wk or {}).get("weeks") and wk["weeks"][-1]["status"] == "confirmed"
@@ -1948,7 +2189,7 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
           novel=(), broad=(), novel_rest=None, near=None, near_min_days=2,
           novel_hotspot=None, data_until=None, novel_info=None,
           broad_total=None, named_hidden=0, quality=None, panel_weekly=None,
-          dates=None) -> str:
+          dates=None, clinical=None, pango_parent=None) -> str:
     """cities: city names in column order; sel: the chosen city.
     rows: components.abundance_cooc_tree.tree_rows(...).
     verdicts: {city: {variant: {state, reason, n_present, n_measured, n_markers}}}.
@@ -2030,8 +2271,8 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
             tint = None                     # no row tint (2026-10-20)
             dgid = "det-" + re.sub(r"[^A-Za-z0-9]", "_", v)
             cells = _panel_cells(v, pc, cities, sel)
-            ov = f"<span data-tip='{_e(ovtip)}'>{ov}</span>" if ovtip else ov
-            drow = (_detail_row(dgid, v, pc, cities, sel, n_cols)
+            ov = f"<span data-tip='{_e(ovtip).replace(chr(10), '&#10;')}'>{ov}</span>" if ovtip else ov
+            drow = (_detail_row(dgid, v, pc, cities, sel, n_cols, clin=clinical, parent=pango_parent)
                     if any((x or {}).get("timeline") for x in pc.values()) else "")
             ev = _det_link(dgid) if drow else ""
         elif kind == "finding" and v in findings:
@@ -2048,7 +2289,7 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
                 folded.append(v)
                 r = dict(r, depth=0, guides=[], last=True, has_children=False)
             fam_desc = f.get("descendants") or []
-            tip = f"{v}: suggested by the reads, not in the panel" + (f" · {ovtip}" if ovtip else "")
+            tip = f"{v}: suggested by the reads, not in the panel"
             name = f"<span class='nm' style='color:{ncol}'>{_e(v)}</span>{chips}"
             tc = _tree_cell(r, col, dk, name, tip)
             tint = None                     # no row tint (2026-10-20)
@@ -2077,11 +2318,12 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
                        else f"≈ {100 * its[0]:.1f} % of reads")
             # "itself" (how much of it is left after the lineages below it) goes
             # into the overview's hover; the details get it in part B
-            if its:
+            if its and fkind == "covered":
                 ovtip = (ovtip + " · " if ovtip else "") + (
                     f"{sname}: itself {_it} after the lineages below it — {_calc}")
-            ov = f"<span data-tip='{_e(ovtip)}'>{ov}</span>" if ovtip else ov
-            drow = (_detail_row(dgid, v, _chk, cities, sel, n_cols, found=True)
+            ov = f"<span data-tip='{_e(ovtip).replace(chr(10), '&#10;')}'>{ov}</span>" if ovtip else ov
+            drow = (_detail_row(dgid, v, _chk, cities, sel, n_cols, found=True, clin=clinical,
+                                parent=pango_parent)
                     if any(x.get("timeline") for x in _chk.values()) else "")
             ev = _det_link(dgid) if drow else ""
         else:  # tracked, not selected

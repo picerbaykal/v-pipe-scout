@@ -104,7 +104,8 @@ def test_row_says_confirmed_or_early_and_why():
     wk1 = {"per_city": {c: {"days": 3, "check": _city(W1)} for c in C}, "addable": True}
     kind, ov, tip, _dot, _n, dk = vt._finding_overview("RV.2.1.1", wk1, C, [])
     assert "Watch" in ov and "seen in GE, ZH, 1 of 1 week" in tip and dk == "ring"
-    assert "and 2 weeks" in tip
+    # 2026-10-27: short hover, the rule text is in the legend and the docs
+    assert "1 week" in tip and tip.count("\n") <= 2
     one = {"per_city": {C[1]: {"days": 3, "check": _city(W1 + W2)},
                         C[0]: {"days": 3, "check": _city(W1 + W2, share=0.0)}},
            "addable": True}
