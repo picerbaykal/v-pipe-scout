@@ -1239,12 +1239,38 @@ def _panel_overview(per_city, cities):
             "", GREEN if seen else "#d1d5db", "#15803d" if seen else "#6b7280", "filled")
 
 
+def _cell_word(d):
+    """A city's cell in words (2026-10-27), as the legend names the colours."""
+    d = d or {}
+    pev = d.get("pairs") or {}
+    if pev.get("positive"):
+        return "coocs" if pev.get("positive_well") else "coocs on thin samples"
+    sm = d.get("state_markers") or d.get("state") or (_state(d) if d else None)
+    if d.get("own_missing"):
+        return f"only {d.get('parent') or 'its parent'}'s mutations"
+    if pev.get("measured") and sm == "present":
+        return "single mutations only"
+    if sm == "absent":
+        return "not seen"
+    return "undecided" if pev.get("measured") or sm in ("mixed", "present") else "too few reads"
+
+
 def _finding_status(v, f, cities, has_children=False):
-    """'new' / 'possible' / 'covered' / 'named' / 'folded' for a lineage the
-    reads suggested (a deep scan find), and the reason for 'possible'.
-    folded: its own mutations say not seen in every city where the reads
-    suggested it, and no city says seen or unclear (a tie) — a leaf only, so
-    no branch loses its children (2026-10-20)."""
+    """'new' / 'covered' / 'named' / 'folded' / 'suggested' for a lineage the
+    reads suggested (a deep scan find), and the reason for folded / suggested
+    (2026-10-27).
+
+    new        its own coocs in at least one city (the cell's rule,
+               process.national.city_seen): Watch, or Add to panel
+    folded     no coocs of its own anywhere — or coocs on a single sample with
+               more than half of its measured mutations clearly missing pooled
+               (BA.3.2 Genève July 32 of 32, XFW.1.1.1 7 of 9): listed in one
+               closed line under the tree, with the reason
+    suggested  the same, but other rows hang below it in the tree: stays in
+               place, grey, so no branch loses its children
+    Until 2026-10-27 "new" followed + Add (the marker vote) and the rest was
+    "possible" or, when its own mutations were not seen wherever the reads
+    suggested it, "folded"."""
     st = f.get("status")
     if st == "family":
         return "covered", ""
@@ -1252,41 +1278,39 @@ def _finding_status(v, f, cities, has_children=False):
         return "named", ""
     pc = f.get("per_city") or {}
     chk = {c: (pc.get(c) or {}).get("check") for c in cities if (pc.get(c) or {}).get("check")}
-    state = {c: _state(d) for c, d in chk.items()}
-    seen = [c for c in cities if state.get(c) == "present"]
-    tie = [c for c in cities if state.get(c) == "mixed"]
-    few = [c for c in cities if state.get(c) == "few"]
+    seen = [c for c in cities if _city_seen(chk.get(c) or {})]
+    n_pos = sum(len(((chk.get(c) or {}).get("pairs") or {}).get("positive") or []) for c in seen)
+    if seen:
+        g = None
+        try:
+            from process.national import grade
+            g = grade(chk)
+        except Exception:
+            g = None
+        g = g or {}
+        miss, n_meas = len(g.get("missing") or []), int(g.get("n_measured") or 0)
+        if n_pos == 1 and n_meas and miss > n_meas / 2:
+            why = (f"coocs on 1 sample in {city_code(seen[0])} · {miss} of {n_meas} "
+                   "mutations missing")
+            return ("suggested" if has_children else "folded"), why
+        return "new", ""
     sugg = {c: int((pc.get(c) or {}).get("days") or 0) for c in cities
             if not (pc.get(c) or {}).get("xcheck") and int((pc.get(c) or {}).get("days") or 0) > 0}
-    if f.get("addable"):
-        return "new", ""
-    if (not seen and not tie and sugg and not has_children
-            and all(state.get(c) == "absent" for c in sugg)):
-        return "folded", ""
-    ed = _num()["ed"]
-    one_sample = sugg and max(sugg.values()) < ed and len(sugg) < 2
-    code = lambda cs: ", ".join(city_code(c) for c in cs)                    # noqa: E731
     top = max(sugg, key=sugg.get) if sugg else None
-    sug_txt = (f"suggested {sugg[top]}× in {city_code(top)}" if top and not one_sample else
-               "suggested on 1 sample only" if one_sample else "")
-    # every seen mutation is one it shares with its parent, its own not
-    # seen (process.cooc.check_verdicts, own_missing, 2026-10-23)
-    own_miss = [c for c in tie if (chk.get(c) or {}).get("own_missing")]
-    if seen:
-        why = f"seen in {code(seen)}"
-    elif own_miss:
-        par = (chk[own_miss[0]] or {}).get("parent") or "its parent"
-        why = f"in {code(own_miss)} only mutations {par} carries too are seen"
-    elif tie:
-        why = f"unclear in {code(tie)}"
-    elif few:
-        p = _vote_counts(chk[few[0]])[1]
-        why = f"{p} of its own mutations seen in {city_code(few[0])} (needs {_min_present()})"
-    elif top and state.get(top) not in ("absent",):
-        why = f"couldn't check in {city_code(top)}"
-    else:
-        why = "its own mutations not seen"
-    return "possible", " · ".join(x for x in (why, sug_txt) if x)
+    parts = []
+    if top:
+        n = sugg[top]
+        parts.append((f"suggested {n}× in {city_code(top)}" if n > 1
+                      else f"suggested on 1 sample in {city_code(top)}")
+                     + f" · {_cell_word(chk.get(top))}{' there' if _cell_word(chk.get(top)) == 'not seen' else ''}")
+    # one more city that isn't a plain "not seen", if any
+    other = [c for c in cities if c != top and c in chk
+             and _cell_word(chk[c]) not in ("not seen", "too few reads")]
+    if other:
+        parts.append(f"{_cell_word(chk[other[0]])} in {city_code(other[0])}")
+    if not parts:
+        parts.append("its own mutations not seen anywhere" if chk else "no check result")
+    return ("suggested" if has_children else "folded"), " · ".join(parts)
 
 
 def _weeks_text(wk):
@@ -1429,18 +1453,12 @@ def _finding_overview(v, f, cities, current_panel, has_children=False):
                                "background:#fef2f2;color:#b91c1c;"), hover, RED, RED, "filled")
         return (kind, _ovb(f"<b>Watch</b> <span style='color:#4b5563'>· {_e(_short_reason(f, cities))}</span>",
                            "background:#eff6ff;color:#1d4ed8;"), hover, RED, RED, "ring")
-    if kind == "folded":
-        sugg = [c for c in cities if not (pc.get(c) or {}).get("xcheck")
-                and int((pc.get(c) or {}).get("days") or 0) > 0]
-        where = ", ".join(city_code(c) for c in sugg)
-        return (kind, _ovb(f"<b>Not supported</b> · suggested in {_e(where)}, its own "
-                           "mutations not seen there", "color:#9ca3af;"),
-                "the reads suggested it, but its own mutations say not seen in every city "
-                "where they did, and no city sees it", "#d1d5db", "#9ca3af", "ring")
-    return (kind, _ovb(f"<b style='color:#1f2328'>Possible</b> · {_e(why)}",
-                       "color:#4b5563;box-shadow:inset 0 0 0 1px #e5e7eb;"),
-            "suggested by the reads, not in the panel; its own mutations only partly confirm it",
-            "#9ca3af", "#4b5563", "ring")
+    if kind in ("folded", "suggested"):
+        # no coocs of its own (2026-10-27): grey, the reason in the cells' words
+        return (kind, _ovb(f"<b>Suggested</b> · {_e(why)}", "color:#6b7280;"),
+                "the deep scan suggested this name, but no city has coocs of its own mutations "
+                "(or only one sample, with most of its mutations missing): not counted; if it is "
+                "real, the next batch moves it up", "#d1d5db", "#9ca3af", "ring")
 
 
 def _panel_evidence(per_city, sel, v="", gid="", in_panel=False):
@@ -1857,7 +1875,7 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
             ev = _det_link(dgid) if drow else ""
         elif kind == "finding" and v in findings:
             f = findings[v]
-            # new / possible / covered, from all cities (2026-10-20); a
+            # new / covered / suggested, from all cities (2026-10-20); a
             # suggestion its own mutations don't support where the reads
             # suggested it is folded into one line under the tree
             fkind, ov, ovtip, col, ncol, dk = _finding_overview(
@@ -1961,12 +1979,12 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
 
     if folded:
         body.append(
-            f"<tr class='grp' data-grp='fold'><td colspan='{n_cols}'><span data-tip='Suggested "
-            "by the reads in some city, but their own mutations say not seen there, and no city "
-            "sees them or is unclear. Leaves of the tree only. Click to show their rows.'>"
-            f"<span class='arr'>▸</span>{len(folded)} {_pl(len(folded), 'suggestion')} not "
-            f"supported by {'its' if len(folded) == 1 else 'their'} own mutations where the "
-            f"reads suggested {'it' if len(folded) == 1 else 'them'}: "
+            f"<tr class='grp' data-grp='fold'><td colspan='{n_cols}'><span data-tip='Names the deep "
+            "scan suggested that no city backs with coocs of their own mutations (or only one "
+            "sample, with most of its mutations missing). Not counted; if one is real, the next "
+            "batch moves it into the tree. Click to show their rows.'>"
+            f"<span class='arr'>▸</span>{len(folded)} more {_pl(len(folded), 'name')} the deep "
+            f"scan suggested, without coocs of {'its' if len(folded) == 1 else 'their'} own: "
             f"{_e(', '.join(folded))}</span></td></tr>")
         body += folded_rows
 
@@ -2120,7 +2138,8 @@ _LEGEND_ROWS = (
           "each Sunday: all cities pooled seen, ≥ 2 well-covered cities, ≥ 2 weeks, ≤ 10 % of "
           "its mutations missing) · + Add")
     + _ld(f"border:2px solid {RED}", "watch: found, not ready to add; the row says why")
-    + _ld("border:2px solid #9ca3af", "possible: suggested, only partly seen")
+    + _ld("border:2px solid #9ca3af", "suggested: a name from the deep scan without coocs of "
+          "its own (most are listed in one closed line under the tree)")
     + _ld("border:2px solid #d1d5db", "covered: its own mutations are on a lineage below it")
     + _ld(f"border:2px solid {TRACKED}", "OT, not selected")
     + "<span class='i'>the dots and the overview column cover all cities and don't change when "
@@ -2150,7 +2169,7 @@ SHORT_LEGEND = (
     + _ld(f"background:{AMBER}", "in panel, not seen in any city")
     + _ld(f"background:{RED}", "add to panel")
     + _ld(f"border:2px solid {RED}", "watch")
-    + _ld("border:2px solid #9ca3af", "possible / covered")
+    + _ld("border:2px solid #d1d5db", "covered / suggested")
     + "<span class='dim'>click a cell for its details · ⓘ more: “How to read this page” above the tabs</span>"
     + "</div></div>")
 

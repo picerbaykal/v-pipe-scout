@@ -161,24 +161,23 @@ def test_panel_overview_seen_not_seen_cant_check():
     assert "can't be checked" in html and dot != vt.AMBER       # amber means one thing only
 
 
-def test_suggestion_new_possible_folded():
-    # RV.2.1.1: seen in BE and ZH, but suggested on 1 sample only -> possible
+def test_suggestion_new_or_folded():
+    # 2026-10-27: "new" (Watch / Add) needs a city seen by the cell's rule
+    # (results without pair counts: the marker vote); everything else is
+    # folded under the tree with the reason in the cells' words
     rv = _find({"BE": (1, (4, 0, 2), False), "ZH": (0, (5, 1), True), "GE": (0, (1, 3, 2), True)})
-    assert vt._finding_status("RV.2.1.1", rv, CITIES) == (
-        "possible", "seen in BE, ZH · suggested on 1 sample only")
-    # RF.5.4: suggested 5x in ZH, where its one mutation couldn't answer -> stays
+    assert vt._finding_status("RV.2.1.1", rv, CITIES) == ("new", "")
     rf = _find({"ZH": (5, (0, 0, 1), False), "BS": (0, (0, 1), True), "GE": (0, (0, 1), True)})
-    assert vt._finding_status("RF.5.4", rf, CITIES) == (
-        "possible", "couldn't check in ZH · suggested 5× in ZH")
-    # ST.1: not seen where suggested (BS), but a tie in TI -> stays
+    assert vt._finding_status("RF.5.4", rf, CITIES) == ("folded", "suggested 5× in ZH · too few reads")
     st = _find({"BS": (2, (0, 4, 1), False), "TI": (0, (1, 1, 3), True), "GE": (0, (0, 5), True)})
-    assert vt._finding_status("ST.1", st, CITIES) == ("possible", "unclear in TI · suggested 2× in BS")
-    # PJ.2.1: not seen where suggested, not seen or unclear anywhere -> folded
+    assert vt._finding_status("ST.1", st, CITIES) == (
+        "folded", "suggested 2× in BS · not seen there · undecided in TI")
     pj = _find({"BE": (1, (0, 13, 6), False), "GE": (0, (3, 15, 1), True), "ZH": (0, (0, 19), True)})
-    assert vt._finding_status("PJ.2.1", pj, CITIES)[0] == "folded"
-    assert vt._finding_status("PJ.2.1", pj, CITIES, has_children=True)[0] == "possible"
-    # + Add -> new; family -> covered
-    assert vt._finding_status("PQ.16.1.1", _find({}, addable=True), CITIES)[0] == "new"
+    assert vt._finding_status("PJ.2.1", pj, CITIES) == ("folded", "suggested on 1 sample in BE · not seen there")
+    # rows hang below it: stays in place, grey
+    assert vt._finding_status("PJ.2.1", pj, CITIES, has_children=True)[0] == "suggested"
+    # the old + Add flag alone no longer makes it new; family -> covered
+    assert vt._finding_status("PQ.16.1.1", _find({}, addable=True), CITIES) == ("folded", "no check result")
     assert vt._finding_status("SW.2", _find({}, status="family"), CITIES)[0] == "covered"
 
 
@@ -193,11 +192,11 @@ def test_table_has_an_overview_column_and_folds_unsupported_suggestions():
     html = vt.build(CITIES, CITIES[3], rows, ver, findings, ["LP.8"])
     assert "Overview · all cities" in html
     assert "not seen in any city" in html                      # LP.8, amber
-    assert "Possible" in html and "suggested on 1 sample only" in html   # RV.2.1.1
-    assert "1 suggestion not supported by its own mutations" in html and "PJ.2.1" in html
+    assert "<b>Watch</b>" in html                              # RV.2.1.1
+    assert "1 more name the deep scan suggested, without coocs of its own" in html
     # PJ.2.1 keeps a row, closed in the group the line opens (2026-10-21)
     assert "data-grp='fold'" in html and "class='g-fold hid'" in html
-    assert "Not supported" in html and "suggested in BE" in html
+    assert "<b>Suggested</b>" in html and "suggested on 1 sample in BE · not seen there" in html
 
 
 # ── the details' words (2026-10-20) ──────────────────────────────────────

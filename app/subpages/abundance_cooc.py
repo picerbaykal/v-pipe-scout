@@ -2490,7 +2490,8 @@ def app():
                         return {"status": _status if _status != "confirmed" or _ok else "1 day",
                                 "per_city": _pc, "grade": _gr, "weekly": _wk,
                                 "addable": _add,
-                                "add_ready": bool(_add and _wk and _wk.get("ready"))}
+                                # 2026-10-27: the weeks decide, not the marker vote
+                                "add_ready": bool(_status != "named" and _wk and _wk.get("ready"))}
 
                     _findings = {}
                     if not _scan_running:

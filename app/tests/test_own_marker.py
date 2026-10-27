@@ -81,6 +81,7 @@ def test_the_row_says_why():
     f = {"status": "confirmed", "addable": False,
          "per_city": {"Zürich (ZH)": {"days": 3, "check": r}}}
     kind, why = vt._finding_status("SB.1.1", f, ["Zürich (ZH)"])
-    assert kind == "possible" and "in ZH only mutations SB.1 carries too are seen" in why
+    # no coocs of its own: folded under the tree, the reason in cell words (2026-10-27)
+    assert kind == "folded" and why == "suggested 3× in ZH · only SB.1's mutations"
     tip = vt._cell_tip("SB.1.1", "Zürich (ZH)", r)
     assert "the mutation new in SB.1.1 (1501A) not seen" in tip
