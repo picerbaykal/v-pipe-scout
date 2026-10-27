@@ -395,6 +395,13 @@ CHECK_DEFAULTS = {
     "pair_span": 300,        # specific pairs: two of a lineage's mutations at most
                              #   this many bases apart, so one read can carry both
                              #   (process.variant_explorer.marker_blocks uses 300)
+    "stretch_span": 400,     # seen pairs with a gap of at most this many bases count as
+                             #   one stretch (they can sit on one read, one jackpot).
+                             #   diag_span.py, Zürich Sep 2026, 1.67 M reads on a 10-base
+                             #   grid: read span median 330, 99 % 360, max 370 (+ up to
+                             #   20); 70 % of reads span more than 300. With 300 (until
+                             #   2026-10-27) two pairs 300-390 bases apart could be one
+                             #   read and still count as two stretches.
     # Part B — the vote (UI; a streamlit restart is enough)
     "min_cov": 100,          # reads covering a marker (whole window) to measure it
     "present_freq": 0.05,    # present: >= this share of covering reads carry it ...
@@ -734,9 +741,10 @@ def pair_evidence(per_date: Dict[str, Dict[str, List[float]]],
                   common: Optional[Set[str]] = None) -> Optional[dict]:
     """Specific co-occurrences seen in one city (2026-10-26, step 3): the
     pairs accumulate_check_stats counted ("a+b" keys), grouped into fragments:
-    seen pairs closer than check.pair_span bases, chained, could sit on one
-    read and count once (2026-10-26; before, grouping by where each pair
-    started split one fragment in two: Lugano TA.1 21 and 29 Sep).
+    seen pairs with a gap of at most check.stretch_span bases, chained, could
+    sit on one read and count once (2026-10-26; before, grouping by where each
+    pair started split one fragment in two: Lugano TA.1 21 and 29 Sep;
+    2026-10-27 the gap 300 -> 400, the reads' measured span).
 
     A pair is seen on a sample when >= check.min_cov reads cover both
     positions, >= check.present_freq of them carry both, and at least
@@ -765,7 +773,7 @@ def pair_evidence(per_date: Dict[str, Dict[str, List[float]]],
     no such test (no pango data)."""
     from process.sample_qc import well_covered
     c = _check_cfg(cfg)
-    span = int(c.get("pair_span", 300))
+    span = int(c.get("stretch_span", 400))
     keys = sorted({k for cells in (per_date or {}).values() for k in (cells or {}) if "+" in k},
                   key=lambda k: (int(_SUB_RE.match(k.split("+")[0]).group(1))
                                  if _SUB_RE.match(k.split("+")[0]) else 0))
@@ -780,8 +788,8 @@ def pair_evidence(per_date: Dict[str, Dict[str, List[float]]],
         return (min(out), max(out)) if out else (0, 0)
 
     def _fragments(pairs):
-        """Seen pairs -> groups that one read could join: pairs closer than
-        pair_span bases, chained (Lugano TA.1, 21 Sep: 23277A+23401T and
+        """Seen pairs -> groups that one read could join: a gap of at most
+        stretch_span bases, chained (Lugano TA.1, 21 Sep: 23277A+23401T and
         23401T+23423T are one fragment, not two; 2026-10-26)."""
         items = sorted(pairs, key=lambda kv: _pos(kv[0]))
         groups, last_end = [], None
