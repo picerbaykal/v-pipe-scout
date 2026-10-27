@@ -228,4 +228,5 @@ def family_rows(findings: dict, scan_res_all: dict, cr_all: dict,
         if known and all(v < pf for v in known):
             fx["status"] = "family"
             fx["addable"] = False
+            fx["add_ready"] = False
             fx["descendants"] = sorted(below)

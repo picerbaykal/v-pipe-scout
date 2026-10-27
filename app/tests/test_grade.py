@@ -74,18 +74,22 @@ def test_row_says_confirmed_or_early_and_why():
     vt = _vt()
     C = ["Genève (GE)", "Zürich (ZH)"]
     two = {"per_city": {c: {"days": 3, "check": _city(W1 + W2)} for c in C}, "addable": True}
-    kind, ov, _tip, dot, _n, dk = vt._finding_overview("TA.1", two, C, [])
-    assert kind == "new" and "New · confirmed" in ov and "seen in GE, ZH, 2 of 2 weeks" in ov
-    assert dk == "filled"
+    # confirmed this month, but + Add needs weeks in a row (2026-10-27): Watch
+    kind, ov, tip, dot, _n, dk = vt._finding_overview("TA.1", two, C, [])
+    assert kind == "new" and "Watch" in ov and "re-run for weeks" in ov
+    assert "seen in GE, ZH, 2 of 2 weeks" in tip and dk == "ring"
+    ready = dict(two, add_ready=True, weekly={"in_a_row": 3, "need": 3, "weeks": []})
+    kind, ov, _tip, _dot, _n, dk = vt._finding_overview("TA.1", ready, C, [])
+    assert "Add to panel" in ov and "3 weeks in a row" in ov and "data-add" in ov and dk == "filled"
     wk1 = {"per_city": {c: {"days": 3, "check": _city(W1)} for c in C}, "addable": True}
     kind, ov, tip, _dot, _n, dk = vt._finding_overview("RV.2.1.1", wk1, C, [])
-    assert "New · early" in ov and "seen in GE, ZH, 1 of 1 week" in ov and dk == "ring"
+    assert "Watch" in ov and "seen in GE, ZH, 1 of 1 week" in tip and dk == "ring"
     assert "and 2 weeks" in tip
     one = {"per_city": {C[1]: {"days": 3, "check": _city(W1 + W2)},
                         C[0]: {"days": 3, "check": _city(W1 + W2, share=0.0)}},
            "addable": True}
     kind, ov, _tip, _dot, _n, dk = vt._finding_overview("RF.5.1", one, C, [])
-    assert "New · early" in ov and "seen in ZH only, 2 of 2 weeks" in ov and dk == "ring"
+    assert "Watch" in ov and "· 1 city" in ov and dk == "ring"
 
 
 def test_row_names_thin_cities_and_inherited_missing():
@@ -95,9 +99,10 @@ def test_row_names_thin_cities_and_inherited_missing():
     f = {"per_city": {C[0]: {"days": 3, "check": _own(_city(W1 + W2, q=THIN, zero=("m4",)), own, "PJ.2")},
                       C[1]: {"days": 3, "check": _own(_city(W1 + W2, zero=("m4",)), own, "PJ.2")}},
          "addable": True}
-    kind, ov, _tip, _dot, _n, dk = vt._finding_overview("PJ.2.1", f, C, [])
-    assert "New · early" in ov and "seen in TI (+ BS thin)" in ov
-    assert "1 of its 4 mutations missing, all inherited from PJ.2" in ov
+    kind, ov, tip, _dot, _n, dk = vt._finding_overview("PJ.2.1", f, C, [])
+    assert "Watch" in ov and "· 1 of 4 missing" in ov
+    assert "seen in TI (+ BS thin)" in tip
+    assert "1 of its 4 mutations missing, all inherited from PJ.2" in tip
 
 
 def test_seen_cell_in_a_thin_city_is_striped():

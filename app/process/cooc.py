@@ -454,6 +454,17 @@ CHECK_DEFAULTS = {
                                  #   is striped, and it doesn't count towards
                                  #   confirm_min_cities (2026-10-26; until then display
                                  #   only)
+    # + Add (2026-10-27, process.national.weekly): the grade above on the 4
+    # weeks up to each Sunday; offered when the last add_weeks are confirmed in
+    # a row. bench_scorecard 27 Oct, 6 cities, Mar-Oct: 3 in a row offered TA.1
+    # (13 Sep, 4 weeks after first found) and BA.3.2.2 (spring), never a rare,
+    # gone or not-in-Europe lineage; 2 in a row also offered XFG.14.8.1 (TA.1's
+    # parent, through TA.1's reads); 1 (= one month) TK.1, RV.2.1.1, PY.1.1.1.
+    # Batches arrive every 2 weeks: one batch alone gives at most 1 confirmed
+    # week (confirmed needs 2 weeks of samples), so 2 and 3 in a row are both
+    # reached when the next batch arrives; 3 asks both of its weeks to agree.
+    "add_weeks": 3,              # confirmed this many weeks in a row
+    "add_days": 28,              # each week graded on the samples of this many days
 }
 
 

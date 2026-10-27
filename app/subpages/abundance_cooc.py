@@ -2257,6 +2257,20 @@ def app():
                                     quality=(_cr_all.get(_loc) or {}).get("sample_qc"),
                                     own=_own(_node))
 
+                    def _raw(_loc, _node):
+                        """check_in_data's inputs for a found lineage in one city
+                        (deep scan first, else the cross-check), for the weekly
+                        grade (process.national.weekly, 2026-10-27)"""
+                        for _src in ((_scan_res_all.get(_loc) or {}).get("findings_check") or {},
+                                     (st.session_state.get("acooc_xcheck_results", {}) or {}).get(_loc) or {}):
+                            _pv = (_src.get("per_variant") or {}).get(_node)
+                            if _pv and _pv.get("markers"):
+                                return {"markers": _pv["markers"], "per_date": _pv.get("per_date") or {},
+                                        "dates": _src.get("dates") or [],
+                                        "quality": (_cr_all.get(_loc) or {}).get("sample_qc"),
+                                        "own": _own(_node)}
+                        return None
+
                     def _ingest_clade(_c, _loc, _bucket=None):
                         # Route one finding (top-level OR a promoted sub-finding) into
                         # the new/sub bucket and aggregate its reads across cities.
@@ -2454,9 +2468,29 @@ def app():
                                               if d.get("check")})
                             except Exception:
                                 _gr = None
+                        # + Add (2026-10-27): confirmed in the 4 weeks up to each
+                        # of the last check.add_weeks Sundays, in a row
+                        # (process.national.weekly); the row stays "New" without it
+                        _add = _plus_add(_pc, _status, _ED)
+                        _wk = None
+                        if _status != "named":
+                            _rw = {c: _raw(c, _slot.get("node")) for c in _pc}
+                            _rw = {c: r for c, r in _rw.items() if r}
+                            _key = (_slot.get("node"), _run_d0, _run_d1,
+                                    tuple(sorted((c, len(r["per_date"])) for c, r in _rw.items())))
+                            _wc = st.session_state.setdefault("acooc_weekly_cache", {})
+                            if _key not in _wc:
+                                try:
+                                    from process.national import weekly as _weekly
+                                    _wc[_key] = _weekly(_rw, _run_d0, _run_d1) if _rw else None
+                                except Exception as _e:
+                                    logger.warning(f"weekly grade {_slot.get('node')}: {_e}")
+                                    _wc[_key] = None
+                            _wk = _wc[_key]
                         return {"status": _status if _status != "confirmed" or _ok else "1 day",
-                                "per_city": _pc, "grade": _gr,
-                                "addable": _plus_add(_pc, _status, _ED)}
+                                "per_city": _pc, "grade": _gr, "weekly": _wk,
+                                "addable": _add,
+                                "add_ready": bool(_add and _wk and _wk.get("ready"))}
 
                     _findings = {}
                     if not _scan_running:

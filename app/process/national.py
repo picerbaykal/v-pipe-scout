@@ -85,7 +85,8 @@ def national(per_city: Dict[str, dict], present_freq: Optional[float] = None) ->
 
 
 def sudden(nat: Optional[dict], quiet_weeks: int = 2, min_cities: int = 2) -> Optional[dict]:
-    """A lineage that appears suddenly (2026-10-23): seen in the newest week,
+    """Not shown since 2026-10-27 (the marker vote; the weekly grade,
+    weekly(), shows an arrival). A lineage that appears suddenly (2026-10-23): seen in the newest week,
     in at least `min_cities` cities, after `quiet_weeks` weeks in which all
     cities pooled said not seen, each on at least 2 well-covered samples (a
     trustworthy "not seen"). PJ.2.1, 5 Sep – 5 Oct: not seen on 2–5
@@ -194,3 +195,62 @@ def grade(per_city: Dict[str, dict], cfg: Optional[dict] = None) -> Optional[dic
             "weeks": weeks, "n_weeks": len(conf["weeks"]), "missing": missing,
             "missing_inherited": inherited, "n_measured": n_meas, "ok_missing": ok_missing,
             "confirmed": confirmed}
+
+
+def week_ends(d0: str, d1: str, days: int = 28) -> List[str]:
+    """Sundays up to d1 whose `days`-day window starts on or after d0 (ISO).
+    Samples after the last Sunday count from the next week on."""
+    a, b = date.fromisoformat(str(d0)[:10]), date.fromisoformat(str(d1)[:10])
+    x = b - timedelta(days=(b.weekday() + 1) % 7)          # last Sunday <= d1
+    out = []
+    while x - timedelta(days=days - 1) >= a:
+        out.append(x.isoformat())
+        x -= timedelta(days=7)
+    return out[::-1]
+
+
+def weekly(raw: Dict[str, dict], d0: str, d1: str, cfg: Optional[dict] = None) -> dict:
+    """The grade on the 4 weeks up to each Sunday (2026-10-27), for + Add.
+
+    raw: {city: {markers, per_date, dates, quality, own}} — the inputs of
+    process.variant_explorer.check_in_data, over the chosen dates d0..d1.
+    Each Sunday S with a full window (S - add_days + 1 >= d0): every city's
+    check on the samples of that window, then grade().
+
+    Returns {weeks: [{end, status, grade}], in_a_row, need, ready, short}
+      status     confirmed / watch (seen in a city, not confirmed) / none
+      in_a_row   confirmed weeks counted back from the newest
+      need       check.add_weeks
+      short      fewer weeks than `need` fit in the dates (a window under
+                 add_days + 7 x (need - 1) days): + Add can't be judged
+      ready      in_a_row >= need
+    bench_scorecard 27 Oct: see check.add_weeks."""
+    from process.cooc import _check_cfg
+    from process.variant_explorer import check_in_data
+    c = _check_cfg(cfg)
+    need, days = int(c.get("add_weeks", 3)), int(c.get("add_days", 28))
+    weeks = []
+    for end in week_ends(d0, d1, days):
+        start = (date.fromisoformat(end) - timedelta(days=days - 1)).isoformat()
+        inside = lambda d: start <= str(d)[:10] <= end          # noqa: E731
+        per = {}
+        for city, r in (raw or {}).items():
+            if not r or not r.get("markers"):
+                continue
+            pd = {d: x for d, x in (r.get("per_date") or {}).items() if inside(d)}
+            ds = [d for d in (r.get("dates") or []) if inside(d)]
+            if not ds and not pd:
+                continue
+            per[city] = check_in_data(r["markers"], pd, ds, quality=r.get("quality"),
+                                      own=r.get("own"))
+        g = grade(per, cfg) if per else None
+        status = ("confirmed" if g and g.get("confirmed") else
+                  "watch" if any(city_seen(x) for x in per.values()) else "none")
+        weeks.append({"end": end, "status": status, "grade": g})
+    n = 0
+    for w in reversed(weeks):
+        if w["status"] != "confirmed":
+            break
+        n += 1
+    return {"weeks": weeks, "in_a_row": n, "need": need,
+            "short": len(weeks) < need, "ready": n >= need}

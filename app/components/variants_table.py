@@ -67,8 +67,6 @@ CSS = """
 .vt .ovb { display:inline-block; font-size:12.5px; line-height:1.3; padding:2px 7px; border-radius:5px; }
 .vt .ovb b { font-weight:600; }
 .vt .ovb .add { margin-left:6px; }
-.vt .sud { display:inline-block; font-size:12px; line-height:1.3; margin-top:3px; padding:1px 7px;
-           border-radius:5px; color:#374151; background:#f3f4f6; box-shadow:inset 0 0 0 1px #9ca3af; }
 .vt td.cc .c { cursor:pointer; }
 .vt td.cc:not(.sel):hover { background:rgba(49,51,63,.04); }
 .vt td.cc.sel { background:rgba(49,51,63,.07); }
@@ -784,28 +782,6 @@ _NAT_WORD = {"present": "seen", "absent": "not seen", "mixed": "tie",
              "not_covered": "too few reads"}
 
 
-def _sudden_tag(per_city):
-    """' ⚠ appeared suddenly' after the overview (2026-10-23, process.national
-    .sudden): seen in the newest week in ≥ 2 cities after 2 weeks of a
-    trustworthy "not seen". Grey, not amber: amber means only "in panel, not
-    seen in any city"."""
-    try:
-        from process.national import national, sudden
-        s = sudden(national(per_city))
-    except Exception:
-        return ""
-    if not s:
-        return ""
-    quiet = ", ".join(f"week of {_short_date(d)} ({n} well-covered)" for d, n in s["quiet"])
-    tip = (f"Not seen in all cities pooled in the {len(s['quiet'])} weeks before ({quiet}), "
-           f"then seen in the week of {_short_date(s['week'])} in "
-           + ", ".join(city_name(c) for c in s["cities"])
-           + ". A real arrival and a lab batch (the same sequencing run) look the same "
-           "here: check the next samples before acting on it.")
-    return (f" <span class='sud' data-tip='{_e(tip)}'>⚠ appeared suddenly · "
-            f"check the next samples</span>")
-
-
 def _nat_line(per_city, top, low=None):
     """'All 6 cities  ■■■□□  6:0 (1) · seen' — or "" without data."""
     try:
@@ -1313,6 +1289,61 @@ def _finding_status(v, f, cities, has_children=False):
     return "possible", " · ".join(x for x in (why, sug_txt) if x)
 
 
+def _weeks_text(wk):
+    """the weekly grade in words, for the hover (process.national.weekly)"""
+    need, n = wk.get("need", 3), wk.get("in_a_row", 0)
+    days = (_check_cfg_safe() or {}).get("add_days", 28)
+    tail = " · ".join(f"{_short_date(w['end'])} {w['status']}" for w in (wk.get("weeks") or [])[-need - 2:])
+    return (f"+ Add when {need} weeks in a row are confirmed, each on the {days} days up to that "
+            f"Sunday: {n} of {need}" + (f" ({tail})" if tail else "")
+            + (f"; these dates fit {len(wk.get('weeks') or [])}, choose {days + 7 * (need - 1)} days "
+               "or more" if wk.get("short") else ""))
+
+
+def _short_reason(f, cities):
+    """What keeps a found lineage from + Add, in a few words (2026-10-27), the
+    first that applies: mutations missing, thin samples only, 1 city, not
+    clear pooled, then the weeks in a row."""
+    pc = f.get("per_city") or {}
+    chk = {c: (pc.get(c) or {}).get("check") for c in cities if (pc.get(c) or {}).get("check")}
+    g = None
+    try:
+        from process.national import grade
+        g = grade(chk) if chk else None
+    except Exception:
+        g = None
+    g = g or f.get("grade") or {}
+    c = _check_cfg_safe() or {}
+    if g and not g.get("ok_missing", True):
+        return f"{len(g.get('missing') or [])} of {g.get('n_measured', 0)} missing"
+    well, thin = g.get("cities") or [], g.get("cities_thin") or []
+    if not well and thin:
+        return "thin samples only"
+    if len(well) < c.get("confirm_min_cities", 2):
+        return "1 city" if well else "not seen"
+    if g and not g.get("pooled_seen", True):
+        return "unclear pooled"
+    wk = f.get("weekly")
+    if not wk:
+        return "re-run for weeks"
+    return f"{wk.get('in_a_row', 0)} of {wk.get('need', 3)} weeks"
+
+
+def _add_note(findings):
+    """One line above the table when the dates are too short to judge + Add
+    (2026-10-27), instead of the same words on every row."""
+    wks = [f.get("weekly") for f in (findings or {}).values()
+           if f.get("status") not in ("named", "family") and f.get("weekly")]
+    if not wks or not any(w.get("short") for w in wks):
+        return ""
+    c = _check_cfg_safe() or {}
+    need, days = int(c.get("add_weeks", 3)), int(c.get("add_days", 28))
+    fit = max(len(w.get("weeks") or []) for w in wks)
+    return (f"<div class='dim' style='font-size:12.5px;margin:4px 0 6px'>Found lineages · + Add needs "
+            f"{need} weeks in a row confirmed: these dates allow {fit} "
+            f"{_pl(fit, 'week')}, choose {days + 7 * (need - 1)} days or more to judge</div>")
+
+
 def _new_grade(f, cities):
     """(confirmed, reason, hover) for a "New" row, from all cities pooled
     (process.national.grade). Confirmed: seen pooled, in >= 2 well-covered
@@ -1384,17 +1415,20 @@ def _finding_overview(v, f, cities, current_panel, has_children=False):
         return (kind, _ovb("not confirmed: reads also fit related lineages", "color:#9ca3af;"),
                 "", GREY, "#9ca3af", "ring")
     if kind == "new":
-        btn = ("<span class='added'>added · re-run needed</span>" if v in current_panel
-               else f"<button class='add' data-add='{_e(v)}'>+ Add</button>")
+        # a badge and the one thing holding it back (2026-10-27); the
+        # sentence goes to the hover
         conf, why, tip = _new_grade(f, cities)
-        if conf:
-            return (kind, _ovb(f"<b>New · confirmed</b> · {_e(why)}{btn}",
-                               "background:#fef2f2;color:#b91c1c;"),
-                    "suggested by the reads, not in the panel; " + tip, RED, RED, "filled")
-        return (kind, _ovb(f"<b>New · early</b> · {_e(why)}{btn}",
-                           "background:#fff;color:#b91c1c;box-shadow:inset 0 0 0 1px #fca5a5;"
-                           "border:1px dashed #f87171;"),
-                "suggested by the reads, not in the panel; " + tip, RED, RED, "ring")
+        wk = f.get("weekly")
+        hover = (f"suggested by the reads, not in the panel · {why} · {tip}"
+                 + (" · " + _weeks_text(wk) if wk else ""))
+        if f.get("add_ready"):
+            btn = ("<span class='added'>added · re-run needed</span>" if v in current_panel
+                   else f"<button class='add' data-add='{_e(v)}'>+ Add</button>")
+            n = (wk or {}).get("in_a_row", 0)
+            return (kind, _ovb(f"<b>Add to panel</b> · {n} weeks in a row{btn}",
+                               "background:#fef2f2;color:#b91c1c;"), hover, RED, RED, "filled")
+        return (kind, _ovb(f"<b>Watch</b> <span style='color:#4b5563'>· {_e(_short_reason(f, cities))}</span>",
+                           "background:#eff6ff;color:#1d4ed8;"), hover, RED, RED, "ring")
     if kind == "folded":
         sugg = [c for c in cities if not (pc.get(c) or {}).get("xcheck")
                 and int((pc.get(c) or {}).get("days") or 0) > 0]
@@ -1818,7 +1852,6 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
             dgid = "det-" + re.sub(r"[^A-Za-z0-9]", "_", v)
             cells = _panel_cells(v, pc, cities, sel)
             ov = f"<span data-tip='{_e(ovtip)}'>{ov}</span>" if ovtip else ov
-            ov += _sudden_tag(pc)
             drow = (_detail_row(dgid, v, pc, cities, sel, n_cols)
                     if any((x or {}).get("timeline") for x in pc.values()) else "")
             ev = _det_link(dgid) if drow else ""
@@ -1869,7 +1902,6 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
                 ovtip = (ovtip + " · " if ovtip else "") + (
                     f"{sname}: itself {_it} after the lineages below it — {_calc}")
             ov = f"<span data-tip='{_e(ovtip)}'>{ov}</span>" if ovtip else ov
-            ov += _sudden_tag(_chk)
             drow = (_detail_row(dgid, v, _chk, cities, sel, n_cols, found=True)
                     if any(x.get("timeline") for x in _chk.values()) else "")
             ev = _det_link(dgid) if drow else ""
@@ -2001,7 +2033,7 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
             body.append(f"<tr class='note'><td colspan='{n_cols}'>+ more small unassigned patterns "
                         f"({novel_rest} reads, summed over cities and days) — not listed</td></tr>")
 
-    return (CSS + SHORT_LEGEND
+    return (CSS + SHORT_LEGEND + _add_note(findings)
             + f"<div class='vtw'><table class='vt'><thead>{head}</thead>"
               f"<tbody>{''.join(body)}</tbody></table></div>")
 
@@ -2084,10 +2116,10 @@ _LEGEND_ROWS = (
     + "</div><div class='row'><span class='t'>Tree</span>"
     + _ld(f"background:{GREEN}", "in panel, seen somewhere")
     + _ld(f"background:{AMBER}", "in panel, not seen in any city")
-    + _ld(f"background:{RED}", "new · confirmed: seen with all cities pooled, in ≥ 2 "
-          "well-covered cities and ≥ 2 weeks, ≤ 10 % of its mutations missing (+ Add)")
-    + _ld(f"border:2px solid {RED}", "new · early: found, not confirmed yet (+ Add, check the "
-          "next samples)")
+    + _ld(f"background:{RED}", "add to panel: confirmed 3 weeks in a row (the 4 weeks up to "
+          "each Sunday: all cities pooled seen, ≥ 2 well-covered cities, ≥ 2 weeks, ≤ 10 % of "
+          "its mutations missing) · + Add")
+    + _ld(f"border:2px solid {RED}", "watch: found, not ready to add; the row says why")
     + _ld("border:2px solid #9ca3af", "possible: suggested, only partly seen")
     + _ld("border:2px solid #d1d5db", "covered: its own mutations are on a lineage below it")
     + _ld(f"border:2px solid {TRACKED}", "OT, not selected")
@@ -2116,8 +2148,8 @@ SHORT_LEGEND = (
     + "'></i></span>low coverage</span>"
     + _ld(f"background:{GREEN}", "in panel")
     + _ld(f"background:{AMBER}", "in panel, not seen in any city")
-    + _ld(f"background:{RED}", "new · confirmed")
-    + _ld(f"border:2px solid {RED}", "new · early")
+    + _ld(f"background:{RED}", "add to panel")
+    + _ld(f"border:2px solid {RED}", "watch")
     + _ld("border:2px solid #9ca3af", "possible / covered")
     + "<span class='dim'>click a cell for its details · ⓘ more: “How to read this page” above the tabs</span>"
     + "</div></div>")
