@@ -557,14 +557,18 @@ def run_cooc_lineages_check_lapis(self, location: str, start_date: str, end_date
 
 @app.task(bind=True)
 def run_cooc_variant_check_lapis(self, location: str, start_date: str, end_date: str,
-                                 variant: str, panel: list):
+                                 variant: str, panel: list, check_start_date: str = None):
     """"Investigate a variant" -> "Check in data": read counts at one lineage's
-    ★ markers in one city (cooc.variant_check)."""
+    ★ markers in one city (cooc.variant_check). check_start_date (2026-10-27):
+    read from there when earlier, like the deep scan's findings check, so the
+    page can judge the weeks; the page cuts the cells back to the chosen dates."""
     import sys
     from datetime import datetime
     sys.path.insert(0, "/app_shared")
     from cooc import variant_check
     _p = _reporter(f"task_progress:{self.request.id}", total=2)
+    if check_start_date and str(check_start_date)[:10] < str(start_date)[:10]:
+        start_date = str(check_start_date)[:10]
     try:
         _p(1, f"Checking {variant} in {location}...")
         r = variant_check(location, datetime.fromisoformat(start_date),

@@ -2,22 +2,16 @@
 
 'Investigate a variant': pick any lineage, see whether co-occurrence can tell
 it apart (★ markers, the same rule as the ★ check of panel variants) and how it relates to
-others, then "Check in data": the worker reads its ★ markers in the run's
-cities and window, one line per city (2026-10-02). The heatmaps live in their
+others, then "Check in data": the worker reads it in the run's cities and window, and
+the page shows it as a row of the tree, with the tree's rules (2026-10-27;
+until then one present / absent / mixed line per city, the marker vote). The heatmaps live in their
 own section, "Signal over time" (components/signal_over_time_ui.py).
 """
 from __future__ import annotations
 
 import streamlit as st
 
-from process.variant_explorer import check_in_data, investigate_variant, marker_funnel
-_STATE = {
-    "present":     ("#dcfce7", "#166534", "present"),
-    "absent":      ("#f3f4f6", "#4b5563", "absent"),
-    "mixed":       ("#d1d5db", "#111827", "mixed"),
-    "not_covered": ("#ffffff", "#6b7280", "not covered"),
-    "no_marker":   ("#f3f4f6", "#6b7280", "no ★ marker"),
-}
+from process.variant_explorer import investigate_variant, marker_funnel
 
 
 def _pill(bg, fg, txt, border=None):
@@ -97,33 +91,22 @@ def _funnel(variant, pango_loader, panel):
             f"thanks to forgiven recombinants</div>", unsafe_allow_html=True)
 
 
-def _detail_table(r):
-    """Per-marker numbers behind one city's verdict."""
-    rows = []
-    for x in r.get("detail") or []:
-        f = x["freq"]
-        num = (f"{f * 100:.1f} % of {x['cov']:,}" if f is not None and x["cov"]
-               else f"{x['cov']:,} reads")
-        link = (f"link {x['link'] * 100:.0f} % of {x['link_n']:,}" if x["link"] is not None
-                else "")
-        flag = (f" <span style='color:#b45309'>⚠ {x['near']}</span>" if x["near"] else "")
-        ok = "✓" if x["why"] == "present" else "·"
-        rows.append(f"<tr><td style='padding-right:12px;font-family:ui-monospace,Menlo,monospace'>"
-                    f"{ok} {x['marker']}</td><td style='padding-right:12px'>{num}</td>"
-                    f"<td style='padding-right:12px;color:#6b7280'>{link}</td>"
-                    f"<td>{x['why']}{flag}</td></tr>")
-    return "<table style='font-size:12px;margin:2px 0 8px 12px'>" + "".join(rows) + "</table>"
-
-
-def _check_section(variant, panel, cities, start_date, end_date, celery_app, key_prefix):
+def _check_section(variant, panel, cities, start_date, end_date, celery_app, key_prefix,
+                   pango_loader=None, quality=None, clinical=None, pango_parent=None):
+    """Check in data (2026-10-27): the worker reads the lineage in each city,
+    7 weeks back like the tree's check; the page judges it with the tree's
+    rules (process.variant_explorer.judge) and draws it as a tree row
+    (components.variants_table.investigate_view)."""
     if not (cities and start_date and end_date and celery_app):
         st.caption("Run the analysis (or wait for it to finish) to check it in the "
                    "data of your cities.")
         return
+    from process.national import check_start
     k = f"{key_prefix}_check"
     cur = st.session_state.get(k)
     win = (str(start_date)[:10], str(end_date)[:10])
-    sig = (variant, tuple(sorted(cities)), win, tuple(sorted(panel or [])))
+    d_check = check_start(*win)
+    sig = ("v2", variant, tuple(sorted(cities)), win, tuple(sorted(panel or [])))
     if cur and cur.get("sig") != sig:
         cur = None
     n_city = len(cities)
@@ -134,96 +117,91 @@ def _check_section(variant, panel, cities, start_date, end_date, celery_app, key
             for c in cities:
                 t = celery_app.send_task("tasks.run_cooc_variant_check_lapis", kwargs={
                     "location": c, "start_date": win[0], "end_date": win[1],
-                    "variant": variant, "panel": list(panel or [])})
+                    "variant": variant, "panel": list(panel or []),
+                    "check_start_date": d_check})
                 tasks[c] = t.id
-            st.session_state[k] = {"sig": sig, "tasks": tasks, "res": {}, "err": {}}
+            st.session_state[k] = {"sig": sig, "tasks": tasks, "raw": {}, "err": {}}
             st.rerun()
         return
 
     def _collect():
         for c, tid in cur.get("tasks", {}).items():
-            if c in cur["res"] or c in cur["err"]:
+            if c in cur["raw"] or c in cur["err"]:
                 continue
             t = celery_app.AsyncResult(tid)
             if t.ready():
                 try:
-                    r = t.get()
-                    cur["res"][c] = check_in_data(r.get("markers") or [],
-                                                  r.get("per_date") or {},
-                                                  r.get("dates") or [])
+                    cur["raw"][c] = t.get()
                 except Exception as e:
                     cur["err"][c] = str(e)[:200]
-        return [c for c in cur.get("tasks", {}) if c not in cur["res"] and c not in cur["err"]]
+        return [c for c in cur.get("tasks", {}) if c not in cur["raw"] and c not in cur["err"]]
 
-    def _draw():
-        from process.cooc import _check_cfg
-        cfg = _check_cfg()
+    def _progress():
         rows = []
         for c in cities:
             name = c.split("(")[0].strip()
-            if c in cur["err"]:
-                right = "<span style='color:#dc2626;'>failed — try again</span>"
-            elif c in cur["res"]:
-                r = cur["res"][c]
-                bg, fg, word = _STATE[r["state"]]
-                _low = r["n_markers"] - r["n_measured"]
-                cnt = (f"<span style='color:#6b7280;'>{r['n_present']} of {r['n_measured']} "
-                       f"covered ★ present"
-                       + (f" ({_low} with too few reads)" if _low > 0 else "")
-                       + "</span>" if r["n_measured"] else "")
-                right = (_pill(bg, fg, word, "#d1d5db" if bg == "#ffffff" else None)
-                         + f" {cnt}")
-            else:
-                right = "<span style='color:#2563eb;'>⟳ reading…</span>"
-            rows.append(f"<div style='display:flex;align-items:center;gap:10px;"
-                        f"padding:3px 0;'><span style='width:90px;font-weight:500;'>{name}</span>"
-                        f"<span>{right}</span></div>")
-        st.markdown("<div style='font-size:12.5px;margin-top:6px;'>" + "".join(rows)
-                    + "</div><div style='font-size:11px;color:#6b7280;margin-top:2px;'>"
-                    "Pooled over the run's window · present / absent by the ★ check "
-                    f"(★ marker ≥ {cfg['present_freq'] * 100:g} % / "
-                    f"< {cfg['absent_freq'] * 100:g} % of ≥ {cfg['min_cov']} reads) · its "
-                    "signal per week: <b>Signal over time</b></div>", unsafe_allow_html=True)
+            right = ("<span style='color:#dc2626;'>failed — try again</span>" if c in cur["err"]
+                     else "<span style='color:#166534;'>read</span>" if c in cur["raw"]
+                     else "<span style='color:#2563eb;'>⟳ reading…</span>")
+            rows.append(f"<div style='display:flex;gap:10px;padding:2px 0;'>"
+                        f"<span style='width:90px;font-weight:500;'>{name}</span>{right}</div>")
+        st.markdown("<div style='font-size:12.5px;margin-top:6px;'>" + "".join(rows) + "</div>",
+                    unsafe_allow_html=True)
 
     if _collect():
         # poll only while something is still running; the whole page reruns
-        # once when the last city is in, which draws the final, static view
+        # once when the last city is in, which draws the final view
         @st.fragment(run_every=2)
         def _poll():
             if not _collect():
                 st.rerun(scope="app")
-            _draw()
+            _progress()
         _poll()
-    else:
-        _draw()
-        if cur.get("res"):
-            from process.cooc import _check_cfg
-            c = _check_cfg()
-            with st.expander("Reads at the markers, per city", expanded=False):
-                st.markdown(
-                    f"<div style='font-size:11.5px;color:#6b7280'>The same ★ markers everywhere; "
-                    f"what differs per city is the reads at them. Pooled over the run's window · "
-                    f"present ≥ {c['present_freq'] * 100:g} % · absent &lt; "
-                    f"{c['absent_freq'] * 100:g} % · ≥ {c['min_cov']} reads · link ≥ "
-                    f"{c['link_min'] * 100:g} % of ≥ {c['min_link']} reads · verdict: present "
-                    f"if more covered markers are present than absent and at least "
-                    f"{c['min_present']} are present, absent if more are absent, mixed on a "
-                    f"tie · ⚠ = just missed a rule"
-                    f"</div>", unsafe_allow_html=True)
-                for city in cities:
-                    if city in cur["res"]:
-                        st.markdown(f"<div style='font-size:12.5px;font-weight:600;"
-                                    f"margin-top:6px'>{city.split('(')[0].strip()}</div>"
-                                    + _detail_table(cur["res"][city]), unsafe_allow_html=True)
-        if st.button("Check again", key=f"{key_prefix}_again"):
-            st.session_state.pop(k, None)
+        return
+
+    # every city in: judge once, with the tree's rules
+    if "judged" not in cur:
+        from process.variant_explorer import judge, own_of
+        try:
+            own = own_of(variant, pango_loader) if pango_loader is not None else None
+        except Exception:
+            own = None
+        raw = {}
+        for c, r in cur["raw"].items():
+            if r and r.get("markers"):
+                raw[c] = {"markers": r["markers"], "per_date": r.get("per_date") or {},
+                          "dates": list(r.get("dates") or []),
+                          "quality": (quality or {}).get(c), "own": own}
+        cur["judged"] = judge(raw, win[0], win[1], d_check)
+    from components import variants_table as _vt
+    shown = [c for c in cities if c in cur["raw"]]
+    sel = cur.get("sel") if cur.get("sel") in shown else (shown[0] if shown else None)
+    if cur["err"]:
+        st.caption("Failed: " + ", ".join(c.split("(")[0].strip() for c in cur["err"])
+                   + " — Check again to retry.")
+    if shown:
+        view = _vt.investigate_view(variant, cur["judged"], shown, sel,
+                                    in_panel=variant in (panel or []),
+                                    current_panel=panel or [], clinical=clinical,
+                                    pango_parent=pango_parent, dates=win)
+        click = _vt.render(view, key=f"{key_prefix}_view")
+        if click and click.get("t") != cur.get("last_click"):
+            cur["last_click"] = click.get("t")
+            if click.get("add"):
+                st.session_state[f"acooc_add_variant_pending_{click['add']}"] = click["add"]
+            elif click.get("city") in shown:
+                cur["sel"] = click["city"]
             st.rerun()
+    if st.button("Check again", key=f"{key_prefix}_again"):
+        st.session_state.pop(k, None)
+        st.rerun()
 
 
 def render_variant_explorer(pango_loader, panel=None, options=None,
                             key_prefix="acooc_explorer",
                             cities=None, start_date=None, end_date=None,
-                            celery_app=None):
+                            celery_app=None, quality=None, clinical=None,
+                            pango_parent=None):
     """Render 'Investigate a variant'.
 
     Args:
@@ -232,6 +210,8 @@ def render_variant_explorer(pango_loader, panel=None, options=None,
         options: selectable lineage names (defaults to all known).
         cities, start_date, end_date, celery_app: enable "Check in data" for
             these cities and window.
+        quality: {city: sample_qc} of the run, clinical / pango_parent: the
+            details' clinical rows — so the answer is the tree's (2026-10-27).
     """
     st.markdown("#### 🔎 Investigate a variant")
     st.caption("Quick look-up of any lineage, in the panel or not: can reads tell it "
@@ -282,4 +262,6 @@ def render_variant_explorer(pango_loader, panel=None, options=None,
         st.caption(f"(marker steps unavailable: {e})")
 
     if r["detectable"]:
-        _check_section(variant, panel, cities, start_date, end_date, celery_app, key_prefix)
+        _check_section(variant, panel, cities, start_date, end_date, celery_app, key_prefix,
+                       pango_loader=pango_loader, quality=quality, clinical=clinical,
+                       pango_parent=pango_parent)

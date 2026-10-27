@@ -441,3 +441,28 @@ def _marker_detail(markers, per_date, res, c) -> List[Dict]:
         out.append({"marker": m, "cov": cov, "cov_raw": r.get("cov_raw", cov), "freq": f,
                     "link": link, "link_n": link_n, "status": st, "why": why, "near": near})
     return out
+
+def judge(raw: Dict[str, dict], d0: str, d1: str, check_d0: Optional[str] = None) -> Dict:
+    """One lineage in every city, with the tree's rules (2026-10-27): what
+    "Investigate a variant" shows, so it says what the tree says.
+
+    raw: {city: {markers, per_date, dates, quality, own}} — a lineages_check
+      result per city (process.variant_explorer.check_in_data's inputs), read
+      from check_d0 (process.national.check_start) to d1.
+    Returns {per_city: {city: check_in_data on d0..d1}, grade (all cities,
+      process.national.grade on d0..d1), weekly (process.national.weekly on
+      check_d0..d1)} — the same calls, on the same cut, as the tree's found
+      rows (abundance_cooc _fcheck / _grade / _weekly)."""
+    from process.national import grade, weekly
+    a, b = str(d0)[:10], str(d1)[:10]
+    inside = lambda d: a <= str(d)[:10] <= b                     # noqa: E731
+    raw = {c: r for c, r in (raw or {}).items() if r and r.get("markers")}
+    per = {}
+    for c, r in raw.items():
+        per[c] = check_in_data(r["markers"],
+                               {d: x for d, x in (r.get("per_date") or {}).items() if inside(d)},
+                               [d for d in r.get("dates") or [] if inside(d)],
+                               quality=r.get("quality"), own=r.get("own"))
+    return {"per_city": per,
+            "grade": grade(per) if per else None,
+            "weekly": weekly(raw, check_d0 or a, b) if raw else None}

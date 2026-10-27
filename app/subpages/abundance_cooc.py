@@ -45,6 +45,21 @@ def _clinical_weekly(d0: str, d1: str, region):
     return fetch_weekly(a.isoformat(), str(d1)[:10], region)
 
 
+def _explorer_clinical(d0, d1):
+    """the details' clinical rows for Investigate a variant (2026-10-27)"""
+    if not get_cooc_setting("clinical.enabled", default=True):
+        return None
+    out = {}
+    for reg, key in (("Europe", "Europe"), ("World", None)):
+        try:
+            x = _clinical_weekly(d0, d1, key)
+        except Exception:
+            x = None
+        if x is not None:
+            out[reg] = x
+    return out or None
+
+
 celery_app = Celery(
     'tasks',
     broker=os.environ.get('CELERY_BROKER_URL', 'redis://redis:6379/0'),
@@ -2723,6 +2738,11 @@ def app():
                   # the look-up always works; "Check in data" waits for the run
                   cities=None if (_cooc_outstanding or _scan_outstanding) else list(location_names), start_date=_rd[0], end_date=_rd[1],
                   celery_app=celery_app,
+                  # the tree's inputs, so the answer is the tree's (2026-10-27)
+                  quality={_l: (_r or {}).get("sample_qc") for _l, _r in
+                           (st.session_state.get("acooc_cooc_results") or {}).items()},
+                  clinical=_explorer_clinical(_rd[0], _rd[1]),
+                  pango_parent=st.session_state.get("acooc_pango_parent"),
               )
 
             if _active_section == "Signal over time":

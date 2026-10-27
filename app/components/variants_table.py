@@ -1913,6 +1913,12 @@ def _finding_cells(v, f, cities, sel):
             out.append(_cell(label, style, _cell_tip(
                 v, city_name(c), chk, f" · checked here because found in {fi}"), c == sel))
             continue
+        if chk and d.get("investigate"):
+            # "Investigate a variant" (2026-10-27): no deep scan behind it,
+            # the check alone, the same colours
+            style, label, _dot, _ink, _share = _scale(chk, found=True)
+            out.append(_cell(label, style, _cell_tip(v, city_name(c), chk), c == sel))
+            continue
         if chk and n > 0:
             # the same measure as the panel: ★ markers present / measurable
             style, label, _dot, _ink, _share = _scale(chk, found=True)
@@ -2776,3 +2782,39 @@ def render(view_html: str, key: str):
         import streamlit.components.v1 as components
         _COMPONENT = components.declare_component("variants_table", path=str(_FRONTEND))
     return _COMPONENT(html=view_html, js=CLICK_JS, key=key, default=None)
+
+def investigate_view(v, judged, cities, sel, in_panel=False, current_panel=(),
+                     clinical=None, pango_parent=None, dates=None) -> str:
+    """"Investigate a variant" -> Check in data (2026-10-27): the lineage as
+    one row of the tree — the same overview (status and weeks), cells and
+    details, from process.variant_explorer.judge — with its details open."""
+    pc = (judged or {}).get("per_city") or {}
+    wk = (judged or {}).get("weekly")
+    sel = sel if sel in cities else (cities[0] if cities else sel)
+    n_cols = len(cities) + 3
+    head = ("<tr><th>Lineage</th><th style='padding-left:8px'>Overview · all cities</th>"
+            + "".join(f"<th class='cc{' sel' if c == sel else ''}'><button data-city='{_e(c)}' "
+                      f"data-tip='{_e(city_name(c))} — click to show this city in the details'>"
+                      f"{_e(city_code(c))}</button></th>" for c in cities)
+            + "<th style='width:100%'></th></tr>")
+    r = {"depth": 0, "guides": [], "last": True, "has_children": False}
+    if in_panel:
+        ov, ovtip, dcol, ncol, dk = _panel_overview(pc, cities, wk)
+        cells = _panel_cells(v, pc, cities, sel)
+        tip = f"{v}: in the panel"
+    else:
+        f = {"status": "new", "weekly": wk, "grade": (judged or {}).get("grade"),
+             "per_city": {c: {"days": 0, "check": x, "investigate": True} for c, x in pc.items()}}
+        _k, ov, ovtip, dcol, ncol, dk = _finding_overview(v, f, cities, set(current_panel or ()))
+        cells = _finding_cells(v, f, cities, sel)
+        tip = f"{v}: not in the panel"
+    ov = f"<span data-tip='{_e(ovtip).replace(chr(10), '&#10;')}'>{ov}</span>" if ovtip else ov
+    name = f"<span class='nm' style='color:{ncol}'>{_e(v)}</span>"
+    row = f"<tr data-gid='det-inv'>{_tree_cell(r, dcol, dk, name, tip)}<td class='ov'>{ov}</td>{cells}<td></td></tr>"
+    det = ""
+    if any((x or {}).get("timeline") for x in pc.values()):
+        det = _detail_row("det-inv", v, pc, cities, sel, n_cols, found=not in_panel,
+                          clin=clinical, parent=pango_parent).replace(" hid'", "'", 1)
+    return (CSS + _frames_note({v: {"weekly": wk}} if wk else {}, {}, dates)
+            + f"<div class='vtw'><table class='vt'><thead>{head}</thead>"
+              f"<tbody>{row}{det}</tbody></table></div>")
