@@ -451,6 +451,21 @@ CHECK_DEFAULTS = {
                                  #   (2026-10-26, was "or": RV.2.1.1 Sep-Oct, GE and
                                  #   ZH in 1 of 4 weeks, came out confirmed while
                                  #   PJ.2.1, also 1 of 4, stayed early),
+    # 2026-10-27: confirmed = cities AND weeks only. The two checks below are
+    # off: on the few samples with its coocs, jackpot gaps (an amplicon copied
+    # from another virus) read its mutations at 0 % and failed TA.1 on 3 of 6
+    # weeks, TK.1 on 2; the coocs (pairs few lineages outside its family carry)
+    # already tell it from its relatives. Absent mutations are shown in the
+    # details and the Watch hover; 1 sample with half or more absent still folds.
+    "confirm_use_pooled": False,  # check: its mutations seen together (confirm_pooled_freq)
+    "confirm_use_missing": False,  # check: at most confirm_max_missing absent
+    "confirm_missing_allow": 1,  #   ... always allow this many absent, whatever the share
+                                 #   (2026-10-27): with 7 mutations, 10 % allowed none,
+                                 #   and one mutation failing for a technical reason
+                                 #   (primer site, a Pango-listed mutation the current
+                                 #   viruses lack) cost TA.1 its weeks: 14808C 0.0 % in
+                                 #   Sep-Oct, seen over 3 months; weekly windows 13 Sep,
+                                 #   27 Sep, 4 Oct failed on it (bench_scorecard 27 Oct)
     "confirm_max_missing": 0.10,  #   ... and at most this share of its measured
                                  #   mutations is clearly missing (< absent_freq) pooled
                                  #   (PJ.2.1, Sep–Oct: 4 of 18 at 0.0–0.2 %). Confirmed

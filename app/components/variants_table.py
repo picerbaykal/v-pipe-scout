@@ -1360,9 +1360,10 @@ def _weeks_text(wk):
 
 def _short_reason(f, cities):
     """What keeps a found lineage from + Add, in a few words (2026-10-27), the
-    first that applies: mutations absent (on the samples with its coocs),
-    thin samples only, 1 city, 1 week, not clear on its samples, then the
-    weeks in a row."""
+    first that applies: thin samples only, 1 city, 1 week, then the weeks in
+    a row (mutations absent / not clear on its samples only when
+    check.confirm_use_missing / confirm_use_pooled are on; off since
+    2026-10-27)."""
     pc = f.get("per_city") or {}
     chk = {c: (pc.get(c) or {}).get("check") for c in cities if (pc.get(c) or {}).get("check")}
     g = None
@@ -1373,7 +1374,7 @@ def _short_reason(f, cities):
         g = None
     g = g or f.get("grade") or {}
     c = _check_cfg_safe() or {}
-    if g and not g.get("ok_missing", True):
+    if g and c.get("confirm_use_missing", False) and not g.get("ok_missing", True):
         # its mutations on the samples with its coocs, all cities together;
         # absent = under check.absent_freq (1 %) (2026-10-27)
         on = (f" on its {g['n_counted']} {_pl(g['n_counted'], 'sample')}" if g.get("n_counted")
@@ -1386,7 +1387,7 @@ def _short_reason(f, cities):
         return "1 city" if well else "not seen"
     if g and g.get("weeks", 0) < c.get("confirm_min_weeks", 2):
         return "1 week" if g.get("weeks") else "no well-covered week"
-    if g and not g.get("pooled_seen", True):
+    if g and c.get("confirm_use_pooled", False) and not g.get("pooled_seen", True):
         return ("not clear on its samples" if g.get("n_counted")
                 else "not clear with cities pooled")
     wk = f.get("weekly")
@@ -1429,10 +1430,10 @@ def _add_note(findings):
 
 def _new_grade(f, cities):
     """(confirmed, reason, hover) for a "New" row, from all cities pooled
-    (process.national.grade). Confirmed: seen pooled, in >= 2 well-covered
-    cities AND >= 2 weeks, at most 10 % of its mutations clearly missing
-    (2026-10-26; until then cities or weeks, thin cities counted);
-    otherwise early, with the first condition it misses."""
+    (process.national.grade). Confirmed: >= 2 well-covered cities AND >= 2
+    weeks (2026-10-27; the pooled and absent checks are switches, off);
+    otherwise early, with the first condition it misses. Absent mutations
+    are always named in the hover."""
     pc = f.get("per_city") or {}
     chk = {c: (pc.get(c) or {}).get("check") for c in cities if (pc.get(c) or {}).get("check")}
     g = None
@@ -1458,28 +1459,34 @@ def _new_grade(f, cities):
     thin_txt = (f" (+ {', '.join(city_code(x) for x in thin)} thin)" if thin else "")
     where = (f"seen in {n_c} {_pl(n_c, 'city')}" if n_c > 3 else (f"seen in {codes}" if well else
              ("seen only in thin samples" if thin else ""))) + (thin_txt if well else "")
-    rule = (f"confirmed needs all cities pooled to say seen, {c.get('confirm_min_cities', 2)} "
-            f"cities with ≥ {c.get('thin_well_min', 2)} well-covered samples and "
-            f"{c.get('confirm_min_weeks', 2)} weeks, and at most "
-            f"{c.get('confirm_max_missing', 0.1) * 100:g} % of its mutations clearly missing")
+    use_p, use_m = c.get("confirm_use_pooled", False), c.get("confirm_use_missing", False)
+    rule = (f"confirmed needs {c.get('confirm_min_cities', 2)} cities with its coocs on a "
+            f"well-covered sample and {c.get('confirm_min_weeks', 2)} weeks"
+            + (", its mutations seen together on its samples" if use_p else "")
+            + (f", at most {c.get('confirm_max_missing', 0.1) * 100:g} % of its mutations absent "
+               f"(at least {c.get('confirm_missing_allow', 1)} allowed)" if use_m else ""))
+    # absent mutations: always said, a check only with confirm_use_missing
+    k, inh = len(g.get("missing") or []), g.get("missing_inherited") or []
+    par = next(((chk.get(x) or {}).get("parent") for x in cities if (chk.get(x) or {}).get("parent")), "")
+    inh_txt = ("" if not inh else (f", all inherited from {par}" if len(inh) == k and par else
+               f", {len(inh)} inherited{' from ' + par if par else ''}"))
+    on = (f"on its {g['n_counted']} {_pl(g['n_counted'], 'sample')} with coocs"
+          if g.get("n_counted") else "on all samples")
+    absent = (f" · note: {k} of its {g.get('n_measured', 0)} mutations absent {on}{inh_txt}: "
+              f"{', '.join((g.get('missing') or [])[:8])} (under "
+              f"{c.get('absent_freq', 0.01) * 100:g} % of the reads). A virus of this lineage "
+              "carries all of them; on a few samples one can read 0 % because that sample's "
+              "amplicon was copied from another virus, several suggest a close relative. "
+              "Check before + Add." if k else "")
     if g["confirmed"]:
         return True, f"{where}, {wk}" if where else wk, (
-            f"confirmed: all cities pooled say seen ({c.get('confirm_pooled_freq', 0.05) * 100:g} %), "
-            f"in {n_c} well-covered {_pl(n_c, 'city')} and {wk}, {len(g['missing'])} of "
-            f"{g['n_measured']} mutations clearly missing")
-    early = "early: found, not confirmed yet · check the next samples · " + rule
-    if not g["ok_missing"]:
-        k, inh = len(g["missing"]), g.get("missing_inherited") or []
-        par = next(((chk.get(x) or {}).get("parent") for x in cities if (chk.get(x) or {}).get("parent")), "")
-        inh_txt = ("" if not inh else (f", all inherited from {par}" if len(inh) == k and par else
-                   f", {len(inh)} inherited{' from ' + par if par else ''}"))
+            f"confirmed: in {n_c} well-covered {_pl(n_c, 'city')} and {wk}" + absent)
+    early = "early: found, not confirmed yet · check the next samples · " + rule + absent
+    if use_m and not g["ok_missing"]:
         return False, (f"{where} · " if where else "") + (
-            f"{k} of its {g['n_measured']} mutations missing{inh_txt}"), (
-            early + f" · missing: under {c.get('absent_freq', 0.01) * 100:g} % of the reads of all "
-            f"cities together: {', '.join(g['missing'][:8])}; a real lineage carries all its "
-            "mutations, those it inherits included")
-    if not g["pooled_seen"]:
-        return False, f"{where} · not clear with all cities pooled", early
+            f"{k} of its {g['n_measured']} mutations missing{inh_txt}"), early
+    if use_p and not g["pooled_seen"]:
+        return False, f"{where} · not clear on its samples", early
     if n_c < c.get("confirm_min_cities", 2):
         return False, (f"{where} only, {wk}" if well else f"{where}, {wk}"), early
     return False, f"{where}, {wk}", early

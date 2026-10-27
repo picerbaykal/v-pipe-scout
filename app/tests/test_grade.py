@@ -55,11 +55,31 @@ def _own(d, own, parent="P"):
     return d
 
 
-def test_mutations_missing_pooled_keep_it_early():
-    # PJ.2.1, Sep-Oct: 4 of 18 at 0.0-0.2 % pooled, all inherited from PJ.2
-    g = grade({c: _own(_city(W1 + W2, zero=("m4",)), ["m1", "m2", "m3"]) for c in ("GE", "ZH")})
-    assert g["missing"] == ["m4"] and not g["ok_missing"] and not g["confirmed"]
-    assert g["missing_inherited"] == ["m4"]
+def test_mutations_missing_pooled_keep_it_early(monkeypatch):
+    # with the absent check on (off by default since 2026-10-27)
+    import process.cooc as pc
+    monkeypatch.setitem(pc.CHECK_DEFAULTS, "confirm_use_missing", True)
+    # PJ.2.1, Sep-Oct: 4 of 19 absent on its samples, all inherited from PJ.2
+    g = grade({c: _own(_city(W1 + W2, zero=("m3", "m4")), ["m1", "m2"]) for c in ("GE", "ZH")})
+    assert g["missing"] == ["m3", "m4"] and not g["ok_missing"] and not g["confirmed"]
+    assert g["missing_inherited"] == ["m3", "m4"]
+
+
+def test_absent_mutations_dont_block_by_default():
+    # 2026-10-27: confirmed = cities and weeks; an absent mutation is reported only
+    import process.cooc as pc
+    g = grade({c: _city(W1 + W2, zero=("m4",)) for c in ("GE", "ZH")},
+              cfg={"confirm_missing_allow": 0})
+    assert g["missing"] == ["m4"] and not g["ok_missing"] and g["confirmed"]
+    assert pc.CHECK_DEFAULTS["confirm_use_missing"] is False
+
+
+def test_one_absent_mutation_is_always_allowed(monkeypatch):
+    import process.cooc as pc
+    monkeypatch.setitem(pc.CHECK_DEFAULTS, "confirm_use_missing", True)
+    # 2026-10-27: TA.1's 14808C at 0.0 % in Sep-Oct (7 mutations: 10 % allowed none)
+    g = grade({c: _city(W1 + W2, zero=("m4",)) for c in ("GE", "ZH")})
+    assert g["missing"] == ["m4"] and g["ok_missing"] and g["confirmed"]
 
 
 def _vt():
@@ -92,12 +112,17 @@ def test_row_says_confirmed_or_early_and_why():
     assert "Watch" in ov and "· 1 city" in ov and dk == "ring"
 
 
-def test_row_names_thin_cities_and_inherited_missing():
+def test_row_names_thin_cities_and_inherited_missing(monkeypatch):
+    # 4 mutations, 1 absent: none allowed here, to read the wording
+    import process.cooc as pc
+    monkeypatch.setitem(pc.CHECK_DEFAULTS, "confirm_missing_allow", 0)
+    monkeypatch.setitem(pc.CHECK_DEFAULTS, "confirm_use_missing", True)
     vt = _vt()
     C = ["Basel (BS)", "Lugano (TI)"]
     own = ["m1", "m2", "m3"]
-    f = {"per_city": {C[0]: {"days": 3, "check": _own(_city(W1 + W2, q=THIN, zero=("m4",)), own, "PJ.2")},
-                      C[1]: {"days": 3, "check": _own(_city(W1 + W2, zero=("m4",)), own, "PJ.2")}},
+    z = ("m4",)
+    f = {"per_city": {C[0]: {"days": 3, "check": _own(_city(W1 + W2, q=THIN, zero=z), own, "PJ.2")},
+                      C[1]: {"days": 3, "check": _own(_city(W1 + W2, zero=z), own, "PJ.2")}},
          "addable": True}
     kind, ov, tip, _dot, _n, dk = vt._finding_overview("PJ.2.1", f, C, [])
     assert "Watch" in ov and "· 1 of 4 mutations absent" in ov

@@ -169,9 +169,13 @@ def grade(per_city: Dict[str, dict], cfg: Optional[dict] = None) -> Optional[dic
                    those measured
       missing_inherited  of those, the ones it inherits (not its own markers),
                    when the result names its own markers
-      confirmed    pooled_seen, and in >= check.confirm_min_cities cities AND
+      confirmed    (2026-10-27: cities and weeks only; pooled_seen and
+                   ok_missing count only with check.confirm_use_pooled /
+                   confirm_use_missing on, both off by default)
+                   pooled_seen, and in >= check.confirm_min_cities cities AND
                    >= check.confirm_min_weeks weeks, and missing <=
-                   check.confirm_max_missing of n_measured
+                   check.confirm_max_missing of n_measured, and never fewer than
+                   check.confirm_missing_allow (1) allowed (2026-10-27)
     Until 2026-10-26 cities OR weeks, and thin cities counted: RV.2.1.1
     (Sep-Oct, 1 of 4 weeks) was confirmed while PJ.2.1 (1 of 4 weeks) was
     early; PJ.2.1's "seen in BS, GR, TI" rested on Basel (0 well covered)
@@ -217,8 +221,11 @@ def grade(per_city: Dict[str, dict], cfg: Optional[dict] = None) -> Optional[dic
     inherited = [m for m in missing if own is not None and m not in own]
     n_meas = a.get("n_measured", 0)
     pooled_seen = a["verdict"] == "present"
-    ok_missing = len(missing) <= int(c["confirm_max_missing"] * n_meas)
-    confirmed = bool(pooled_seen and ok_missing and len(cities) >= c["confirm_min_cities"]
+    ok_missing = len(missing) <= max(int(c.get("confirm_missing_allow", 1)),
+                                     int(c["confirm_max_missing"] * n_meas))
+    confirmed = bool((pooled_seen or not c.get("confirm_use_pooled", False))
+                     and (ok_missing or not c.get("confirm_use_missing", False))
+                     and len(cities) >= c["confirm_min_cities"]
                      and weeks >= c["confirm_min_weeks"])
     return {"cities": cities, "cities_thin": cities_thin, "pooled_seen": pooled_seen,
             "weeks": weeks, "n_weeks": len(conf["weeks"]), "missing": missing,

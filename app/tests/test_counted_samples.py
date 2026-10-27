@@ -67,8 +67,10 @@ def test_the_row_says_where():
     gone = ("9000A", "5100T")       # 2 of 5 absent on its samples: over 10 %
     f = {"status": "confirmed", "per_city": {
         c: {"days": 2, "check": _city(D, POS[c[-3:-1]], gone=gone)} for c in C}}
-    _kind, ov, *_ = vt._finding_overview("X", f, C, [])
-    assert "2 of 5 mutations absent on its 4 samples" in ov
+    _kind, ov, tip, *_ = vt._finding_overview("X", f, C, [])
+    # 2026-10-27: absent mutations are a note in the hover, not the row's reason
+    assert "absent" not in ov
+    assert "note: 2 of its 5 mutations absent on its 4 samples with coocs: 5100T, 9000A" in tip
 
 
 def test_details_say_where_and_when_for_panel_and_found_rows():
