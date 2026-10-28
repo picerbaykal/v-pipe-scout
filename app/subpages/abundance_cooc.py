@@ -1140,6 +1140,15 @@ def app():
                                         clinical=_explorer_clinical(start_date.isoformat(),
                                                                     end_date.isoformat()),
                                         pango_parent=st.session_state.get("acooc_pango_parent"))
+            elif _sec0 == "Signal over time":
+                # no run needed (2026-10-28): it reads LAPIS itself; the
+                # sidebar's cities, dates and panel; regions from ★ markers
+                from components.signal_over_time_ui import render_signal_over_time
+                render_signal_over_time(
+                    pango_loader=cached_get_pango_loader(), client=wiseLoculus,
+                    cities=list(selected_locations), start_date=start_date.isoformat(),
+                    end_date=end_date.isoformat(), panel=all_selected_variants,
+                    scanner_results={})
             else:
                 st.info({
                     "Panel check": "Press ▶ Run (step 5 on the left) to check whether your "
@@ -1148,8 +1157,6 @@ def app():
                                      "then CovvFit's growth advantages.",
                     "Lineages": "Available after ▶ Run: your panel variants with their ★ "
                                 "check, then the deep scan for what's outside your panel.",
-                    "Signal over time": "Available after ▶ Run: weekly co-occurrence and "
-                                        "mutation tables per lineage.",
                 }[_sec0])
         else:
             # The run line (2026-10-09, replaces the "re-run needed" warnings):

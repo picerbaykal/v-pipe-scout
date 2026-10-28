@@ -54,22 +54,21 @@ def render_signal_over_time(pango_loader, client, cities, start_date, end_date,
     st.caption("Per week, in one city: which base combinations sit on the same reads "
                "(co-occurrence) and how frequent each mutation is. Each region loads when "
                "you switch it on.")
+    # no run needed (2026-10-28): the cities and dates on the left; said first
     if not (cities and start_date and end_date and client):
-        st.info("Available once the run has cities and dates.")
+        st.warning("To show a lineage's signal, first select **cities** and **dates** "
+                   "on the left.")
         return
+    st.caption(f"Uses the selection on the left: {len(cities)} "
+               f"{'city' if len(cities) == 1 else 'cities'} · {str(start_date)[:10]} – "
+               f"{str(end_date)[:10]}")
     if scanning:
-        # wait for the deep scan (neutral banner: amber means 'not found' on this
-        # page): before it ends there are no found lineages,
-        # no scanner groups and no evidence marks, and reads are still being read
-        st.markdown(
-            "<div style='display:flex;align-items:center;gap:10px;padding:9px 14px;"
-            "margin:4px 0 10px;border-radius:8px;background:#f8fafc;border:1px solid #cbd5e1;"
-            "border-left:4px solid #475569;font-size:13px;color:#1f2937;'>"
-            "<span style='font-size:18px'>⏳</span><span><b>Waiting for the deep scan to "
-            "finish</b> — the lineages it finds come first in the list, with their own "
-            "regions and ● evidence marks. Available when the run is done.</span></div>",
-            unsafe_allow_html=True)
-        return
+        # usable during the deep scan (2026-10-28; it waited until then): the
+        # regions come from the ★ markers until the scan's own arrive
+        st.caption("⏳ The deep scan is still running: lineages use their ★ marker "
+                   "regions for now; the lineages it finds, their regions and ● evidence "
+                   "marks come when it is done.")
+        scanner_results = {}
 
     blocks_by, days_by, found, novel = _scan_index(scanner_results)
     panel = list(panel or [])

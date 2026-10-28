@@ -191,6 +191,20 @@ _LEFT_W = 300          # px of the left part (bases + total, or the mutation nam
                        #   the same in every table, so the week columns line up
 
 
+def _backbone():
+    """(is_backbone(m), limit): carried by more than check.pair_common lineages
+    (process.variant_explorer.common_mutations) — the rule's backbone
+    mutations, greyed here (2026-10-28)"""
+    try:
+        from process.cooc import _check_cfg
+        from process.variant_explorer import common_mutations
+        lim = int(_check_cfg().get("pair_common", 2000))
+        com = common_mutations(lim) or set()
+    except Exception:
+        lim, com = 2000, set()
+    return (lambda m: m in com), lim
+
+
 def _min_cov() -> int:
     """Reads at one position for a share to count (the check's min_cov)."""
     try:
@@ -315,9 +329,11 @@ document.addEventListener("mouseleave",function(){tip.style.display="none";});
 
 def _show(table_html, n_rows):
     """A table in its own small frame, so the hover box works (Streamlit's
-    markdown drops scripts)."""
+    markdown drops scripts). Wider than the frame (many weeks): it scrolls
+    sideways inside it (2026-10-28; the newest weeks were cut off)."""
     import streamlit.components.v1 as components
-    components.html(_CSS + table_html + _TIP, height=24 * n_rows + 80, scrolling=False)
+    components.html(_CSS + "<div style='overflow-x:auto;padding-bottom:4px'>" + table_html
+                    + "</div>" + _TIP, height=24 * n_rows + 98, scrolling=False)
 
 
 def _esc(t):
@@ -339,6 +355,16 @@ _TOP = 10
 def _cooc_table(positions, mut_base, star_pos, dates, per_date, covered, finding,
                 evidence_weeks):
     weeks = _weeks(dates)
+    is_bb, n_bb = _backbone()
+
+    def _th(p):
+        m = f"{p}{mut_base[p]}"
+        if is_bb(m) and p not in star_pos:
+            return (f"<th style='color:#c4c8cf' data-tip=\"{m}: backbone mutation — carried by "
+                    f"more than {n_bb:,} lineages, says little on its own\">{p}</th>")
+        return (f"<th data-tip=\"position {p}: {mut_base[p]} is the variant's base"
+                + (" · its own mutation" if p in star_pos else "") + f"\">{p}"
+                + (" ★" if p in star_pos else "") + "</th>")
     full = tuple(mut_base[p] for p in positions)
     totals = defaultdict(int)
     for d in dates:
@@ -353,8 +379,7 @@ def _cooc_table(positions, mut_base, star_pos, dates, per_date, covered, finding
     pw = max(30, (_LEFT_W - 72 - 2 * len(positions)) // max(1, len(positions)))
     cols = "".join(f"<col style='width:{pw}px'>" for _ in positions) + "<col style='width:72px'>" \
         + "".join("<col style='width:50px'>" for _ in weeks)
-    head = ("<tr>" + "".join(f"<th data-tip=\"position {p}: {mut_base[p]} is the variant's base\">{p}"
-                             f"{' ★' if p in star_pos else ''}</th>" for p in positions)
+    head = ("<tr>" + "".join(_th(p) for p in positions)
             + "<th style='text-align:right;padding-right:8px'>reads</th>"
             + "".join(f"<th>{_short(w)}</th>" for w in weeks) + "</tr>")
     body = []
@@ -372,7 +397,8 @@ def _cooc_table(positions, mut_base, star_pos, dates, per_date, covered, finding
             if rest else "")
     return (f"<table class='hm'>{cols}{head}{''.join(body)}</table>"
             f"<div class='hmnote'>{note}first row = {finding}'s combination (all its "
-            f"mutations) · blue base = the variant's, grey = reference · — = no read covers all "
+            f"mutations) · blue base = the variant's, grey = reference · pale position = "
+            f"backbone mutation · — = no read covers all "
             f"positions that week · 12r = only 12 such reads, fewer than {mr} · hover a cell "
             f"for its numbers</div>"), len(body)
 
@@ -391,6 +417,7 @@ def _render_haplotype_blocks(clade_node, star_blocks, is_star, n_outside, client
         st.caption("No group of ★ positions that one read can cover.")
         return
     blocks.sort(key=lambda x: x[0][0])
+    is_bb, _n_bb = _backbone()
     st.markdown(_CSS + "<div style='font-size:13.5px;font-weight:600;margin-top:8px'>"
                 "Co-occurrence</div><div class='hmnote'>the base combinations on reads covering "
                 "all positions of a region · cell = share of those reads, per week · ● = the "
@@ -399,7 +426,9 @@ def _render_haplotype_blocks(clade_node, star_blocks, is_star, n_outside, client
     for i, (positions, mut_base, star_pos) in enumerate(blocks):
         muts = [f"{p}{mut_base[p]}" for p in positions]
         label = (_region_title(muts) + " · "
-                 + " + ".join(f"{m}{'★' if _pos(m) in star_pos else ''}" for m in muts))
+                 + " + ".join(f"{m}{'★' if _pos(m) in star_pos else ''}" for m in muts)
+                 + (" · with a backbone mutation"
+                    if any(is_bb(m) and _pos(m) not in star_pos for m in muts) else ""))
         # a switch, not an expander: Streamlit runs a closed expander's code,
         # so every region would be fetched at once; this loads on demand
         if not st.toggle(label, key=f"hmc_{clade_node}_{location}_{i}", value=False):
@@ -434,10 +463,14 @@ def _render_per_mutation_blocks(clade_node, shared_mutations, member_blocks,
     if not groups:
         st.caption("No mutations to show.")
         return
-    groups.sort(key=lambda g: (not any(_is_star(m) for m in g), min(_pos(m) for m in g)))
+    # regions with a ★ first; a mutation alone in its region after them
+    # (2026-10-28)
+    groups.sort(key=lambda g: (not any(_is_star(m) for m in g), len(g) == 1,
+                               min(_pos(m) for m in g)))
+    is_bb, n_bb = _backbone()
     st.markdown(_CSS + "<div style='font-size:13.5px;font-weight:600;margin-top:14px'>"
                 "Mutations</div><div class='hmnote'>reads with the mutation / reads covering "
-                "its position, per week · ★ = marker of this finding"
+                "its position, per week · ★ = its own mutation · pale = backbone mutation"
                 "</div>", unsafe_allow_html=True)
     _legend()
     mc = _min_cov()
@@ -445,8 +478,13 @@ def _render_per_mutation_blocks(clade_node, shared_mutations, member_blocks,
         stars = sorted((m for m in g if _is_star(m)), key=_pos)
         rest = sorted((m for m in g if not _is_star(m)), key=_pos)
         ordered = (stars + rest)[:max_muts_per_block]
-        label = (_region_title(g) + (f" · {len(stars)} ★" if stars
-                                     else " · no ★ — shared mutations only"))
+        if len(g) == 1:
+            label = f"region {_pos(g[0]):,} · {g[0]}{' ★' if stars else ''}"
+        else:
+            label = (_region_title(g) + f" · {len(g)} mutations, "
+                     + (f"{len(stars)} own ★" if stars else "none its own — shared only")
+                     + (" · with a backbone mutation"
+                        if any(is_bb(m) and not _is_star(m) for m in g) else ""))
         if not st.toggle(label, key=f"hmm_{clade_node}_{location}_{i}", value=False):
             continue
         with st.container(border=True):
@@ -474,7 +512,12 @@ def _render_per_mutation_blocks(clade_node, shared_mutations, member_blocks,
                 n_out = _n_out(m)
                 tip = (f"{m}: carried by {n_out} lineages outside this family" if n_out is not None
                        else m)
-                body.append(f"<tr><td class='l' data-tip=\"{_esc(tip)}\">{m}{star}</td>"
+                bb = is_bb(m) and not _is_star(m)
+                if bb:
+                    tip = (f"{m}: backbone mutation — carried by more than {n_bb:,} lineages, "
+                           "says little on its own")
+                body.append(f"<tr><td class='l' style='{'color:#c4c8cf' if bb else ''}' "
+                            f"data-tip=\"{_esc(tip)}\">{m}{star}</td>"
                             f"{''.join(cells)}</tr>")
             _show(f"<table class='hm'>{cols}{head}{''.join(body)}</table>"
                   f"<div class='hmnote'>— = no read covers the position that week · "
@@ -501,6 +544,12 @@ def render_clade_heatmap(
     co-occurrence tables and mutation tables, one per genome region, per
     week, all folded. evidence_days: the scanner's counted days (● marks)."""
     _is_star, _n_out = _star_info(member_blocks)
+    # what the main page counts, said once (2026-10-28)
+    st.markdown("<div style='font-size:12.5px;color:#4b5563;margin:2px 0 6px'>Counted on the "
+                "main page: its own mutations together on the same reads (coocs) in 2 or more "
+                "genome regions of one sample, at least one without a backbone mutation. A single "
+                "mutation's share — even 100 % in a week — is shown here, not counted.</div>",
+                unsafe_allow_html=True)
     _star_blocks = [b for b in member_blocks
                     if any(_is_star(m) for m in b.get("discriminating", []))]
     if not _star_blocks:
