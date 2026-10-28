@@ -98,8 +98,7 @@ def _check_section(variant, panel, cities, start_date, end_date, celery_app, key
     rules (process.variant_explorer.judge) and draws it as a tree row
     (components.variants_table.investigate_view)."""
     if not (cities and start_date and end_date and celery_app):
-        st.caption("Choose cities and dates on the left to check it in their data.")
-        return
+        return                      # the warning at the top says what to select
     from process.national import check_start
     k = f"{key_prefix}_check"
     cur = st.session_state.get(k)
@@ -221,6 +220,17 @@ def render_variant_explorer(pango_loader, panel=None, options=None,
     st.caption("Quick look-up of any lineage, in the panel or not: can reads tell it "
                "apart (★ markers), how it relates to others — and, after a run, is it "
                "in your cities' data.")
+
+    # what Check in data will use, said first (2026-10-27)
+    if not cities or not start_date or not end_date:
+        st.warning("To check a lineage in the data, first select **cities** and **dates** "
+                   "on the left (after ▶ Run: wait for the panel check to finish). The look-up "
+                   "below works without them.")
+    else:
+        _n = len(cities)
+        st.caption(f"Check in data uses the selection on the left: {_n} "
+                   f"{'city' if _n == 1 else 'cities'} · {str(start_date)[:10]} – "
+                   f"{str(end_date)[:10]} (and 7 weeks back for the weeks squares)")
 
     if options is None:
         options = sorted(pango_loader.get_raw_data().keys())
