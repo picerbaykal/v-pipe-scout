@@ -258,7 +258,15 @@ def render_variant_explorer(pango_loader, panel=None, options=None,
 
     lines = [f"<b>Markers:</b> {r['reason']}"]
     if r["parent"]:
-        lines.append(f"<span style='color:#6b7280;'>Belongs to:</span> <b>{r['parent']}</b>")
+        # the whole path up the Pango tree (2026-10-28): aliases hide it
+        # (SV.2 › PQ.16.1.1 › … › NB.1.8.1 needed one look-up per level)
+        raw = pango_loader.get_raw_data()
+        chain, cur = [], r["parent"]
+        while cur and cur not in chain and len(chain) < 40:
+            chain.append(cur)
+            cur = (raw.get(cur) or {}).get("parent") or ""
+        lines.append("<span style='color:#6b7280;'>Belongs to:</span> <b>" + chain[0] + "</b>"
+                     + "".join(f" <span style='color:#9ca3af'>›</span> {x}" for x in chain[1:]))
     if r["oscillates_with"]:
         lines.append(
             "<span style='color:#6b7280;'>Near-identical to (can't be told apart):</span> "
