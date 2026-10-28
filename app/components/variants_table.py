@@ -65,7 +65,12 @@ CSS = """
 .vt td.nomk { color:#8b8f97; font-size:13px; padding-left:8px; }
 .vt td.ov { white-space:normal; padding:2px 8px; min-width:250px; max-width:300px; }
 .vt .ovb { display:inline-block; font-size:12.5px; line-height:1.3; padding:2px 7px; border-radius:5px; }
-.vt .ovw { display:flex; justify-content:space-between; align-items:center; gap:10px; }
+/* the weeks squares go under the status when both don't fit the column
+   (2026-10-28: Feb-Oct, 'Watch · 1 of 3 weeks' + 12 squares ran into the
+   first city cell) */
+.vt .ovw { display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center;
+           column-gap:10px; row-gap:3px; }
+.vt .ovw .wks { margin-left:auto; }
 .vt table.wkt { border-collapse:separate; border-spacing:2px 2px; font-size:12px; margin:4px 0 2px; width:auto; }
 .vt table.wkt th { font-weight:400; color:#6b7280; padding:1px 5px; text-align:center;
                    text-transform:none; letter-spacing:0; border:0 !important; background:none; }
@@ -79,7 +84,7 @@ CSS = """
 .vt .dh { font-size:12.5px; font-weight:600; margin:10px 0 2px; }
 .vt .ovw .ovb { white-space:nowrap; }
 .vt .wks { display:inline-flex; gap:2px; align-items:center; white-space:nowrap; flex:none; }
-.vt .wks i { display:inline-block; width:12px; height:14px; border-radius:2px; }
+.vt .wks i { display:inline-block; width:10px; height:13px; border-radius:2px; }
 .vt .wks .wkm { font-size:12px; color:#9ca3af; margin-right:2px; }
 .vt .ovb b { font-weight:600; }
 .vt .ovb .add { margin-left:6px; }
@@ -2800,6 +2805,18 @@ if (!window.vtObs) {
   window.vtObs.observe(root, {childList: true});
 }
 window.vtReopen();
+// the frame follows the table's height (2026-10-28): a view drawn with its
+// details already open (Investigate a variant) was measured before the
+// details' layout settled, and the frame cut the weeks calendar
+if (!window.vtRO && window.ResizeObserver) {
+  window.vtRO = new ResizeObserver(function () {
+    if (typeof window.sendHeight === "function") window.sendHeight();
+  });
+  window.vtRO.observe(document.body);
+}
+setTimeout(function () {
+  if (typeof window.sendHeight === "function") window.sendHeight();
+}, 300);
 """
 
 
