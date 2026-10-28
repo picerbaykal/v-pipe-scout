@@ -65,21 +65,24 @@ def test_coocs_table_counts_every_pair_and_marks_common_partners():
                                                     ["6183G+6196A", 0.98, 900, True]],
                                      "2026-09-19": [["6183G+6196A", 0.90, 500, True]]}}}
     html = vt._cooc_table({C[0]: d}, [C[0]])
-    # 2026-10-27: one row per stretch; a stretch whose pairs all have a
-    # backbone mutation is marked; pairs in the hover
-    assert "6,183–6,196 · 1 pair" in html and "2 · 98 %" in html
-    assert "24,469–24,604 · 1 pair · with a backbone mutation" in html
+    # 2026-10-27: one row per genome region; a region whose pairs all have a
+    # backbone mutation is marked; pairs in the hover. 2026-10-28: the label
+    # counts mutations, the rows are in genome order
+    assert "6,183–6,196 · 2 mutations" in html and "2 · 98 %" in html
+    assert "24,469–24,604 · 2 mutations · with a backbone mutation" in html
+    assert html.index("6,183–6,196") < html.index("24,469–24,604")
     assert "24469A + 24604G (backbone mutation)" in html
 
 
-def test_pairs_closer_than_a_read_are_one_stretch():
+def test_pairs_closer_than_a_read_are_one_region():
     vt = _vt()
     d = {"pairs": {"per_date_all": {"2026-09-12": [["22792T+22896G", 1.0, 900, True],
                                                     ["22893G+23021G", 1.0, 900, True],
                                                     ["23021G+23039G", 1.0, 900, True],
                                                     ["8350C+8393A", 0.99, 900, True]]}}}
     html = vt._cooc_table({C[0]: d}, [C[0]])
-    assert "22,792–23,039 · 3 pairs" in html and "8,350–8,393 · 1 pair" in html
+    assert "22,792–23,039 · 5 mutations (3 pairs)" in html and "8,350–8,393 · 2 mutations" in html
+    assert "genome region" in html and "stretch" not in html
 
 
 def test_couldnt_answer_says_why():

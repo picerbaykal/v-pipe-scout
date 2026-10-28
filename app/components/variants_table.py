@@ -550,18 +550,18 @@ def _cell_tip(v, city, d, extra=""):
             lines.append(single)
         elif d.get("state_markers") == "present":
             lines = [f"{v} · {city} — weaker: seen by single mutations only", single,
-                     f"Its own combinations on the same reads: none on 2 or more stretches of one "
+                     f"Its own combinations on the same reads: none in 2 or more genome regions of one "
                      f"sample ({n_read} {_pl(n_read, 'sample')} read)",
                      "A single mutation can come from another lineage's reads: check the next "
                      "samples"]
         elif d.get("state_markers") != "absent":
             lines = [f"{v} · {city} — undecided",
-                     f"Its own combinations on the same reads: none on 2 or more stretches of one "
+                     f"Its own combinations on the same reads: none in 2 or more genome regions of one "
                      f"sample ({n_read} {_pl(n_read, 'sample')} read)", single,
                      "Too little to say seen or not seen"]
         else:
             lines = [f"{v} · {city} — not seen",
-                     f"Its own combinations on the same reads: none on 2 or more stretches of one "
+                     f"Its own combinations on the same reads: none in 2 or more genome regions of one "
                      f"sample ({n_read} {_pl(n_read, 'sample')} read)", single]
         return "\n".join(lines) + extra
     n_mk, p, a, u = _vote_counts(d)
@@ -1024,8 +1024,9 @@ def _cooc_table(per_city, cities):
             for day, sh in (seen[k].get(c) or {}).items():
                 days[day] = max(days.get(day, 0.0), sh)
         return len(days), (max(days.values()) if days else 0.0)
+    # the 8 regions seen on the most samples, shown in genome order (2026-10-28)
     order = sorted(groups, key=lambda g: (-sum(stat(g, c)[0] for c in cities), _pair_pos(g[0])))
-    shown, more = order[:8], max(0, len(order) - 8)
+    shown, more = sorted(order[:8], key=lambda g: _pair_pos(g[0])), max(0, len(order) - 8)
     head = "".join(f"<th>{_e(city_code(c))}</th>" for c in cities)
     rows = []
     n_bb = int((_check_cfg_safe() or {}).get("pair_common", 2000))
@@ -1038,12 +1039,16 @@ def _cooc_table(per_city, cities):
             cells.append(f"<td style='{sty}'>{f'{n} · {100 * b:.0f} %' if n else '–'}</td>")
         lo, hi = _pair_pos(g[0])[0], max(_pair_pos(k)[1] for k in g)
         weak = all(k in backbone for k in g)
-        tip = ("pairs seen in this stretch: " + "; ".join(
+        muts = sorted({m for k in g for m in k.split("+")}, key=lambda m: _pair_pos(m)[0])
+        tip = (f"{len(muts)} mutations: {', '.join(muts)} · pairs seen in this genome region: " + "; ".join(
             k.replace("+", " + ") + (" (backbone mutation)" if k in backbone else "") for k in g)
             + (f" · backbone mutation: inherited from a deep ancestor and carried by more than "
-               f"{n_bb:,} lineages, so weaker evidence; a sample also needs a stretch without one"
+               f"{n_bb:,} lineages, so weaker evidence; a sample also needs a genome region without one"
                if any(k in backbone for k in g) else ""))
-        lab = (f"{lo:,}–{hi:,} · {len(g)} {_pl(len(g), 'pair')}"
+        # mutations, not pairs (2026-10-28): 13 mutations of one amplicon make
+        # 78 pairs; the mutations are what an amplicon view lists
+        lab = (f"{lo:,}–{hi:,} · {len(muts)} {_pl(len(muts), 'mutation')}"
+               + (f" ({len(g)} {_pl(len(g), 'pair')})" if len(g) > 1 else "")
                + (" · with a backbone mutation" if weak else ""))
         best = max(g, key=lambda k: sum(len(v) for v in seen[k].values()))
         q = quote_plus(best.replace("+", ","))
@@ -1052,13 +1057,15 @@ def _cooc_table(per_city, cities):
                     + _ext(_CLIN_WORLD.format(muts=q), "World", f"clinical sequences carrying {best.replace('+', ' and ')}, worldwide")
                     + " " + _ext(_CLIN_EUROPE.format(muts=q), "Europe", "the same, Europe only")
                     + "</td></tr>")
-    return ("<div class='dh'>Its coocs seen, by stretch of genome <span class='dim'>(its own mutations "
-            "together on the same reads; pairs closer than a read count once; cell = samples where "
-            "seen · best share; hover a stretch for its pairs)</span></div>"
-            f"<table class='wkt'><tr><th style='text-align:left'>stretch</th>{head}"
+    return ("<div class='dh'>Its coocs seen, by genome region <span class='dim'>(its own mutations "
+            "together on the same reads; pairs closer than a read count once; in genome order; "
+            "cell = samples where seen · best share; hover a region for its mutations and pairs)"
+            "</span></div>"
+            f"<table class='wkt'><tr><th style='text-align:left'>genome region</th>{head}"
             "<th style='text-align:left'>clinical</th></tr>"
             f"{''.join(rows)}</table>"
-            + (f"<div class='dim' style='font-size:11px'>+ {more} more {_pl(more, 'stretch')}</div>"
+            + (f"<div class='dim' style='font-size:11px'>+ {more} more genome "
+               f"{_pl(more, 'region')}, seen on fewer samples</div>"
                if more else ""))
 
 
