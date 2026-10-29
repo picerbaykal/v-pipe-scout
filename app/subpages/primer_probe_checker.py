@@ -1206,7 +1206,37 @@ def app():
     # ── Heatmap ────────────────────────────────────────────────────────────────
     heatmap_data = build_primer_heatmap_data(time_series, found, dominant_letters)
     st.subheader("Mutation prevalence over time")
-    st.caption(f"Site: {selected_location} | {date_from_str} to {date_to_str}")
+
+    # Which requested months actually have data? (zero-coverage months are dropped)
+    requested_months = [
+        r["dateFrom"][:7]
+        for r in build_monthly_ranges(
+            datetime.strptime(date_from_str, "%Y-%m-%d"),
+            datetime.strptime(date_to_str, "%Y-%m-%d"),
+        )
+    ]
+    MIN_MONTH_COVERAGE = 1000  # reads; below this a month counts as "no data"
+    months_with_data = sorted({
+        m
+        for per_month in time_series.values()
+        for m, v in per_month.items()
+        if v.get("coverage", 0) >= MIN_MONTH_COVERAGE
+    })
+    missing_months = [m for m in requested_months if m not in months_with_data]
+
+    if months_with_data:
+        st.caption(
+            f"Site: {selected_location} | requested {date_from_str} to {date_to_str} | "
+            f"data available: {months_with_data[0]} to {months_with_data[-1]}"
+        )
+    if missing_months:
+        shown = ", ".join(missing_months[:6])
+        if len(missing_months) > 6:
+            shown += f" … (+{len(missing_months) - 6} more)"
+        st.info(
+            f"No usable sequencing data (≥1000 reads) for {len(missing_months)} of {len(requested_months)} "
+            f"requested month(s): {shown}. These months are not shown."
+        )
     html = build_html_heatmap(heatmap_data)
     n_heatmap_rows = sum(
         1 for info in heatmap_data.values()
