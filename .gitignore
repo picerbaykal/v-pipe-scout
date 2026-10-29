@@ -11,3 +11,5 @@ data/known_variants/*.yaml
 .envrc
 .idea/
 worker/data/
+
+worker/.cache/
