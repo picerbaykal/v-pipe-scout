@@ -427,6 +427,9 @@ def build_primer_heatmap_data(time_series, results, dominant_letters):
             # find worst mismatch in this primer for this month
             worst_proportion = 0.0
             worst_text = None
+            worst_pos = None
+            worst_alt = None
+            mismatch_count = 0
             is_match = False
             has_any_mutation = False
 
@@ -461,6 +464,8 @@ def build_primer_heatmap_data(time_series, results, dominant_letters):
                         if frac > worst_proportion:
                             worst_proportion = frac
                             worst_text = f"{primer_letter}≠{alt_letter} {frac:.0%}"
+                            worst_pos = mut_pos
+                            worst_alt = alt_letter
 
             if not has_any_mutation:
                 heatmap_data[name]["months"][month] = {
@@ -478,7 +483,11 @@ def build_primer_heatmap_data(time_series, results, dominant_letters):
                 heatmap_data[name]["months"][month] = {
                     "status": "mismatch",
                     "text": worst_text or "≠",
-                    "proportion": worst_proportion
+                    "proportion": worst_proportion,
+                    "pos": worst_pos,
+                    "alt": worst_alt,
+                    "ref": None,
+                    "mismatch_count": mismatch_count,
                 }
 
     return heatmap_data
@@ -588,12 +597,29 @@ def build_html_heatmap(heatmap_data):
                 tooltip_html = f'<div class="tooltip"><div class="tt-title">{name}</div><div class="tt-row">{month}: no mutations detected</div></div>'
             elif status == "match":
                 style = "background:#d4edda;color:#155724;"
-                tooltip_html = f'<div class="tooltip"><div class="tt-title">{name}</div><div class="tt-row">{month}: {text}</div><div class="tt-row" style="color:#888;font-size:11px;">Primer matches circulating virus</div></div>'
+                pos_line = ""
+                if cell.get("pos") and cell.get("alt"):
+                    ref_at_pos = text.split("≠")[0] if "≠" in text else ""
+                    pos_line = f'<div class="tt-row" style="color:#333;">{cell["pos"]}: {ref_at_pos}→{cell["alt"]}</div>'
+                extra = ""
+                mc = cell.get("mismatch_count", 0)
+                if mc > 1:
+                    extra = f'<div class="tt-row" style="color:#a32d2d;font-size:11px;">+{mc - 1} more mismatch(es) in this primer</div>'
+                tooltip_html = f'<div class="tooltip"><div class="tt-title">{name}</div><div class="tt-row">{month}: {text}</div>{pos_line}{extra}<div class="tt-row" style="color:#888;font-size:11px;">Primer mismatches circulating virus</div></div>'
             else:
                 style = mismatch_color(proportion)
                 tooltip_html = f'<div class="tooltip"><div class="tt-title">{name}</div><div class="tt-row">{month}: {text}</div><div class="tt-row" style="color:#888;font-size:11px;">Primer mismatches circulating virus</div></div>'
 
-            html += f'<td><div class="pp-cell" style="{style}">{text}{tooltip_html}</div></td>'
+            # native tooltip (not clipped by the iframe)
+            title_bits = [f"{name} — {month}"]
+            if cell.get("pos") and cell.get("alt"):
+                ref_at_pos = text.split("≠")[0] if "≠" in text else (text.split("=")[0] if "=" in text else "")
+                title_bits.append(f"{cell['pos']}: {ref_at_pos}→{cell['alt']}")
+            mc = cell.get("mismatch_count", 0)
+            if mc > 1:
+                title_bits.append(f"+{mc - 1} more mismatch(es) in this primer")
+            title_attr = " | ".join(title_bits)
+            html += f'<td><div class="pp-cell" title="{title_attr}" style="{style}">{text}{tooltip_html}</div></td>'
 
         html += "</tr>"
 
