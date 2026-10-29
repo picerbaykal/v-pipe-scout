@@ -1048,30 +1048,50 @@ def app():
             with open(demo_path) as f:
                 demo_content = f.read()
 
+    # --- FASTA source state (survives reruns, e.g. when the city filter changes) ---
+    if "ppc_source" not in st.session_state:
+        st.session_state.ppc_source = None  # "example" | "upload" | None
+    if "ppc_uploader_counter" not in st.session_state:
+        st.session_state.ppc_uploader_counter = 0
+
+    def _read_cdc_example():
+        p = os.path.join(os.path.dirname(__file__), "..", "data", "cdc_n1_n2.fasta")
+        if os.path.exists(p):
+            with open(p) as f:
+                return f.read()
+        return None
+
     primer_file = st.file_uploader(
         "Primer/probe FASTA",
         type=["fasta", "fa"],
         help="e.g. CDC N1/N2 diagnostic primers, or ARTIC amplicon primers",
-        key="ppc_fasta_upload",
+        key=f"ppc_fasta_upload_{st.session_state.ppc_uploader_counter}",
     )
 
-    # "Try an example" button — loads bundled CDC N1/N2 file
+    # A fresh upload takes over from any active example.
+    if primer_file is not None:
+        st.session_state.ppc_source = "upload"
+
+    # "Try an example" — load bundled CDC N1/N2 and clear any stale upload.
     load_example = st.button("Try an example (CDC N1/N2)")
     if load_example:
-        demo_path = os.path.join(
-            os.path.dirname(__file__), "..", "data", "cdc_n1_n2.fasta"
-        )
-        if os.path.exists(demo_path):
-            with open(demo_path) as f:
-                demo_content = f.read()
+        st.session_state.ppc_source = "example"
+        st.session_state.ppc_uploader_counter += 1  # recreate the uploader empty
+        st.rerun()
 
-    # Decide the source of the FASTA content
-    if demo_content is not None:
+    # Decide the source of the FASTA content.
+    if demo_content is not None:  # ?demo=cdc / ?fasta=... (URL)
         raw_content = demo_content
-    elif primer_file is not None:
+    elif st.session_state.ppc_source == "example":
+        raw_content = _read_cdc_example()
+    elif st.session_state.ppc_source == "upload" and primer_file is not None:
         raw_content = primer_file.read().decode("utf-8")
     else:
         st.info("👆 Upload a primer/probe FASTA file, or click **Try an example** above.")
+        return
+
+    if raw_content is None:
+        st.error("Could not load the CDC N1/N2 example file.")
         return
 
     # ── Parse primers ──────────────────────────────────────────────────────────
