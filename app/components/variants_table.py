@@ -150,6 +150,8 @@ CSS = """
 .lg .lgt { cursor:pointer; font-weight:600; color:#31333f; }
 .lg .hid { display:none; }
 .lg .row { display:flex; flex-wrap:wrap; gap:2px 18px; align-items:center; }
+.lg .wks { display:inline-flex; gap:2px; vertical-align:middle; margin:0 3px; }
+.lg .wks i { display:inline-block; width:10px; height:13px; border-radius:2px; }
 .lg .t { color:#6b7280; font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.03em;
          min-width:52px; }
 .lg span.i { display:inline-flex; align-items:center; gap:6px; }
@@ -1494,6 +1496,16 @@ def _panel_overview(per_city, cities, wk=None):
         rs = row_status(wk)
     except Exception:
         rs = None
+    if rs and wk["weeks"][-1]["status"] == "confirmed":
+        note = " · confirmed"
+    elif not rs:
+        # no weeks (old results): the chosen dates' grade, all cities
+        try:
+            from process.national import grade
+            g = grade({c: per_city[c] for c in meas}) or {}
+        except Exception:
+            g = {}
+        note = " · confirmed" if g.get("confirmed") else " · not confirmed"
     if rs and wk["weeks"][-1]["status"] != "confirmed":
         note = (f" · not confirmed since {_short_date(rs['last_confirmed'])}"
                 if rs.get("last_confirmed") else " · not confirmed")
@@ -1503,8 +1515,10 @@ def _panel_overview(per_city, cities, wk=None):
     where_all = ", ".join(_tag(c) for c in seen)
     tip = (f"In panel: seen in {len(seen)} of {len(meas)} cities"
            + (f" ({where_all})" if where_all else "") + ("\n" + tip if tip else ""))
-    return (_ovw(_ovb(f"<b style='color:#1f2328'>In panel</b> · {len(seen)} of "
-                      f"{len(meas)}{note}"), _weeks_strip(wk)),
+    # "seen in k of n (GR thin)" + confirmed or not (2026-10-28): the same
+    # kind of answer as a found row's, so "In panel" doesn't read as a verdict
+    return (_ovw(_ovb(f"<b style='color:#1f2328'>In panel</b> · seen in {len(seen)} of "
+                      f"{len(meas)}{where}{note}"), _weeks_strip(wk)),
             tip, GREEN if seen else "#d1d5db", "#15803d" if seen else "#6b7280", "filled")
 
 
@@ -2582,50 +2596,91 @@ def _lc(d, found=False, extra=""):
     return f"<i class='c' style='width:auto;padding:0 6px;{st}{extra}'>{_lab_html(lb)}</i>"
 
 
+def _chip(style, label):
+    return f"<i class='c' style='width:auto;padding:0 6px;{style}'>{label}</i>"
+
+
+def _lrow(title, items):
+    """one legend row; each item = a swatch + its text, the text kept in one
+    inline span so bold words don't split it into columns (span.i is flex)"""
+    def item(x):
+        if x.startswith("<span class='i'>"):          # _li / _ld
+            x = x[len("<span class='i'>"):-len("</span>")]
+        k = x.find("</i>") + 4 if x.startswith("<i ") else 0
+        return f"<span class='i'>{x[:k]}<span>{x[k:]}</span></span>"
+    return ("<div class='row'><span class='t'>" + title + "</span>"
+            + "".join(item(x) for x in items) + "</div>")
+
+
+# "How to read this page" (2026-10-28): what the page shows, in its own words;
+# the rules, their settings and how they were tested are in RULES.md
 _LEGEND_ROWS = (
-    ""
-    "<div class='row'><span class='t'>★ check</span>"
-    "<span class='i'>each cell is the vote of the lineage's ★ markers, like a score: "
-    + f"<b>present : absent</b> (present ≥ {_num()['pf']} % of ≥ {_num()['mc']} reads, absent "
-    + f"< {_num()['af']} %), and in brackets the markers that couldn't answer (under "
-    + f"{_num()['mc']} reads after weighting by coverage, between {_num()['af']} and "
-    + f"{_num()['pf']} %, or reads unlike it)</span>"
-    + "<span class='i'>"
-    + _lc({"n_markers": 4, "n_measured": 4, "n_present": 3}) + "present: more present than absent, "
-    + f"and at least {_min_present()} present</span>"
-    + "<span class='i'>" + _lc({"n_markers": 4, "n_measured": 4, "n_present": 0}) + "absent: more absent than present</span>"
-    + "<span class='i'>" + _lc({"n_markers": 2, "n_measured": 2, "n_present": 1})
-    + _lc({"n_markers": 2, "n_measured": 1, "n_present": 1})
-    + f"undecided: a tie, or fewer than {_min_present()} present</span>"
-    + "<span class='i'><b style='color:" + AMBER_T + "'>in your panel</b> · present in none of … cities = "
-      "a lineage of your panel no city calls present</span>"
-    + "<span class='i'>a row with no ★ marker says so once, across the cities</span>"
-    + "<span class='i'>details ▸ = samples per city and the markers' reads</span>"
-    + "<span class='i'>in hovers: ✓ present (≥ " + f"{_num()['pf']}" + " %) · ✗ absent (< "
-    + f"{_num()['af']}" + " %) · ~ in between · ? too few reads (or too few linked reads) · ≠ on reads unlike it · "
-      "▧ low-coverage sample</span>"
-    + "</div><div class='row'><span class='t'>Found</span>"
-    + _li(S_NAMED, "0", "not confirmed (reads also fit related lineages)")
-    + "<span class='i'><b style='color:#9ca3af'>covered</b>: its own mutations are on the reads "
-      "of lineages below it (itself under the present limit), no + Add — add those instead</span>"
-    + _li(S_NOVEL, "3", "unassigned · days")
-    + _li(S_BROAD, "2", "fits too many lineages · days")
-    + _li(S_NEAR, "3", "◆ panel variant ± 1 change · days (a hint)")
-    + "</div><div class='row'><span class='t'>Tree</span>"
-    + _ld(f"background:{GREEN}", "in panel, seen somewhere")
-    + _ld(f"background:{AMBER}", "in panel, not seen in any city")
-    + _ld(f"background:{RED}", "add to panel: confirmed 3 weeks in a row (the 4 weeks up to "
-          "each Sunday: all cities pooled seen, ≥ 2 well-covered cities, ≥ 2 weeks, ≤ 10 % of "
-          "its mutations missing) · + Add")
-    + _ld(f"border:2px solid {RED}", "watch: found, not ready to add; the row says why")
-    + _ld("border:2px solid #9ca3af", "suggested: a name from the deep scan without coocs of "
-          "its own (most are listed in one closed line under the tree)")
-    + _ld("border:2px solid #d1d5db", "covered: its own mutations are on a lineage below it")
-    + _ld(f"border:2px solid {TRACKED}", "OT, not selected")
-    + "<span class='i'>the dots and the overview column cover all cities and don't change when "
-      "you click one · click a city's code or any of its cells to see it in the details · "
-      "suggestions their own mutations don't support are listed in one line under the "
-      "tree</span></div>")
+    _lrow("A cell · one city, the chosen dates", [
+        "<b>k/n</b> = samples with its coocs / samples where its pairs were read · a "
+        "<b>cooc</b> = two of its own mutations on the same reads · a sample counts with coocs "
+        "in 2 or more genome regions, at least one without a backbone mutation",
+        _chip(S_YES, "2/8") + "seen",
+        _chip(S_YES + _LOWQ_CELL, "1/8") + "seen only on thin samples: shown, not counted",
+        _chip(S_SINGLE, "0/8") + "only single mutations seen: shown, not counted",
+        _chip(S_NO, "0/8") + "not seen",
+        _chip(S_OPEN, "0/4") + "undecided: too few reads at its pairs",
+        _chip(S_NOMARK, "·") + "can't be checked with coocs: no pairs read here",
+        "<span class='dim'>results from before pair counts: seen : not seen (couldn't answer), "
+        "the old vote of single mutations</span>",
+    ])
+    + _lrow("Overview · all cities, the last weeks", [
+        "<b>confirmed</b> = in the 4 weeks up to a Sunday, coocs in 2 or more well-covered "
+        "cities and in 2 or more weeks · thin cities are shown, not counted",
+        "<b>weeks squares</b> = one per Sunday, newest right: <span class='wks'><i style='background:"
+        + GREEN + "'></i></span> confirmed · <span class='wks'><i style='background:#c0dd97'></i>"
+        "</span> found · <span class='wks'><i style='background:#fff;box-shadow:inset 0 0 0 1px "
+        "#d1d5db'></i></span> not found · the status reads 7 weeks back, whatever dates you chose",
+        _ld(f"background:{RED}", "<b>Add</b> · N weeks in a row: confirmed 3 Sundays in a row → + Add"),
+        _ld(f"border:2px solid {RED}", "<b>Watch</b> · why: found, not ready (1 city, thin "
+            "samples only, k of 3 weeks)"),
+        _ld("border:2px solid #d1d5db", "<b>Fading</b> · last confirmed … · <b>Earlier only</b> · "
+            "last seen …"),
+        _ld(f"background:{GREEN}", "<b>In panel</b> · seen in k of n cities · confirmed or not: "
+            "seen = this lineage <b>or its children not in the panel</b>; a found child takes its "
+            "share out once added"),
+        _ld(f"background:{AMBER}", "<b>In panel</b> · not seen in any city"),
+        _ld(f"background:{GREY}", "<b>In panel</b> · can't be checked: no mutation or pair of its own"),
+        _ld("border:2px solid #d1d5db", "<b>Covered</b> by X: its own mutations are on the reads "
+            "of X, below it · add X instead"),
+        _ld("border:2px solid #9ca3af", "names the deep scan suggested without coocs of their own: "
+            "one closed line under the tree"),
+        _ld(f"border:2px solid {TRACKED}", "OT, not selected"),
+    ])
+    + _lrow("Details · click a cell or details ▸", [
+        "<b>weeks</b>: wastewater samples with coocs; Europe and World clinical sequences "
+        "(X and below / all; striped = under 20 or still filling in); one square per sample "
+        "and city",
+        "<b>coocs, by genome region</b>: pairs closer than a read count once; "
+        "“13 mutations (78 pairs)” is one region; pale = only pairs with a backbone mutation "
+        "(carried by most lineages)",
+        "<b>its mutations</b>: share of reads per city · <100 too few reads · 1–5 % in between "
+        "· link = its reads don't look like the lineage",
+    ])
+    + _lrow("Unassigned", [
+        _li(S_NOVEL, "3", "<b>recurring</b>: no lineage carries it, on well-covered samples in "
+            "2 or more weeks · watch the next samples"),
+        "seen, not recurring · no evidence day",
+        _li(S_BROAD, "2", "fits too many lineages"),
+        _li(S_NEAR, "3", "◆ panel lineage ± 1 change (a hint)"),
+    ])
+    + _lrow("Look-up · no run needed", [
+        "<b>Investigate a variant</b>: one lineage, the same rules and answer as the tree",
+        "<b>Signal over time</b>: its data per week · shows, doesn't count",
+    ])
+    + _lrow("Good to know", [
+        "a found lineage can be a parent whose child is what circulates: the row is right for "
+        "the family; the child gets its own row once its own mutations are on enough reads",
+        "a child with 0–1 own mutations, or own mutations common elsewhere, stays inside its parent",
+        "a city with fewer than 2 well-covered samples can't count",
+        "Europe's clinical data is thin (mostly the UK and Germany)",
+        "the rules, their settings and how they were tested: RULES.md",
+    ])
+)
 
 # The full legend now lives behind "ⓘ How to read this page" above the tabs
 # (components.how_to_read, 2026-10-13); the table keeps one short line on top,
@@ -2641,6 +2696,7 @@ SHORT_LEGEND = (
       "only single mutations seen (weaker)</span>"
     + f"<span class='i'><i class='c' style='width:auto;padding:0 6px;{S_NO}'>0/8</i>not seen</span>"
     + f"<span class='i'><i class='c' style='width:auto;padding:0 6px;{S_OPEN}'>0/4</i>undecided</span>"
+    + f"<span class='i'><i class='c' style='width:auto;padding:0 6px;{S_NOMARK}'>·</i>can't be checked</span>"
     + "<span class='i dim'>results without pair counts: " + _lc({"n_markers": 3, "n_measured": 3, "n_present": 3})
     + "seen : not seen (couldn't answer)</span>"
     + "<span class='i'><span class='cal'><i style='background:" + GREEN + ";" + _LOWQ
@@ -2649,7 +2705,7 @@ SHORT_LEGEND = (
     + _ld(f"background:{AMBER}", "in panel, not seen in any city")
     + _ld(f"background:{RED}", "add to panel")
     + _ld(f"border:2px solid {RED}", "watch")
-    + _ld("border:2px solid #d1d5db", "covered / suggested")
+    + _ld("border:2px solid #d1d5db", "fading / covered / suggested")
     + "<span class='dim'>click a cell for its details · ⓘ more: “How to read this page” above the tabs</span>"
     + "</div></div>")
 

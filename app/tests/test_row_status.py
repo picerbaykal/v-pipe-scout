@@ -75,7 +75,8 @@ def test_panel_row_says_not_confirmed_since():
     ov = vt._panel_overview({c: d for c in C}, C, _wk("FCFFFF..FFFFF."))[0]
     assert "not confirmed since 12 Jul" in ov
     ov = vt._panel_overview({c: d for c in C}, C, _wk("FFFF....FFFFFC"))[0]
-    assert "· not confirmed" not in ov
+    assert "· not confirmed" not in ov and "· confirmed" in ov
+    assert "seen in 2 of 2 (GE, ZH)" in ov       # 2026-10-28: names up to 3 cities
 
 
 def test_watch_says_how_many_weeks_in_a_row():

@@ -100,23 +100,3 @@ lists:
                         #   reads also fit related lineages (XFV.5, RE.2.2 …)
   broad_max: 25
   near_changes_max: 8
-
-# ── "How to read this page" (ⓘ button above the tabs) ──────────────────────
-# Why each rule exists and whether it was checked, shown next to its value in
-# the "Rules and thresholds" tab (UI only: a streamlit restart is enough).
-# After a sensitivity test or a check on real data, update its "tested".
-rules:
-  # tested: 16 Oct = bench_params (6 cities, 7 Jun – 5 Sep, half and double, scored
-  # against Europe's clinical sequences); 20 Oct = bench_deepscan and bench_scorecard
-  # (6 cities, also 8 Mar – 6 Jun). Europe's sequences are mostly from the UK: a guide, not proof.
-  min_cov:        {why: "fewer reads give unstable shares", tested: "50 / 200: scores unchanged; no minimum is worse (16 Oct)"}
-  present_freq:   {why: "above sequencing noise", tested: "sensitive: 2.5 % +2 present and a decoy mixed, 10 % −4 present (16 Oct)"}
-  link:           {why: "the marker's reads must look like the lineage, not an error or another lineage", tested: "90 %: XFG mixed in 3 cities; 60 %: +1 present (16 Oct); share-alone case: NB.1.8.1, 13 Oct"}
-  absent_freq:    {why: "below sequencing noise; 1–5 % is a zone that doesn't vote", tested: "one cut-off at 5 % is worse (16 Oct)"}
-  vote:           {why: "one rule instead of two numbers", tested: "as good or better than 75 / 25 %, no new false alarm (16 Oct, 20 Oct both windows)"}
-  min_present:    {why: "one marker alone can come from an unrelated lineage", tested: "LP.8 / XFZ 9 Oct; RV.1.3 Zürich (one-sample spike) 20 Oct; 1: +5 present, can't rule out borrowed markers (16 Oct)"}
-  cap_reads:      {why: "one sample with a few huge amplicons can't outvote the others", tested: "Lugano, 13 Oct; ×5 / ×20 median depth: same verdicts (16 Oct)"}
-  quality:        {why: "a low-virus sample comes from few molecules: its shares are snapshots", tested: "summer vs winter samples, 13 Oct"}
-  calendar:       {why: "", tested: ""}
-  evidence_day:   {why: "", tested: "min_reads 10 / 40: no change anywhere; min_share 1 %: drops one not-in-Europe find (20 Oct)"}
-  min_days:       {why: "one day alone can be a jackpot", tested: "1: 4 not-in-Europe finds; 3: −3 circulating (20 Oct)"}

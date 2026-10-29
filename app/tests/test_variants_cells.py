@@ -150,7 +150,8 @@ def test_panel_overview_seen_not_seen_cant_check():
     nb = {c: s for c, s in zip(CITIES, [_sc(3, 1), _sc(1, 0, 3), _sc(2, 2), _sc(4, 0),
                                          _sc(3, 0, 1), _sc(3, 0, 1)])}
     html, _tip, dot, _ink, _k = vt._panel_overview(nb, CITIES)
-    assert "In panel</b> · 4 of 6" in html and "seen in 4 of 6" in _tip and dot == vt.GREEN
+    assert "In panel</b> · seen in 4 of 6" in html and "seen in 4 of 6" in _tip and dot == vt.GREEN
+    assert "confirmed" in html                     # 2026-10-28: always says which
     lp8 = {c: s for c, s in zip(CITIES, [_sc(0, 4), _sc(0, 0, 4), _sc(0, 4), _sc(0, 0, 4),
                                           _sc(0, 2, 2), _sc(0, 4)])}
     html, tip, dot, _ink, _k = vt._panel_overview(lp8, CITIES)
@@ -238,3 +239,12 @@ def test_legends_describe_the_new_cells():
     for text in (vt.SHORT_LEGEND, vt.legend_full_html()):
         assert "light = weak" not in text
         assert "couldn't answer" in text
+
+
+def test_how_to_read_describes_the_page_not_the_vote():
+    # 2026-10-28: reading the page only; the rules are in RULES.md
+    t = vt.legend_full_html()
+    for word in ("cooc", "genome region", "backbone", "weeks squares", "Fading", "Covered",
+                 "can't be checked with coocs", "its children not in the panel", "RULES.md"):
+        assert word in t, word
+    assert "★ check" not in t and "present : absent" not in t
