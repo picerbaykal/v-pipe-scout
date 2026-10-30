@@ -506,6 +506,8 @@ def build_primer_heatmap_data(time_series, results, dominant_letters, threshold=
             worst_share = 0.0
             worst = None        # (text, pos, circulating letter)
             best_match = None   # (share of mutation, text, note)
+            any_listed = False  # a detected mutation sits in this primer/probe
+            any_reads = False   # ...and at least one of its positions had reads this month
 
             for pos, primer_letter in primer_letters.items():
                 # shares of each mutated letter at this position this month
@@ -516,6 +518,9 @@ def build_primer_heatmap_data(time_series, results, dominant_letters, threshold=
                 for mut in muts_by_pos.get(pos, []):
                     val = time_series[mut].get(month, {})
                     frac = val.get("proportion", 0.0) if isinstance(val, dict) else val
+                    any_listed = True
+                    if (isinstance(val, dict) and val.get("coverage", 0) > 0) or frac > 0:
+                        any_reads = True
                     if frac > 0:
                         shares[mut[-1]] = shares.get(mut[-1], 0.0) + frac
                         if isinstance(val, dict):
@@ -573,6 +578,12 @@ def build_primer_heatmap_data(time_series, results, dominant_letters, threshold=
                     "note": best_match[2],
                     "reads": best_match[3],
                     "low_cov": 0 < best_match[3][2] < min_coverage,
+                }
+            elif any_listed and not any_reads:
+                heatmap_data[name]["months"][month] = {
+                    "status": "nodata",
+                    "text": "no reads",
+                    "proportion": 0.0,
                 }
             else:
                 heatmap_data[name]["months"][month] = {
@@ -634,6 +645,7 @@ def build_html_heatmap(heatmap_data):
 .pp-cell .tooltip.tip-up{top:auto;bottom:calc(100% + 8px);}
 .pp-table td:nth-last-child(-n+2) .pp-cell .tooltip{left:auto;right:0;transform:none;}
 .pp-cell:hover .tooltip{display:block;}
+.pp-cell .tooltip{font-style:normal;}
 .pp-cell .tt-title{font-size:12px;font-weight:500;color:#333;margin-bottom:4px;}
 .pp-cell .tt-row{font-size:12px;color:#555;margin-bottom:2px;}
 .pp-legend{display:flex;gap:16px;margin-bottom:12px;flex-wrap:wrap;align-items:center;}
@@ -641,7 +653,8 @@ def build_html_heatmap(heatmap_data):
 </style>
 
 <div class="pp-legend">
-  <div class="pp-legend-item"><span style="background:#fff;border:0.5px solid #ddd;width:16px;height:16px;display:inline-block;border-radius:3px;"></span> No mutation</div>
+  <div class="pp-legend-item"><span style="background:#fff;border:0.5px solid #ddd;width:16px;height:16px;display:inline-block;border-radius:3px;"></span> No mutation (reads present)</div>
+  <div class="pp-legend-item"><span style="background:#ececec;width:16px;height:16px;display:inline-block;border-radius:3px;"></span> No reads</div>
   <div class="pp-legend-item"><span style="background:#d4edda;width:16px;height:16px;display:inline-block;border-radius:3px;"></span> Primer matches virus &nbsp;<span style="color:#999;">(“T ✓ · C 69%” = mutation present but below the threshold)</span></div>
   <div class="pp-legend-item"><span style="width:48px;height:16px;display:inline-block;border-radius:3px;background:linear-gradient(to right,#fff8f0,#a32d2d);"></span> Mismatch (low → high %)</div>
   <div class="pp-legend-item"><span style="width:16px;height:16px;display:inline-block;border-radius:3px;outline:2px dashed #8a8a8a;outline-offset:-3px;"></span> Few reads (below minimum coverage)</div>
@@ -700,7 +713,10 @@ def build_html_heatmap(heatmap_data):
 
             if status == "clean":
                 style = "background:#ffffff;color:#999;border:0.5px solid #eee;"
-                tooltip_html = f'<div class="{tip_class}"><div class="tt-title">{name}</div><div class="tt-row">{month}: no mutations detected</div></div>'
+                tooltip_html = f'<div class="{tip_class}"><div class="tt-title">{name}</div><div class="tt-row">{month}: reads present, no mutation found</div></div>'
+            elif status == "nodata":
+                style = "background:#ececec;color:#888;font-style:italic;"
+                tooltip_html = f'<div class="{tip_class}"><div class="tt-title">{name}</div><div class="tt-row">{month}: no reads at these positions</div><div class="tt-row" style="color:#888;font-size:11px;">No sample that month, or the sequencing amplicon dropped out. Nothing can be said.</div></div>'
             elif status == "match":
                 style = "background:#d4edda;color:#155724;"
                 note_line = (
