@@ -48,6 +48,70 @@ def get_piece_type(name):
         return "reverse"
     return "unknown"
 
+def get_assay_name(name):
+    """
+    Group pieces into assays (ddPCR) or amplicons (ARTIC) by dropping the role suffix:
+    N1-F / N1-P / N1-R -> N1;  SARS-CoV-2_5_LEFT / _RIGHT -> SARS-CoV-2_5.
+    Names that don't follow a known pattern form their own group.
+    """
+    clean = name.split("::")[0]
+    clean = re.sub(r"[_-]alt\d*$", "", clean, flags=re.IGNORECASE)
+    m = re.match(
+        r"^(.*?)[_-](F|R|P|FW|FWD|REV|LEFT|RIGHT|PROBE)$", clean, flags=re.IGNORECASE
+    )
+    return m.group(1) if m else clean
+
+
+STATUS_RANK = {"OK": 0, "Watch": 1, "Compromised": 2}
+STATUS_STYLE = {
+    "OK": ("#e9f5e1", "#3b6d11"),
+    "Watch": ("#fdf0dc", "#854f0b"),
+    "Compromised": ("#fbe4e4", "#a32d2d"),
+}
+
+
+def classify_piece(summary, mismatch_threshold, watch_threshold, min_coverage, three_prime_n):
+    """
+    Turn one primer/probe summary into a status + plain-language reason.
+
+    Compromised: probe differs from the circulating virus; or a primer mismatch in the
+                 3'-end zone; or 2+ primer mismatches.
+    Watch:       1 primer mismatch outside the 3'-end zone; or a minority mutation
+                 between the watch and flag thresholds.
+    OK:          matches the circulating virus.
+    """
+    mism = summary["mismatch_positions"]
+    is_probe = summary["piece_type"] == "probe"
+
+    if mism:
+        listed = ", ".join(mism)
+        if is_probe:
+            status, reason = "Compromised", f"Probe differs from circulating virus at {listed}"
+        elif summary["three_prime_mismatch"]:
+            status, reason = "Compromised", f"Mismatch in last {three_prime_n} bases (3′ end): {listed}"
+        elif len(mism) >= 2:
+            status, reason = "Compromised", f"{len(mism)} mismatches: {listed}"
+        else:
+            status, reason = "Watch", f"1 mismatch, not at 3′ end: {listed}"
+    else:
+        frac = summary["worst_proportion"]
+        if summary["worst_mutation"] and watch_threshold <= frac < mismatch_threshold:
+            status = "Watch"
+            reason = (
+                f"{summary['worst_mutation']} at {frac:.0%} "
+                f"(below the {mismatch_threshold:.0%} flag threshold)"
+            )
+        elif summary["worst_mutation"]:
+            status, reason = "OK", "Matches circulating virus"
+        else:
+            status, reason = "OK", "No mutations detected"
+
+    cov = summary["worst_coverage"]
+    if summary["worst_mutation"] and 0 < cov < min_coverage:
+        reason += f" — low coverage ({cov:,} reads), uncertain"
+    return status, reason
+
+
 def get_3prime_positions(start, end, strand, n_bases=5):
     """
     Return genome positions corresponding to the 3' end of a primer.
@@ -356,7 +420,7 @@ def process_time_series(time_series, results):
     return position_data
 
 
-def get_dominant_letters(time_series, reference, results):
+def get_dominant_letters(time_series, reference, results, threshold=0.5):
     """
     For each position with a mutation, determine the dominant letter
     in the most recent month.
@@ -386,7 +450,7 @@ def get_dominant_letters(time_series, reference, results):
                 break
 
         # dominant letter = whichever is more common
-        if recent_frac > 0.5:
+        if recent_frac > threshold:
             dominant[pos] = alt_letter  # mutation is dominant
         else:
             dominant[pos] = ref_letter  # reference is dominant
@@ -394,100 +458,107 @@ def get_dominant_letters(time_series, reference, results):
     return dominant
 
 
-def build_primer_heatmap_data(time_series, results, dominant_letters):
+def build_primer_heatmap_data(time_series, results, dominant_letters, threshold=0.5):
     """
-    Build heatmap data grouped by primer/probe piece.
-    Returns dict: {primer_name: {month: {status, text, proportion}}}
+    Build heatmap data grouped by primer/probe piece, judging EACH MONTH on its own.
 
-    status: 'clean' | 'match' | 'mismatch'
-    text: '—' | 'T=T ✓' | 'T≠C 88%'
-    proportion: float 0-1 (for mismatch color intensity)
+    For every position in the primer and every month, the circulating letter is the
+    mutation if its share that month is above `threshold`, otherwise the reference letter.
+    A primer letter that differs from the circulating letter is a mismatch.
+
+    Returns dict: {primer_name: {"piece_type", "months": {month: cell}}}
+    cell status: 'clean' | 'match' | 'mismatch'
+    cell text:   '—' | 'T ✓ · C 69%' (mutation below threshold) | 'C=C ✓' | 'T≠C 88%'
+    proportion:  share of the virus that does NOT match the primer (mismatch colour)
     """
     heatmap_data = {}
+
+    # mutations per genome position, parsed once
+    muts_by_pos = {}
+    for mut in time_series:
+        try:
+            mut_pos = int(re.search(r"\d+", mut).group())
+        except Exception:
+            continue
+        muts_by_pos.setdefault(mut_pos, []).append(mut)
+
+    all_months = sorted({m for proportions in time_series.values() for m in proportions})
 
     for r in results:
         if r["Start"] is None:
             continue
         name = r["Name"]
-        piece_type = get_piece_type(name)
         primer_letters = r.get("PrimerLetters", {})
-
-        # collect all months from time_series
-        all_months = set()
-        for mut, proportions in time_series.items():
-            all_months.update(proportions.keys())
-        all_months = sorted(all_months)
-
-        heatmap_data[name] = {
-            "piece_type": piece_type,
-            "months": {}
-        }
+        heatmap_data[name] = {"piece_type": get_piece_type(name), "months": {}}
 
         for month in all_months:
-            # find worst mismatch in this primer for this month
-            worst_proportion = 0.0
-            worst_text = None
-            worst_pos = None
-            worst_alt = None
             mismatch_count = 0
-            is_match = False
-            has_any_mutation = False
+            worst_share = 0.0
+            worst = None        # (text, pos, circulating letter)
+            best_match = None   # (share of mutation, text, note)
 
             for pos, primer_letter in primer_letters.items():
-                # find mutations at this position for this month
-                for mut, proportions in time_series.items():
-                    try:
-                        mut_pos = int(re.search(r'\d+', mut).group())
-                    except Exception:
-                        continue
-                    if mut_pos != pos:
-                        continue
-
-                    val = proportions.get(month, {})
+                # shares of each mutated letter at this position this month
+                shares = {}
+                ref_letter = None
+                for mut in muts_by_pos.get(pos, []):
+                    val = time_series[mut].get(month, {})
                     frac = val.get("proportion", 0.0) if isinstance(val, dict) else val
-                    if frac <= 0:
-                        continue
+                    if frac > 0:
+                        shares[mut[-1]] = shares.get(mut[-1], 0.0) + frac
+                        ref_letter = mut[0]
+                if not shares:
+                    continue
 
-                    has_any_mutation = True
-                    dominant = dominant_letters.get(pos)
-                    ref_letter = mut[0]
-                    alt_letter = mut[-1]
+                ref_share = max(0.0, 1.0 - sum(shares.values()))
+                top_alt = max(shares, key=shares.get)
+                top_frac = shares[top_alt]
+                circulating = top_alt if top_frac > threshold else ref_letter
+                primer_share = ref_share if primer_letter == ref_letter else shares.get(primer_letter, 0.0)
 
-                    if dominant and primer_letter == dominant:
-                        # primer matches dominant circulating letter
-                        is_match = True
-                        if frac > worst_proportion:
-                            worst_proportion = frac
-                            worst_text = f"{primer_letter}={dominant} ✓"
+                if primer_letter != circulating:
+                    mismatch_count += 1
+                    share = 1.0 - primer_share
+                    if share > worst_share or worst is None:
+                        worst_share = share
+                        worst = (f"{primer_letter}≠{circulating} {share:.0%}", pos, circulating)
+                else:
+                    if circulating != ref_letter:
+                        # primer already carries the mutation (e.g. redesigned primer)
+                        text, note = f"{primer_letter}={circulating} ✓", ""
                     else:
-                        # primer mismatches dominant circulating letter
-                        if frac > worst_proportion:
-                            worst_proportion = frac
-                            worst_text = f"{primer_letter}≠{alt_letter} {frac:.0%}"
-                            worst_pos = mut_pos
-                            worst_alt = alt_letter
+                        # mutation present, but below the threshold
+                        # (under 1% it is noise in the cell label; the hover still shows it)
+                        pct = f"{top_frac:.0%}" if top_frac >= 0.01 else f"{top_frac:.1%}"
+                        text = (
+                            f"{primer_letter} ✓ · {top_alt} {pct}"
+                            if top_frac >= 0.01 else f"{primer_letter} ✓"
+                        )
+                        note = f"{pos}: {top_alt} at {pct}, below the {threshold:.0%} threshold"
+                    if best_match is None or top_frac > best_match[0]:
+                        best_match = (top_frac, text, note)
 
-            if not has_any_mutation:
+            if worst is not None:
                 heatmap_data[name]["months"][month] = {
-                    "status": "clean",
-                    "text": "—",
-                    "proportion": 0.0
+                    "status": "mismatch",
+                    "text": worst[0],
+                    "proportion": worst_share,
+                    "pos": worst[1],
+                    "alt": worst[2],
+                    "mismatch_count": mismatch_count,
                 }
-            elif is_match and worst_text and "✓" in worst_text:
+            elif best_match is not None:
                 heatmap_data[name]["months"][month] = {
                     "status": "match",
-                    "text": worst_text,
-                    "proportion": worst_proportion
+                    "text": best_match[1],
+                    "proportion": 0.0,
+                    "note": best_match[2],
                 }
             else:
                 heatmap_data[name]["months"][month] = {
-                    "status": "mismatch",
-                    "text": worst_text or "≠",
-                    "proportion": worst_proportion,
-                    "pos": worst_pos,
-                    "alt": worst_alt,
-                    "ref": None,
-                    "mismatch_count": mismatch_count,
+                    "status": "clean",
+                    "text": "—",
+                    "proportion": 0.0,
                 }
 
     return heatmap_data
@@ -540,6 +611,7 @@ def build_html_heatmap(heatmap_data):
 .pp-table td.name-col{padding:4px 16px 4px 0;white-space:nowrap;}
 .pp-cell{border-radius:4px;height:40px;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:500;min-width:80px;cursor:default;position:relative;}
 .pp-cell .tooltip{display:none;position:absolute;top:calc(100% + 8px);left:50%;transform:translateX(-50%);background:#fff;border:1px solid #ddd;border-radius:6px;padding:10px 14px;min-width:180px;z-index:100;box-shadow:0 4px 12px rgba(0,0,0,0.1);text-align:left;pointer-events:none;}
+.pp-cell .tooltip.tip-up{top:auto;bottom:calc(100% + 8px);}
 .pp-cell:hover .tooltip{display:block;}
 .pp-cell .tt-title{font-size:12px;font-weight:500;color:#333;margin-bottom:4px;}
 .pp-cell .tt-row{font-size:12px;color:#555;margin-bottom:2px;}
@@ -549,7 +621,7 @@ def build_html_heatmap(heatmap_data):
 
 <div class="pp-legend">
   <div class="pp-legend-item"><span style="background:#fff;border:0.5px solid #ddd;width:16px;height:16px;display:inline-block;border-radius:3px;"></span> No mutation</div>
-  <div class="pp-legend-item"><span style="background:#d4edda;width:16px;height:16px;display:inline-block;border-radius:3px;"></span> Primer matches virus</div>
+  <div class="pp-legend-item"><span style="background:#d4edda;width:16px;height:16px;display:inline-block;border-radius:3px;"></span> Primer matches virus &nbsp;<span style="color:#999;">(“T ✓ · C 69%” = mutation present but below the threshold)</span></div>
   <div class="pp-legend-item"><span style="width:48px;height:16px;display:inline-block;border-radius:3px;background:linear-gradient(to right,#fff8f0,#a32d2d);"></span> Mismatch (low → high %)</div>
 </div>
 
@@ -594,10 +666,14 @@ def build_html_heatmap(heatmap_data):
 
             if status == "clean":
                 style = "background:#ffffff;color:#999;border:0.5px solid #eee;"
-                tooltip_html = f'<div class="tooltip"><div class="tt-title">{name}</div><div class="tt-row">{month}: no mutations detected</div></div>'
+                tooltip_html = f'<div class="{tip_class}"><div class="tt-title">{name}</div><div class="tt-row">{month}: no mutations detected</div></div>'
             elif status == "match":
                 style = "background:#d4edda;color:#155724;"
-                tooltip_html = f'<div class="tooltip"><div class="tt-title">{name}</div><div class="tt-row">{month}: {text}</div><div class="tt-row" style="color:#888;font-size:11px;">Primer matches circulating virus</div></div>'
+                note_line = (
+                    f'<div class="tt-row" style="color:#333;">{cell["note"]}</div>'
+                    if cell.get("note") else ""
+                )
+                tooltip_html = f'<div class="{tip_class}"><div class="tt-title">{name}</div><div class="tt-row">{month}: {text}</div>{note_line}<div class="tt-row" style="color:#888;font-size:11px;">Primer matches circulating virus</div></div>'
             else:
                 style = mismatch_color(proportion)
                 pos_line = ""
@@ -608,7 +684,7 @@ def build_html_heatmap(heatmap_data):
                 mc = cell.get("mismatch_count", 0)
                 if mc > 1:
                     extra = f'<div class="tt-row" style="color:#a32d2d;font-size:11px;">+{mc - 1} more mismatch(es) in this primer</div>'
-                tooltip_html = f'<div class="tooltip"><div class="tt-title">{name}</div><div class="tt-row">{month}: {text}</div>{pos_line}{extra}<div class="tt-row" style="color:#888;font-size:11px;">Primer mismatches circulating virus</div></div>'
+                tooltip_html = f'<div class="{tip_class}"><div class="tt-title">{name}</div><div class="tt-row">{month}: {text}</div>{pos_line}{extra}<div class="tt-row" style="color:#888;font-size:11px;">Primer mismatches circulating virus</div></div>'
 
             html += f'<td><div class="pp-cell" style="{style}">{text}{tooltip_html}</div></td>'
 
@@ -626,10 +702,18 @@ def build_html_heatmap(heatmap_data):
 </div>
 </div>"""
 
-    html += '<div style="height:140px;"></div>'
     return html
 
-def build_summary_html(position_data, found, time_series, dominant_letters):
+def build_summary_html(
+    position_data,
+    found,
+    time_series,
+    dominant_letters,
+    three_prime_n=5,
+    min_coverage=1000,
+    mismatch_threshold=0.5,
+    watch_threshold=0.2,
+):
     """
     Build custom HTML summary table with sparkline trend charts on hover.
     One row per primer/probe piece.
@@ -659,7 +743,7 @@ def build_summary_html(position_data, found, time_series, dominant_letters):
             "mismatch_index": None,
             "primer_length": end - start + 1,
             "monthly_proportions": {},
-            "three_prime_positions": get_3prime_positions(start, end, strand),
+            "three_prime_positions": get_3prime_positions(start, end, strand, n_bases=three_prime_n),
             "three_prime_mismatch": False,
             "gc_content": gc_content,
         }
@@ -690,7 +774,7 @@ def build_summary_html(position_data, found, time_series, dominant_letters):
         start = r["Start"]
         end = r["End"]
         primer_summary[name]["three_prime_positions"] = get_3prime_positions(
-            start, end, strand
+            start, end, strand, n_bases=three_prime_n
         )
 
         for mut, proportions in time_series.items():
@@ -722,6 +806,36 @@ def build_summary_html(position_data, found, time_series, dominant_letters):
                 frac = data["proportion"] if isinstance(data, dict) else data
                 if frac > 0:
                     primer_summary[name]["monthly_proportions"][month] = frac
+
+    # ── status per piece + verdict per assay ──────────────────────────────────
+    assay_verdicts = {}
+    for name, summary in primer_summary.items():
+        status, reason = classify_piece(
+            summary, mismatch_threshold, watch_threshold, min_coverage, three_prime_n
+        )
+        summary["status"] = status
+        summary["reason"] = reason
+        assay = get_assay_name(name)
+        summary["assay"] = assay
+        v = assay_verdicts.setdefault(assay, {"status": "OK", "reason": "", "pieces": []})
+        v["pieces"].append(name)
+        # keep the first piece with the worst status as the assay's reason
+        if not v["reason"] or STATUS_RANK[status] > STATUS_RANK[v["status"]]:
+            v["status"] = status
+            v["reason"] = f"{name}: {reason}"
+    for v in assay_verdicts.values():
+        if v["status"] == "OK":
+            v["reason"] = "All pieces match the circulating virus"
+
+    # show assay header rows only when grouping actually groups something
+    grouped = any(len(v["pieces"]) > 1 for v in assay_verdicts.values())
+
+    def status_pill(status):
+        bg, fg = STATUS_STYLE[status]
+        return (
+            f'<span style="background:{bg};color:{fg};font-size:12px;padding:2px 8px;'
+            f'border-radius:10px;font-weight:500;white-space:nowrap;">{status}</span>'
+        )
 
     # ── helper functions ───────────────────────────────────────────────────────
 
@@ -755,7 +869,7 @@ def build_summary_html(position_data, found, time_series, dominant_letters):
         last_x, last_y = xs[-1], ys[-1]
 
         # color based on last value
-        color = "#a32d2d" if values[-1] > 0.5 else "#d85a30" if values[-1] > 0.1 else "#639922"
+        color = "#a32d2d" if values[-1] > mismatch_threshold else "#d85a30" if values[-1] > watch_threshold else "#639922"
 
         return f'''<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}">
 <polyline points="{points}" fill="none" stroke="{color}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
@@ -786,7 +900,7 @@ def build_summary_html(position_data, found, time_series, dominant_letters):
             ys = [pad_top + (1 - v) * (chart_h - pad_top - pad_bottom) for v in values]
 
         points = " ".join(f"{x:.1f},{y:.1f}" for x, y in zip(xs, ys))
-        color = "#a32d2d" if values[-1] > 0.5 else "#d85a30" if values[-1] > 0.1 else "#639922"
+        color = "#a32d2d" if values[-1] > mismatch_threshold else "#d85a30" if values[-1] > watch_threshold else "#639922"
 
         dots = "".join(
             f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3" fill="{color}"/>'
@@ -826,7 +940,8 @@ def build_summary_html(position_data, found, time_series, dominant_letters):
         length = summary.get("primer_length", 20)
         index = summary.get("mismatch_index")
         mismatch_positions = summary.get("mismatch_positions", [])
-        three_prime_end_pct = 25  # last 25% = 3' end zone
+        # 3' zone = last `three_prime_n` bases, drawn as a share of the bar
+        three_prime_end_pct = min(100, round(100 * three_prime_n / max(length, 1)))
 
         if index is None:
             dot_color = "#3b6d11"
@@ -839,9 +954,17 @@ def build_summary_html(position_data, found, time_series, dominant_letters):
         else:
             dot_left = int((index / length) * 100)
             pct = index / length
-            if pct > 0.75:
+            if summary.get("piece_type") == "probe":
+                # for a probe, any mismatch weakens the signal regardless of position
                 dot_color = "#a32d2d"
-                pos_desc = "near 3\u2032 end \u2014 severe impact \u26a0\ufe0f"
+                pos_desc = "probe \u2014 any mismatch affects the signal"
+                zone_html = ""
+            elif summary.get("three_prime_mismatch"):
+                dot_color = "#a32d2d"
+                pos_desc = (
+                    "in last " + str(three_prime_n)
+                    + " bases (3\u2032 end) \u2014 severe impact \u26a0\ufe0f"
+                )
                 zone_html = (
                         '<div style="position:absolute;right:0;top:0;width:'
                         + str(three_prime_end_pct)
@@ -896,8 +1019,14 @@ def build_summary_html(position_data, found, time_series, dominant_letters):
     html = """
 <style>
 .sum-table{border-collapse:collapse;font-size:15px;font-family:sans-serif;width:100%;}
-.sum-table th{text-align:left;padding:12px 20px 12px 0;color:#666;font-weight:400;border-bottom:1px solid #e5e5e5;white-space:nowrap;font-size:14px;}
-.sum-table td{padding:12px 20px 12px 0;border-bottom:1px solid #f0f0f0;vertical-align:middle;}
+.sum-table th{text-align:left;padding:12px 14px 12px 0;color:#666;font-weight:400;border-bottom:1px solid #e5e5e5;white-space:nowrap;font-size:14px;}
+.sum-table td{padding:12px 14px 12px 0;border-bottom:1px solid #f0f0f0;vertical-align:middle;}
+.sum-table td.name-cell{white-space:nowrap;}
+.sum-table tr.grp td{background:#fafafa;padding:10px 12px;border-bottom:1px solid #e5e5e5;}
+.reason{font-size:11px;color:#777;margin-top:4px;min-width:140px;max-width:220px;white-space:normal;}
+.sum-table .sparkpop{left:auto;right:0;transform:none;}
+.sum-table tbody tr:nth-last-child(-n+3) .sparkpop{top:auto;bottom:calc(100% + 8px);}
+.sum-table tbody tr:nth-last-child(-n+3) div[id^="pb_"]{top:auto !important;bottom:calc(100% + 6px) !important;}
 .spark-wrap{position:relative;display:inline-block;cursor:default;}
 .sparkpop{display:none;position:absolute;top:calc(100% + 8px);left:50%;transform:translateX(-50%);background:#fff;border:1px solid #ddd;border-radius:8px;padding:10px 12px;z-index:100;box-shadow:0 4px 12px rgba(0,0,0,0.1);pointer-events:none;white-space:nowrap;}
 .spark-wrap:hover .sparkpop{display:block;}
@@ -906,7 +1035,7 @@ def build_summary_html(position_data, found, time_series, dominant_letters):
 <thead>
 <tr>
   <th>Primer/Probe</th>
-  <th>Type</th>
+  <th>Status</th>
   <th>Worst mutation</th>
   <th>Recent %</th>
   <th>Coverage</th>
@@ -918,7 +1047,19 @@ def build_summary_html(position_data, found, time_series, dominant_letters):
 <tbody>
 """
 
+    current_assay = None
     for name, summary in primer_summary.items():
+        if grouped and summary["assay"] != current_assay:
+            current_assay = summary["assay"]
+            v = assay_verdicts[current_assay]
+            html += (
+                "<tr class='grp'><td colspan='8'>"
+                f"<span style='font-weight:600;color:#333;margin-right:10px;'>{current_assay}</span>"
+                f"{status_pill(v['status'])}"
+                f"<span style='font-size:12px;color:#666;margin-left:10px;'>{v['reason']}</span>"
+                "</td></tr>"
+            )
+
         worst_proportion = summary["worst_proportion"]
         worst_mutation = summary["worst_mutation"]
         monthly = summary["monthly_proportions"]
@@ -927,7 +1068,7 @@ def build_summary_html(position_data, found, time_series, dominant_letters):
         cov = summary["worst_coverage"]
         if cov == 0:
             cov_display = '<span style="color:#999;">N/A</span>'
-        elif cov < 1000:
+        elif cov < min_coverage:
             cov_display = f'<span style="color:#854f0b;">⚠️ {cov:,}</span>'
         else:
             cov_display = f'{cov:,}'
@@ -956,8 +1097,8 @@ def build_summary_html(position_data, found, time_series, dominant_letters):
 
         html += (
             "<tr>"
-            f"<td>{piece_badge(summary['piece_type'])} <span style='margin-left:6px;color:#333;'>{name}</span></td>"
-            f"<td style='color:#666;'>{summary['piece_type']}</td>"
+            f"<td class='name-cell'>{piece_badge(summary['piece_type'])} <span style='margin-left:6px;color:#333;'>{name}</span></td>"
+            f"<td>{status_pill(summary['status'])}<div class='reason'>{summary['reason']}</div></td>"
             f"<td style='color:#333;'>{worst_mutation or 'none'}</td>"
             f"<td style='color:#333;'>{proportion_display}</td>"
             f"<td style='color:#333;'>{cov_display}</td>"
@@ -968,7 +1109,7 @@ def build_summary_html(position_data, found, time_series, dominant_letters):
         )
 
     html += "</tbody></table>"
-    return html
+    return html, assay_verdicts
 
 
 
@@ -1195,16 +1336,72 @@ def app():
         st.warning("No time series data available for the selected period.")
         return
 
+    # ── Assessment settings (on the page, pinned while scrolling) ─────────────
+    st.markdown(
+        """<style>
+        /* pin the settings bar: sticky goes on Streamlit's wrapper around the container */
+        div[data-testid="stLayoutWrapper"]:has(> .st-key-ppc_settings) {
+            position: sticky; top: 3.75rem; z-index: 990;
+        }
+        .st-key-ppc_settings {
+            background: #ffffff; padding: 0.5rem 0.75rem 0.25rem;
+            border: 1px solid #e6e6e6; border-radius: 0.5rem;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.08);
+        }
+        </style>""",
+        unsafe_allow_html=True,
+    )
+    with st.container(key="ppc_settings"):
+        st.markdown(
+            "**Assessment settings** "
+            "<span style='color:#888;font-size:0.85em;'>— change these to see how the "
+            "results shift; the wastewater data is not re-fetched</span>",
+            unsafe_allow_html=True,
+        )
+        s1, s2, s3, s4 = st.columns(4)
+        with s1:
+            mismatch_threshold = st.slider(
+                "Flag mutations above (%)", 10, 90, 50, 5,
+                key="ppc_mismatch_threshold",
+                help="A mutation above this share of the virus counts against the primer/probe. "
+                     "Heatmap: judged month by month. Summary: most recent month.",
+            ) / 100
+        with s2:
+            watch_threshold = st.slider(
+                "Watch threshold (%)", 1, 50, 20, 1,
+                key="ppc_watch_threshold",
+                help="A minority mutation above this share (but below the flag threshold) "
+                     "is flagged early.",
+            ) / 100
+        with s3:
+            three_prime_n = st.slider(
+                "3′-end zone (bases)", 1, 10, 5, 1,
+                key="ppc_three_prime_n",
+                help="A primer mismatch within this many bases of the 3′ end counts as critical.",
+            )
+        with s4:
+            min_coverage = st.number_input(
+                "Minimum coverage (reads)", min_value=0, value=1000, step=100,
+                key="ppc_min_coverage",
+                help="Months or mutations with fewer reads are treated as unreliable.",
+            )
+        if watch_threshold >= mismatch_threshold:
+            st.warning("Watch threshold should be below the flag threshold.")
+
     # ── Process data ───────────────────────────────────────────────────────────
     position_data = process_time_series(time_series, found)
-    dominant_letters = get_dominant_letters(time_series, reference, found)
+    dominant_letters = get_dominant_letters(
+        time_series, reference, found, threshold=mismatch_threshold
+    )
 
     if not position_data:
         st.success("✅ No mutations found in primer-probe regions for the selected period.")
         return
 
     # ── Heatmap ────────────────────────────────────────────────────────────────
-    heatmap_data = build_primer_heatmap_data(time_series, found, dominant_letters)
+    heatmap_data = build_primer_heatmap_data(
+        time_series, found, dominant_letters, threshold=mismatch_threshold
+    )
     st.subheader("Mutation prevalence over time")
 
     # Which requested months actually have data? (zero-coverage months are dropped)
@@ -1215,12 +1412,11 @@ def app():
             datetime.strptime(date_to_str, "%Y-%m-%d"),
         )
     ]
-    MIN_MONTH_COVERAGE = 1000  # reads; below this a month counts as "no data"
     months_with_data = sorted({
         m
         for per_month in time_series.values()
         for m, v in per_month.items()
-        if v.get("coverage", 0) >= MIN_MONTH_COVERAGE
+        if v.get("coverage", 0) >= min_coverage
     })
     missing_months = [m for m in requested_months if m not in months_with_data]
 
@@ -1234,28 +1430,58 @@ def app():
         if len(missing_months) > 6:
             shown += f" … (+{len(missing_months) - 6} more)"
         st.info(
-            f"No usable sequencing data (≥1000 reads) for {len(missing_months)} of {len(requested_months)} "
-            f"requested month(s): {shown}. These months are not shown."
+            f"No usable sequencing data (≥{min_coverage:,} reads) for {len(missing_months)} of {len(requested_months)} "
+            f"requested month(s): {shown}. Results for these months are missing or unreliable."
         )
     html = build_html_heatmap(heatmap_data)
     n_heatmap_rows = sum(
         1 for info in heatmap_data.values()
         if not all(cell["status"] == "clean" for cell in info["months"].values())
     )
-    heatmap_height = 200 + n_heatmap_rows * 44 + 120
+    # legend + header + rows; the colour bar needs ~270px; lower rows' tooltips open
+    # upward, so only small tables need extra room below for the top row's tooltip
+    heatmap_height = max(110 + n_heatmap_rows * 46, 270) + (30 if n_heatmap_rows >= 4 else 120)
     components.html(html, height=heatmap_height, scrolling=True)
 
     # ── Summary table ──────────────────────────────────────────────────────────
     st.subheader("Summary")
 
-    with st.expander("Summary", expanded=True):
-        summary_html = build_summary_html(
-            position_data, found, time_series, dominant_letters
+    summary_html, assay_verdicts = build_summary_html(
+        position_data, found, time_series, dominant_letters,
+        three_prime_n=three_prime_n,
+        min_coverage=min_coverage,
+        mismatch_threshold=mismatch_threshold,
+        watch_threshold=watch_threshold,
+    )
+
+    # verdict per assay (ddPCR) / amplicon (ARTIC)
+    icons = {"OK": "🟢", "Watch": "🟠", "Compromised": "🔴"}
+    if len(assay_verdicts) <= 6:
+        cols = st.columns(len(assay_verdicts))
+        for col, (assay, v) in zip(cols, assay_verdicts.items()):
+            with col:
+                with st.container(border=True):
+                    st.markdown(f"**{assay}** — {icons[v['status']]} {v['status']}")
+                    st.caption(v["reason"])
+    else:
+        counts = {k: sum(1 for v in assay_verdicts.values() if v["status"] == k) for k in icons}
+        st.markdown(
+            f"**{len(assay_verdicts)} assays/amplicons:** "
+            f"🔴 {counts['Compromised']} compromised · 🟠 {counts['Watch']} watch · 🟢 {counts['OK']} OK"
         )
-        # height scales with row count; extra padding so hover popovers
-        # on the last rows aren't clipped by the iframe boundary
+    st.caption(
+        f"Based on the most recent month. **Compromised** = probe differs from the circulating "
+        f"virus, or a primer mismatch in the last {three_prime_n} bases (3′ end), or 2+ primer "
+        f"mismatches. **Watch** = 1 primer mismatch elsewhere, or a minority mutation "
+        f"≥{watch_threshold:.0%}. A mutation counts once it is above {mismatch_threshold:.0%}."
+    )
+
+    with st.expander("Details per primer/probe", expanded=True):
+        # height follows the table (+ assay header rows); popovers on the last rows open
+        # upward, so only short tables need extra room below
         n_rows = len([r for r in found if r["Start"] is not None])
-        table_height = 120 + n_rows * 56 + 160
+        n_groups = len(assay_verdicts) if any(len(v["pieces"]) > 1 for v in assay_verdicts.values()) else 0
+        table_height = 50 + n_rows * 62 + n_groups * 42 + (30 if n_rows >= 5 else 170)
         components.html(summary_html, height=table_height, scrolling=True)
 
     # ── GenSpectrum links ──────────────────────────────────────────────────────
