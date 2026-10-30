@@ -279,17 +279,25 @@ def fetch_locations_list():
         return [], str(e)
 
 @st.cache_data(ttl=3600)
-def fetch_primer_mutations(location, positions_tuple):
+def fetch_primer_mutations(location, positions_tuple, min_proportion=0.01,
+                           date_from_str=None, date_to_str=None):
     """
     Step 1: fetch which mutations exist at primer/probe positions.
-    location=None means all sites.
+    location=None means all sites. Only mutations whose share, pooled over the
+    selected site and dates, is at least `min_proportion` are returned
+    (LAPIS would otherwise apply its own default of 5%).
+    Returns a list of mutations, or None if LAPIS could not be queried.
     """
     import logging
     logger = logging.getLogger(__name__)
     async def _fetch():
-        params = {"limit": 100000}
+        params = {"limit": 100000, "minProportion": min_proportion}
         if location:
             params["locationName"] = location
+        if date_from_str:
+            params["samplingDateFrom"] = date_from_str
+        if date_to_str:
+            params["samplingDateTo"] = date_to_str
         async with aiohttp.ClientSession() as session:
             async with session.get(
                 f"{get_wiseloculus_url()}/sample/nucleotideMutations",
@@ -297,7 +305,8 @@ def fetch_primer_mutations(location, positions_tuple):
                 headers={"accept": "application/json"}
             ) as response:
                 if response.status != 200:
-                    return []
+                    logger.error(f"fetch_primer_mutations HTTP {response.status}: {await response.text()}")
+                    return None
                 data = await response.json()
                 positions = set(positions_tuple)
                 return [
@@ -309,7 +318,7 @@ def fetch_primer_mutations(location, positions_tuple):
         return asyncio.run(_fetch())
     except Exception as e:
         logger.error(f"fetch_primer_mutations error: {e}")
-        return []
+        return None
 
 @st.cache_data(ttl=3600)
 def fetch_time_series(mutations_tuple, location, date_from_str, date_to_str):
@@ -458,7 +467,8 @@ def get_dominant_letters(time_series, reference, results, threshold=0.5):
     return dominant
 
 
-def build_primer_heatmap_data(time_series, results, dominant_letters, threshold=0.5):
+def build_primer_heatmap_data(time_series, results, dominant_letters, threshold=0.5,
+                              min_coverage=1000):
     """
     Build heatmap data grouped by primer/probe piece, judging EACH MONTH on its own.
 
@@ -500,12 +510,17 @@ def build_primer_heatmap_data(time_series, results, dominant_letters, threshold=
             for pos, primer_letter in primer_letters.items():
                 # shares of each mutated letter at this position this month
                 shares = {}
+                counts = {}
+                coverage = 0
                 ref_letter = None
                 for mut in muts_by_pos.get(pos, []):
                     val = time_series[mut].get(month, {})
                     frac = val.get("proportion", 0.0) if isinstance(val, dict) else val
                     if frac > 0:
                         shares[mut[-1]] = shares.get(mut[-1], 0.0) + frac
+                        if isinstance(val, dict):
+                            counts[mut[-1]] = counts.get(mut[-1], 0) + val.get("count", 0)
+                            coverage = max(coverage, val.get("coverage", 0))
                         ref_letter = mut[0]
                 if not shares:
                     continue
@@ -513,6 +528,7 @@ def build_primer_heatmap_data(time_series, results, dominant_letters, threshold=
                 ref_share = max(0.0, 1.0 - sum(shares.values()))
                 top_alt = max(shares, key=shares.get)
                 top_frac = shares[top_alt]
+                reads = (top_alt, counts.get(top_alt, 0), coverage, top_frac)
                 circulating = top_alt if top_frac > threshold else ref_letter
                 primer_share = ref_share if primer_letter == ref_letter else shares.get(primer_letter, 0.0)
 
@@ -521,7 +537,7 @@ def build_primer_heatmap_data(time_series, results, dominant_letters, threshold=
                     share = 1.0 - primer_share
                     if share > worst_share or worst is None:
                         worst_share = share
-                        worst = (f"{primer_letter}≠{circulating} {share:.0%}", pos, circulating)
+                        worst = (f"{primer_letter}≠{circulating} {share:.0%}", pos, circulating, reads)
                 else:
                     if circulating != ref_letter:
                         # primer already carries the mutation (e.g. redesigned primer)
@@ -536,7 +552,7 @@ def build_primer_heatmap_data(time_series, results, dominant_letters, threshold=
                         )
                         note = f"{pos}: {top_alt} at {pct}, below the {threshold:.0%} threshold"
                     if best_match is None or top_frac > best_match[0]:
-                        best_match = (top_frac, text, note)
+                        best_match = (top_frac, text, note, reads)
 
             if worst is not None:
                 heatmap_data[name]["months"][month] = {
@@ -546,6 +562,8 @@ def build_primer_heatmap_data(time_series, results, dominant_letters, threshold=
                     "pos": worst[1],
                     "alt": worst[2],
                     "mismatch_count": mismatch_count,
+                    "reads": worst[3],
+                    "low_cov": 0 < worst[3][2] < min_coverage,
                 }
             elif best_match is not None:
                 heatmap_data[name]["months"][month] = {
@@ -553,6 +571,8 @@ def build_primer_heatmap_data(time_series, results, dominant_letters, threshold=
                     "text": best_match[1],
                     "proportion": 0.0,
                     "note": best_match[2],
+                    "reads": best_match[3],
+                    "low_cov": 0 < best_match[3][2] < min_coverage,
                 }
             else:
                 heatmap_data[name]["months"][month] = {
@@ -612,6 +632,7 @@ def build_html_heatmap(heatmap_data):
 .pp-cell{border-radius:4px;height:40px;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:500;min-width:80px;cursor:default;position:relative;}
 .pp-cell .tooltip{display:none;position:absolute;top:calc(100% + 8px);left:50%;transform:translateX(-50%);background:#fff;border:1px solid #ddd;border-radius:6px;padding:10px 14px;min-width:180px;z-index:100;box-shadow:0 4px 12px rgba(0,0,0,0.1);text-align:left;pointer-events:none;}
 .pp-cell .tooltip.tip-up{top:auto;bottom:calc(100% + 8px);}
+.pp-table td:nth-last-child(-n+2) .pp-cell .tooltip{left:auto;right:0;transform:none;}
 .pp-cell:hover .tooltip{display:block;}
 .pp-cell .tt-title{font-size:12px;font-weight:500;color:#333;margin-bottom:4px;}
 .pp-cell .tt-row{font-size:12px;color:#555;margin-bottom:2px;}
@@ -623,6 +644,7 @@ def build_html_heatmap(heatmap_data):
   <div class="pp-legend-item"><span style="background:#fff;border:0.5px solid #ddd;width:16px;height:16px;display:inline-block;border-radius:3px;"></span> No mutation</div>
   <div class="pp-legend-item"><span style="background:#d4edda;width:16px;height:16px;display:inline-block;border-radius:3px;"></span> Primer matches virus &nbsp;<span style="color:#999;">(“T ✓ · C 69%” = mutation present but below the threshold)</span></div>
   <div class="pp-legend-item"><span style="width:48px;height:16px;display:inline-block;border-radius:3px;background:linear-gradient(to right,#fff8f0,#a32d2d);"></span> Mismatch (low → high %)</div>
+  <div class="pp-legend-item"><span style="width:16px;height:16px;display:inline-block;border-radius:3px;outline:2px dashed #8a8a8a;outline-offset:-3px;"></span> Few reads (below minimum coverage)</div>
 </div>
 
 <div style="display:flex;gap:16px;align-items:flex-start;">
@@ -663,6 +685,18 @@ def build_html_heatmap(heatmap_data):
             status = cell["status"]
             text = cell["text"]
             proportion = cell["proportion"]
+            reads_line = ""
+            if cell.get("reads") and cell["reads"][2]:
+                r_alt, r_count, r_cov, r_frac = cell["reads"]
+                reads_line = (
+                    f'<div class="tt-row" style="color:#333;">{r_alt} in {r_count:,} of '
+                    f'{r_cov:,} reads ({r_frac:.1%})</div>'
+                )
+                if cell.get("low_cov"):
+                    reads_line += (
+                        '<div class="tt-row" style="color:#854f0b;font-size:11px;">'
+                        '⚠ fewer reads than the minimum coverage setting</div>'
+                    )
 
             if status == "clean":
                 style = "background:#ffffff;color:#999;border:0.5px solid #eee;"
@@ -673,7 +707,7 @@ def build_html_heatmap(heatmap_data):
                     f'<div class="tt-row" style="color:#333;">{cell["note"]}</div>'
                     if cell.get("note") else ""
                 )
-                tooltip_html = f'<div class="{tip_class}"><div class="tt-title">{name}</div><div class="tt-row">{month}: {text}</div>{note_line}<div class="tt-row" style="color:#888;font-size:11px;">Primer matches circulating virus</div></div>'
+                tooltip_html = f'<div class="{tip_class}"><div class="tt-title">{name}</div><div class="tt-row">{month}: {text}</div>{note_line}{reads_line}<div class="tt-row" style="color:#888;font-size:11px;">Primer matches circulating virus</div></div>'
             else:
                 style = mismatch_color(proportion)
                 pos_line = ""
@@ -684,8 +718,10 @@ def build_html_heatmap(heatmap_data):
                 mc = cell.get("mismatch_count", 0)
                 if mc > 1:
                     extra = f'<div class="tt-row" style="color:#a32d2d;font-size:11px;">+{mc - 1} more mismatch(es) in this primer</div>'
-                tooltip_html = f'<div class="{tip_class}"><div class="tt-title">{name}</div><div class="tt-row">{month}: {text}</div>{pos_line}{extra}<div class="tt-row" style="color:#888;font-size:11px;">Primer mismatches circulating virus</div></div>'
+                tooltip_html = f'<div class="{tip_class}"><div class="tt-title">{name}</div><div class="tt-row">{month}: {text}</div>{pos_line}{reads_line}{extra}<div class="tt-row" style="color:#888;font-size:11px;">Primer mismatches circulating virus</div></div>'
 
+            if cell.get("low_cov"):
+                style += "outline:2px dashed #8a8a8a;outline-offset:-3px;"
             html += f'<td><div class="pp-cell" style="{style}">{text}{tooltip_html}</div></td>'
 
         html += "</tr>"
@@ -1313,29 +1349,6 @@ def app():
     date_from_str = date_from.strftime("%Y-%m-%d")
     date_to_str = date_to.strftime("%Y-%m-%d")
 
-    # ── Step 1: find mutations at primer positions ─────────────────────────────
-    with st.spinner("Finding mutations at primer-probe positions..."):
-        mutations_list = fetch_primer_mutations(location_filter, positions_tuple)
-
-    if not mutations_list:
-        st.success("✅ No mutations found at primer-probe positions for the selected site.")
-        return
-
-    st.caption(f"Found {len(mutations_list)} mutations at primer-probe positions")
-
-    # ── Step 2: fetch time series ──────────────────────────────────────────────
-    with st.spinner("Fetching time series data..."):
-        time_series = fetch_time_series(
-            tuple(sorted(mutations_list)),
-            location_filter,
-            date_from_str,
-            date_to_str
-        )
-
-    if not time_series:
-        st.warning("No time series data available for the selected period.")
-        return
-
     # ── Assessment settings (on the page, pinned while scrolling) ─────────────
     st.markdown(
         """<style>
@@ -1358,7 +1371,15 @@ def app():
             "results shift; the wastewater data is not re-fetched</span>",
             unsafe_allow_html=True,
         )
-        s1, s2, s3, s4 = st.columns(4)
+        s0, s1, s2, s3, s4 = st.columns(5)
+        with s0:
+            detect_threshold = st.select_slider(
+                "Detect mutations from (%)", options=[0.5, 1, 2, 5, 10], value=1,
+                key="ppc_detect_threshold",
+                help="Mutations are looked up only if their share, pooled over the selected "
+                     "site and dates, reaches this level. Below ~1% sequencing noise increases. "
+                     "LAPIS's own default would be 5%.",
+            ) / 100
         with s1:
             mismatch_threshold = st.slider(
                 "Flag mutations above (%)", 10, 90, 50, 5,
@@ -1388,6 +1409,40 @@ def app():
         if watch_threshold >= mismatch_threshold:
             st.warning("Watch threshold should be below the flag threshold.")
 
+    # ── Step 1: find mutations at primer positions ─────────────────────────────
+    with st.spinner("Finding mutations at primer-probe positions..."):
+        mutations_list = fetch_primer_mutations(
+            location_filter, positions_tuple, detect_threshold, date_from_str, date_to_str
+        )
+
+    if mutations_list is None:
+        st.error("Could not query mutations from LAPIS. Please try again later.")
+        return
+    if not mutations_list:
+        st.success(
+            f"✅ No mutations at primer-probe positions reach {detect_threshold:.1%} "
+            "for the selected site and dates."
+        )
+        return
+
+    st.caption(
+        f"Found {len(mutations_list)} mutations at primer-probe positions "
+        f"(share ≥ {detect_threshold:.1%}, pooled over the selected site and dates)"
+    )
+
+    # ── Step 2: fetch time series ──────────────────────────────────────────────
+    with st.spinner("Fetching time series data..."):
+        time_series = fetch_time_series(
+            tuple(sorted(mutations_list)),
+            location_filter,
+            date_from_str,
+            date_to_str
+        )
+
+    if not time_series:
+        st.warning("No time series data available for the selected period.")
+        return
+
     # ── Process data ───────────────────────────────────────────────────────────
     position_data = process_time_series(time_series, found)
     dominant_letters = get_dominant_letters(
@@ -1400,7 +1455,8 @@ def app():
 
     # ── Heatmap ────────────────────────────────────────────────────────────────
     heatmap_data = build_primer_heatmap_data(
-        time_series, found, dominant_letters, threshold=mismatch_threshold
+        time_series, found, dominant_letters, threshold=mismatch_threshold,
+        min_coverage=min_coverage,
     )
     st.subheader("Mutation prevalence over time")
 
@@ -1442,6 +1498,15 @@ def app():
     # upward, so only small tables need extra room below for the top row's tooltip
     heatmap_height = max(110 + n_heatmap_rows * 46, 270) + (30 if n_heatmap_rows >= 4 else 120)
     components.html(html, height=heatmap_height, scrolling=True)
+    hidden = [
+        name for name, info in heatmap_data.items()
+        if all(cell["status"] == "clean" for cell in info["months"].values())
+    ]
+    if hidden:
+        st.caption(
+            f"Not shown (no mutation ≥ {detect_threshold:.1%} at any of their positions): "
+            + ", ".join(hidden)
+        )
 
     # ── Summary table ──────────────────────────────────────────────────────────
     st.subheader("Summary")
