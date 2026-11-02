@@ -45,8 +45,8 @@ services:
       context: ./worker
       dockerfile: Dockerfile
     restart: unless-stopped
-    mem_limit: 4g
-    memswap_limit: 4g
+    mem_limit: 6g
+    memswap_limit: 6g
     volumes:
       - ./worker:/app
       - ./app:/app_shared
@@ -61,7 +61,7 @@ services:
       - REDIS_PORT=6379
       - REDIS_PASSWORD=${REDIS_PASSWORD:-defaultpassword123}
       - PYTHONPATH=/app:/app_shared
-      - CELERY_CONCURRENCY=3
+      - CELERY_CONCURRENCY=6
 
 
 volumes:
