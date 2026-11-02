@@ -6,7 +6,6 @@ import sys
 from datetime import date, timedelta
 
 sys.path.insert(0, "/app_shared")
-sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
 
 from process.national import check_start, grade, trim_check, weekly   # noqa: E402
 from process.variant_explorer import check_in_data, judge              # noqa: E402
@@ -84,7 +83,15 @@ def test_judge_cuts_cells_to_the_chosen_dates():
 
 
 def test_view_draws_a_tree_row_with_open_details():
-    from components.variants_table import investigate_view
+    # loaded from its file, like the other table tests: a "components"
+    # package elsewhere on the path can hide the app's (2026-10-28)
+    import importlib.util
+    from pathlib import Path
+    path = Path(__file__).resolve().parents[1] / "components" / "variants_table.py"
+    spec = importlib.util.spec_from_file_location("vt_investigate", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    investigate_view = mod.investigate_view
     _t, j = _both({"Genève (GE)": ("0000", ()), "Zürich (ZH)": ("0000", ())})
     cities = ["Genève (GE)", "Zürich (ZH)"]
     for in_panel in (False, True):
