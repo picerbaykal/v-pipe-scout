@@ -689,6 +689,8 @@ def run_cooc_panel_completeness(
 
         _n_q = len(batches) * len(dates)
         _done_q = [0]
+        import time as _time
+        _t_read = _time.time()
 
         async def _counted(session, bi, bpos, d):
             try:
@@ -711,6 +713,10 @@ def run_cooc_panel_completeness(
         n_errors = sum(1 for r in done if isinstance(r, Exception))
         if n_errors:
             logger.error(f"[cooc][{location}] {n_errors}/{len(tasks)} queries failed")
+        # timing (2026-11-02): reading vs everything after it
+        logger.info(f"[cooc][{location}] read {len(tasks)} queries ({len(batches)} batches × "
+                    f"{len(dates)} dates, {len(positions)} positions) in "
+                    f"{_time.time() - _t_read:.1f} s")
         logger.info(
             f"[cooc][{location}] processed {len(per_date_results)} dates, "
             f"{len(per_date_unexplained)} with unexplained patterns"
@@ -747,8 +753,11 @@ def run_cooc_panel_completeness(
     # the genome covered, from reads at 119 positions (process.sample_qc).
     # Never breaks the panel check: on failure the page shows no quality.
     try:
+        import time as _time
+        _t_q = _time.time()
         from process.sample_qc import sample_quality
         sample_qc = sample_quality(client, location, (start_date, end_date))
+        logger.info(f"[cooc][{location}] sample quality read in {_time.time() - _t_q:.1f} s")
         _n_ok = sum(1 for q in sample_qc.values() if q.get("well_covered"))
         logger.info(f"[cooc][{location}] sample quality: {_n_ok} of {len(sample_qc)} "
                     f"samples well covered")

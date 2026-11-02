@@ -449,6 +449,15 @@ def run_cooc_deep_scan_lapis(self, location: str, start_date: str, end_date: str
     progress_key = f"task_progress:{task_id}"
 
     _p = _reporter(progress_key, total=5)
+    # time per step (2026-11-02), one log line at the end: where a city's
+    # 38-81 s go, before choosing what to speed up
+    _t0 = time.time()
+    _tm, _last = {}, [_t0]
+
+    def _lap(name):
+        now = time.time()
+        _tm[name] = _tm.get(name, 0.0) + now - _last[0]
+        _last[0] = now
     # the read-level step of run_cooc_panel_completeness (its steps 1-3) is this
     # task's step 2; its step 4 (aggregating) is this task's step 3
     _inner = _reporter(progress_key, total=5, remap=lambda s: 2 if s <= 3 else 3)
@@ -466,17 +475,24 @@ def run_cooc_deep_scan_lapis(self, location: str, start_date: str, end_date: str
             # the run's, so the novel list doesn't depend on the selection.
             hot = {p for p, a in extra.items() if len(a) >= 2}
             refs = [l for l in (reference_locations or []) if l != location]
-            for i, ref in enumerate(refs):
-                _p(1, f"Error hotspots: {ref}...", (i + 1) / (len(refs) + 1))
+            # all locations at once (2026-11-02): one after another took 22 s
+            # in the first cities of a run (the cache fills only afterwards)
+            _p(1, f"Error hotspots: {len(refs)} other locations...")
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max(1, len(refs))) as _ex:
+                _futs = {ref: _ex.submit(_data_positions_cached, ref, d0, d1, _sh, _cv)
+                         for ref in refs}
+            for ref, _f in _futs.items():
                 try:
-                    hot |= {p for p, a in _data_positions_cached(ref, d0, d1, _sh, _cv).items()
-                            if len(a) >= 2}
+                    hot |= {p for p, a in _f.result().items() if len(a) >= 2}
                 except Exception as e:
                     logger.warning(f"[deep scan] hotspots from {ref} failed: {e}")
+        _lap("positions")
         _p(2, f"Reading reads (+{len(extra)} positions from the data)...")
         res = run_cooc_panel_completeness(location=location, start_date=d0, end_date=d1,
                                           variants=variants, extra_positions=extra,
                                           progress_callback=_inner)
+        _lap("reading + quality")
         _p(3, "Classifying unexplained patterns...")
         day_totals = {str(d)[:10]: int(m) + int(u) for d, m, u in zip(
             res.get("dates", []), res.get("matched_counts", []), res.get("unexplained_counts", []))}
@@ -485,6 +501,7 @@ def run_cooc_deep_scan_lapis(self, location: str, start_date: str, end_date: str
         hot = sorted(hot) if extra else None
         result = _scan_and_name(location, variants, res.get("unexplained_patterns", []),
                                 day_totals, res.get("position_coverage"), hotspots=hot)
+        _lap("naming")
         result["deep"] = {"data_positions": len(extra),
                           "hotspots": len(hot) if hot is not None else None}
         # the lineages it found get the panel's own check (★ markers present /
@@ -497,33 +514,38 @@ def run_cooc_deep_scan_lapis(self, location: str, start_date: str, end_date: str
         if len(nodes_all) > _nmax:
             logger.warning(f"[deep scan] {location}: checking {_nmax} of {len(nodes_all)} "
                            "found lineages (lists.findings_check_max)")
-        if nodes:
-            from cooc import lineages_check
-            _p(4, f"Checking ★ markers of {len(nodes)} found lineages...")
+        # the three last reads are independent: at the same time (2026-11-02;
+        # one after another they took 20-27 s per city)
+        #  - the found lineages get the panel's own check, so their cells mean
+        #    the same as the panel's
+        #  - the panel lineages' weekly grade (2026-10-27): the same cheap check
+        #    over the longer dates, for the weeks squares of the panel rows
+        #  - each sample's coverage on the weeks before the chosen dates
+        #    (2026-10-27): without it those samples never counted as well covered
+        from cooc import lineages_check
+        from concurrent.futures import ThreadPoolExecutor
+        dc = min(d0, datetime.fromisoformat(check_start_date)) if check_start_date else d0
+        jobs = {}
+        with ThreadPoolExecutor(3) as _ex:
+            if nodes:
+                _p(4, f"Checking {len(nodes)} found lineages, the panel's weeks and coverage...")
+                jobs["findings_check"] = _ex.submit(lineages_check, location, dc, d1, nodes,
+                                                    variants, progress_callback=_p, step=4)
+            if check_start_date:
+                jobs["panel_check_ext"] = _ex.submit(lineages_check, location, dc, d1,
+                                                     list(variants), list(variants))
+                if dc < d0:
+                    jobs["sample_qc_ext"] = _ex.submit(_sample_qc, location, dc, d0)
+        for key, fut in jobs.items():
             try:
-                dc = d0
-                if check_start_date:
-                    dc = min(d0, datetime.fromisoformat(check_start_date))
-                result["findings_check"] = lineages_check(location, dc, d1, nodes, variants,
-                                                          progress_callback=_p, step=4)
+                result[key] = fut.result()
             except Exception as e:
-                logger.warning(f"[deep scan] findings check failed in {location}: {e}")
-        # the panel lineages' weekly grade too (2026-10-27): the same cheap
-        # check over the longer dates, for the weeks squares of the panel rows
-        if check_start_date:
-            from cooc import lineages_check as _lc
-            try:
-                result["panel_check_ext"] = _lc(
-                    location, min(d0, datetime.fromisoformat(check_start_date)), d1,
-                    list(variants), list(variants))
-            except Exception as e:
-                logger.warning(f"[deep scan] panel weekly check failed in {location}: {e}")
-            # each sample's coverage on the weeks before the chosen dates too
-            # (2026-10-27): without it those samples never counted as well
-            # covered, so the weeks squares saw only the chosen dates' samples
-            _dc = min(d0, datetime.fromisoformat(check_start_date))
-            if _dc < d0:
-                result["sample_qc_ext"] = _sample_qc(location, _dc, d0)
+                logger.warning(f"[deep scan] {key} failed in {location}: {e}")
+        if jobs:
+            _lap(f"checks at once ({len(nodes)} found)")
+        logger.info(f"[deep scan] {location}: {time.time() - _t0:.1f} s · "
+                    + " · ".join(f"{k} {v:.1f}" for k, v in _tm.items())
+                    + f" · {len(extra)} data positions")
         _p(5, "Deep scan complete.")
         return result
     except Exception as e:

@@ -101,30 +101,36 @@ def quality_text(q: Optional[dict], cfg: Optional[dict] = None) -> str:
 
 
 async def fetch_sample_quality(client, location: str, date_range, block: int = 4,
-                               waits=(0, 10, 30, 60), cfg: Optional[dict] = None
-                               ) -> Dict[str, dict]:
+                               waits=(0, 10, 30, 60), cfg: Optional[dict] = None,
+                               parallel: int = 3) -> Dict[str, dict]:
     """{date: summarize(...)} for every sampling date of `location` in
     `date_range`. Small requests (`block` dates each) with retries on
-    gateway errors: LAPIS answered 504 to 15 dates at once."""
+    gateway errors: LAPIS answered 504 to 15 dates at once. `parallel` blocks
+    at a time (2026-11-02; one after another took 11 s for 9 samples)."""
     import aiohttp
     dates = await client._get_sampling_dates(location, date_range)
     cov: Dict[str, Dict[str, int]] = {}
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=300)) as s:
-        for i in range(0, len(dates), block):
-            part = dates[i:i + block]
-            res = None
+    sem = asyncio.Semaphore(max(1, int(parallel)))
+
+    async def _block(s, part):
+        async with sem:
             for w in waits:
                 if w:
                     await asyncio.sleep(w)
                 try:
-                    res = await client._fetch_tallymut_block(s, location, PROBES, part)
-                    break
+                    return await client._fetch_tallymut_block(s, location, PROBES, part)
                 except Exception as e:
                     if not any(code in str(e) for code in ("502", "503", "504", "imeout")):
                         raise
                     logger.warning(f"[quality][{location}] retry {part[0]}…: {e}")
+        logger.warning(f"[quality][{location}] gave up on {part[0]}…{part[-1]}")
+        return None
+
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=300)) as s:
+        parts = [dates[i:i + block] for i in range(0, len(dates), block)]
+        answers = await asyncio.gather(*[_block(s, p) for p in parts])
+        for res in answers:
             if res is None:
-                logger.warning(f"[quality][{location}] gave up on {part[0]}…{part[-1]}")
                 continue
             content = (res or {}).get("data", {}) or {}
             names = content.get("mutations", []) or []
