@@ -394,13 +394,29 @@ def _scan_and_name(location, variants, unexplained_patterns, day_totals, positio
         panel_parent_map=get_panel_parent_map(), min_read_count=500,
         day_totals=day_totals, position_coverage=position_coverage, hotspots=hotspots)
     try:
-        from api.pango_loader import PangoLoader, get_pango_summary_path as _gp
-        _raw = PangoLoader(_gp()).get_raw_data()
+        _dates = _designation_dates()
         for _c in result.get("resolved_clade", []):
-            _c["designation"] = _raw.get(_c["node"], {}).get("designationDate", "")
+            _c["designation"] = _dates.get(_c["node"], "")
     except Exception:
         pass
     return result
+
+
+_DESIGNATION = (None, {})   # (tree file id, {lineage: designation date})
+
+
+def _designation_dates() -> dict:
+    """{lineage: designation date} of the Pango tree in use, read once per
+    process and again only when the tree file changes (2026-11-02: read on
+    every scan, 6 processes parsing the whole file at once for a few dates)."""
+    global _DESIGNATION
+    from api.pango_loader import PangoLoader, get_pango_summary_path as _gp, tree_info
+    tid = tree_info()["id"]
+    if _DESIGNATION[0] != tid:
+        raw = PangoLoader(_gp()).get_raw_data()
+        _DESIGNATION = (tid, {l: (e or {}).get("designationDate", "") or ""
+                              for l, e in raw.items()})
+    return _DESIGNATION[1]
 
 
 def _data_positions_cached(location, d0, d1, share, cov):
