@@ -390,6 +390,36 @@ def _run_scope(selected_locations, all_selected_variants, start_date, end_date) 
             "ran_dates": ran_dates, "plus": plus, "minus": minus}
 
 
+def _run_estimate(n_dates: int, n_locs: int) -> dict:
+    """Seconds a run takes (2026-11-02), measured with 6 cities, 9 sampling
+    dates, the worker at 6 processes: panel check 5-8 s per city; deep scan
+    29-76 s per city (reading at LAPIS 24-64 s, naming 1-18 s, the checks at
+    once 4-10 s), then the cross-check ~15 s. Cities run run.parallel_cities
+    at a time (the worker's CELERY_CONCURRENCY); a round ends with its
+    slowest city, so the slowest city's time is used. Longer dates scale with
+    the sampling dates (one query per batch and date)."""
+    try:
+        par = max(1, int(get_cooc_setting("run.parallel_cities", default=6)))
+    except Exception:
+        par = 6
+    rounds = -(-max(1, n_locs) // par)
+    panel = rounds * (1.5 + 0.7 * n_dates)
+    # LAPIS answers more slowly the more cities read at once: 7.5 s per date
+    # for the slowest of 6 together, ~5 s for one alone (Genève: 64 s with 6,
+    # 50 s with 3)
+    at_once = min(max(1, n_locs), par)
+    scan = rounds * (8 + (4.5 + 3.0 * at_once / 6) * n_dates) + 15
+    return {"panel": panel, "scan": scan, "parallel": par, "rounds": rounds}
+
+
+def _dur(sec: float) -> str:
+    """'~10 s', '~1.5 min', '~4 min'"""
+    if sec < 60:
+        return f"~{max(5, int(round(sec / 5.0)) * 5)} s"
+    m = sec / 60
+    return f"~{m:.1f} min" if m < 3 else f"~{m:.0f} min"
+
+
 def _panel_diff(used, now) -> str:
     """'+ TA.1 − KP.2' between the panel a result was made with and now."""
     used, now = set(used or []), set(now or [])
@@ -901,43 +931,23 @@ def app():
             and end_date > start_date
             and not _busy
         )
-        # ── timing estimate (benchmarked model) ───────────────────────────
+        # ── timing estimate (measured 2026-11-02, _run_estimate) ──────────
         if end_date > start_date and selected_locations:
-            _days  = (end_date - start_date).days
-            # wastewater ~2 samples/week
-            _n_dates = max(1, int(_days * 2 / 7))
-            _n_locs  = len(selected_locations)
-            # amp_dict positions from cutoff (2024-01-01 default ≈ 2141)
-            _positions = 2141
-            _per_date  = 0.30 + 0.00022 * _positions      # s / date / location
-            _cooc_s    = _per_date * _n_dates * _n_locs * 1.2   # safety factor
-            # ▶ Run = completeness only (deconvolution has its own button;
-            # it took ~1.5 min per location)
-            _total_s   = _cooc_s
-            _total_min = _total_s / 60
-
-            if _total_s <= 45:
-                st.caption(
-                    f"⏱ Estimated run time: ~{_total_s:.0f}s "
-                    f"({_n_dates} sampling dates × {_n_locs} {'city' if _n_locs == 1 else 'cities'})"
-                )
-            elif _total_s <= 120:
-                st.info(
-                    f"⏱ ~{_total_min:.1f} min — {_n_dates} dates × {_n_locs} {'city' if _n_locs == 1 else 'cities'}. "
-                    "Runs in the background; you can keep working."
-                )
-            elif _total_s <= 300:
-                st.warning(
-                    f"⏱ ~{_total_min:.0f} min — this is a large query "
-                    f"({_n_dates} dates × {_n_locs} cities). "
-                    "Consider fewer cities or a shorter date range for faster results."
-                )
+            _days = (end_date - start_date).days
+            _n_dates = max(1, int(round(_days * 2 / 7)))       # ~2 samples a week
+            _n_locs = len(selected_locations)
+            _est = _run_estimate(_n_dates, _n_locs)
+            _what = (f"{_n_dates} sampling dates × {_n_locs} {'city' if _n_locs == 1 else 'cities'}"
+                     + (f", {_est['parallel']} at a time" if _est["rounds"] > 1 else ""))
+            _line = (f"⏱ Panel check {_dur(_est['panel'])} · then the deep scan "
+                     f"{_dur(_est['scan'])} ({_what})")
+            if _est["scan"] <= 300:
+                st.caption(_line)
+            elif _est["scan"] <= 600:
+                st.info(_line + ". Runs in the background; you can keep working.")
             else:
-                st.error(
-                    f"⏱ ~{_total_min:.0f} min — very large query "
-                    f"({_n_dates} dates × {_n_locs} cities). "
-                    "Strongly consider narrowing the date range or selecting fewer cities."
-                )
+                st.warning(_line + ". A large query: fewer cities or a shorter date range "
+                           "gives results sooner.")
 
         _step_label(5, "Run analysis", done=has_run, active=not has_run and can_run)
         # 2026-10-09: results belong to one run. Only locations added (same
@@ -1457,7 +1467,18 @@ def app():
                     _why = ("Running: the lineages it finds appear when the cross-check "
                             "ends (progress above)")
                 else:
-                    _why = "Looks outside your panel in every city"
+                    # how long (2026-11-02): the run's dates and cities
+                    _crs = st.session_state.get("acooc_cooc_results") or {}
+                    _nd = max([len((r or {}).get("dates") or []) for r in _crs.values()] or [0])
+                    if not _nd:
+                        _rd = st.session_state.get("acooc_ran_dates") or (start_date.isoformat(),
+                                                                          end_date.isoformat())
+                        _nd = max(1, int(round((datetime.fromisoformat(str(_rd[1])[:10])
+                                                - datetime.fromisoformat(str(_rd[0])[:10])).days
+                                               * 2 / 7)))
+                    _nl = len(st.session_state.get("acooc_cooc_tasks") or {}) or len(selected_locations)
+                    _why = ("Looks outside your panel in every city · "
+                            + _dur(_run_estimate(_nd, _nl)["scan"]))
                 if st.button("Resume deep scan" if _resume else
                              "Re-run deep scan" if _scan_old else "Run deep scan",
                              key="acooc_btn_scan", use_container_width=True,
@@ -1795,6 +1816,13 @@ def app():
                  [_RUN_STAGES[2], _RUN_STAGES[3]]),
             ]
 
+            # each step's share of a task's time (2026-11-02, measured): the
+            # deep scan's 5 steps (positions, reading, naming, the checks at
+            # once, done) and the panel check's 4 (preparing x2, reading,
+            # aggregating). Equal shares made the bar and its "time left" jump.
+            _STEP_W = {5: (0.03, 0.66, 0.17, 0.14, 0.0),
+                       4: (0.05, 0.05, 0.85, 0.05)}
+
             def _task_frac(tid):
                 """0-1 for a running task, from task_progress:{id} in redis."""
                 try:
@@ -1804,15 +1832,29 @@ def app():
                     _d = json.loads(_raw)
                     _tot = max(1, int(_d.get("total") or 4))
                     _cur = max(1, int(_d.get("current") or 1))
-                    _f = (_cur - 1 + float(_d.get("frac") or 0)) / _tot
+                    _w = _STEP_W.get(_tot)
+                    if _w and _cur <= len(_w):
+                        _f = sum(_w[:_cur - 1]) + _w[_cur - 1] * float(_d.get("frac") or 0)
+                    else:
+                        _f = (_cur - 1 + float(_d.get("frac") or 0)) / _tot
                     return min(0.99, max(0.0, _f)), str(_d.get("status") or "")
                 except Exception:
                     return 0.0, ""
 
             def _left(sec):
                 if sec < 60:
-                    return "< 1 min left"
+                    return f"~{max(5, int(round(sec / 5.0)) * 5)} s left"
                 return f"~{int(round(sec / 60))} min left"
+
+            def _expected(pk):
+                """the measured estimate for this phase (_run_estimate), or
+                None: the run's sampling dates and cities"""
+                _crs = st.session_state.get("acooc_cooc_results") or {}
+                _nd = max([len((r or {}).get("dates") or []) for r in _crs.values()] or [0])
+                if not _nd:
+                    return None
+                _e = _run_estimate(_nd, len(location_names))
+                return {"completeness": _e["panel"], "scanner": _e["scan"]}.get(pk)
 
             def _phase_bars(live):
                 """The progress box: a summary line, then one bar per kind of
@@ -1854,14 +1896,16 @@ def app():
                         if len(_stages) == 2 and _st == "done":
                             # deep scan done here → its cross-check
                             _f2, _st2, _msg2 = _one(*_stages[1], _l)
-                            _f = 0.5 + 0.5 * _f2
+                            # the cross-check is ~15 s of a ~1.5 min scan
+                            # (2026-11-02; was half the bar)
+                            _f = 0.9 + 0.1 * _f2
                             _st, _msg = _st2, _msg2
                             _lab = (_MARKS.get(_st2) if _st2 in _MARKS else
                                     "cross-check" if _st2 == "running" else "scanned")
                         elif len(_stages) == 2:
-                            _f = 1.0 if _st in ("failed", "stopped") else 0.5 * _f
+                            _f = 1.0 if _st in ("failed", "stopped") else 0.9 * _f
                             _lab = (_MARKS.get(_st) if _st in _MARKS else
-                                    f"{_f * 200:.0f} %" if _st == "running" else "starting")
+                                    f"{_f / 0.9 * 100:.0f} %" if _st == "running" else "starting")
                         else:
                             _lab = (_MARKS.get(_st) if _st in _MARKS else
                                     f"{_f * 100:.0f} %" if _st == "running" else "waiting")
@@ -1882,7 +1926,14 @@ def app():
                     _right = f"{_frac * 100:.0f}%"
                     if live and _frac > 0.03:
                         _el = _time.time() - _t0s[_pk]
-                        _right += " · " + _left(_el * (1 - _frac) / _frac)
+                        _sec = _el * (1 - _frac) / _frac       # at the pace so far
+                        # until halfway the pace so far is the quick start
+                        # (positions, first queries): not less than the
+                        # measured estimate says is left (2026-11-02)
+                        _exp = _expected(_pk) if _frac < 0.5 else None
+                        if _exp:
+                            _sec = max(_sec, _exp - _el)
+                        _right += " · " + _left(max(0.0, _sec))
                     # one segment per location; at < 110 px each (many
                     # locations) they wrap onto a second row
                     _track = "".join(
