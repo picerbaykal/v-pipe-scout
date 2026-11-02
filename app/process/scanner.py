@@ -500,7 +500,9 @@ def scan_unexplained_patterns(
     # day: rows are also split by confirmed_absent (2026-09-30), which must
     # not turn a 5-read pattern into ignored 1-read rows
     _pat_total: Dict[tuple, int] = {}
-    for _, row in patterns.iterrows():
+    # plain dicts (2026-11-02): iterrows built a pandas Series per row, ~1 s
+    # for 35k patterns; every use below is row[...] / row.get(...)
+    for row in patterns.to_dict("records"):
         present = set(row["confirmed_present"])
         count = int(row["count"])
         fp = frozenset(beyond_panel(present, panel_sigs))
@@ -651,6 +653,12 @@ def scan_unexplained_patterns(
         return _rroot_cache[lin]
 
     _rcs = _rc(tree, all_lineage_signatures)
+    # lineages under a recombinant root, and that root (2026-11-02): only they
+    # can have inherited a mutation from the finding, so the counts below look
+    # at them alone instead of calling _inh for every carrier (8 M calls, 3 s
+    # of Lugano's naming). Same counts as before.
+    _rec_of = {l: r for l in all_lineage_signatures if (r := _rroot(l))}
+    _rec_set = set(_rec_of)
 
     def _annotate_outside(c):
         """Per block and mutation: carriers outside the finding's family."""
@@ -659,15 +667,25 @@ def scan_unexplained_patterns(
             fam = _family(c["node"]) | _family(fr)
             roots = {_rroot(c["node"]), _rroot(fr)}
 
-            def _inh(l, m):
-                # under another recombinant that got m from the finding
-                r = _rroot(l)
-                return bool(r) and r not in roots and (
-                    _rcs.made_from(r, c["node"], m) or _rcs.made_from(r, fr, m))
+            def _n_inh(lins, ms):
+                """how many of lins sit under another recombinant that got
+                every one of ms from the finding (one answer per root)"""
+                n, memo = 0, {}
+                for l in lins & _rec_set:
+                    r = _rec_of[l]
+                    if r in roots:
+                        continue
+                    k = memo.get(r)
+                    if k is None:
+                        k = all(_rcs.made_from(r, c["node"], m) or _rcs.made_from(r, fr, m)
+                                for m in ms)
+                        memo[r] = k
+                    n += k
+                return n
             out = {}
             for m in b.get("discriminating", []):
                 outside = _mut_index.get(m, set()) - fam
-                n_inh = sum(1 for l in outside if _inh(l, m))
+                n_inh = _n_inh(outside, (m,))
                 out[m] = (len(outside) - n_inh, n_inh)
             b["mut_outside"] = {m: v[0] for m, v in out.items()}
             # ★ per mutation, by the same rule the scanner confirms with — the
@@ -680,7 +698,7 @@ def scan_unexplained_patterns(
             # (22792T+22865T+22893G+23021G: only XFG-family lineages).
             g = b.get("discriminating", [])
             outside_g = set(_candidates_for(g)) - fam if len(g) >= 2 else set()
-            n_inh_g = sum(1 for l in outside_g if all(_inh(l, m) for m in g))
+            n_inh_g = _n_inh(outside_g, tuple(g))
             b["combo_specific"] = bool(
                 len(g) >= 2 and len(outside_g) - n_inh_g <= STAR_OUTSIDE_MAX)
 
@@ -1166,6 +1184,11 @@ def _finalize_clade(s: dict, tree: "_Tree", all_sigs: Dict[str, Set[str]],
             for _mm in _sl:
                 _pi.setdefault(_mut_pos(_mm), set()).add(_mm)
         cache["pos_index"] = _pi
+    if "rec_lin" not in cache:
+        # lineage -> its recombinant root, for those under one (2026-11-02)
+        cache["rec_lin"] = {l: r for l in all_sigs if (r := tree.rec_root(l))}
+    _rec_lin = cache["rec_lin"]
+    _rec_lin_set = set(_rec_lin)
     _universe = cache["universe"]
     _pos_index = cache["pos_index"]
     node = s["node"]
@@ -1274,11 +1297,21 @@ def _finalize_clade(s: dict, tree: "_Tree", all_sigs: Dict[str, Set[str]],
             # rule as the ★ markers (option C)
             n_outside = _nout.get(g)
             if n_outside is None:
-                n_outside = sum(1 for l in carriers
-                                if l not in family
-                                and not (tree.rec_root(l) and tree.rec_root(l) != _node_root
-                                         and all(_rcf.made_from(tree.rec_root(l), node, x)
-                                                 for x in g)))
+                # outside the family, minus those under another recombinant
+                # made from this node (2026-11-02: only recombinant-descended
+                # carriers are tested, one answer per root; same count)
+                _cs = set(carriers) - family
+                _n_in, _memo = 0, {}
+                for l in _cs & _rec_lin_set:
+                    r = _rec_lin[l]
+                    if r == _node_root:
+                        continue
+                    k = _memo.get(r)
+                    if k is None:
+                        k = all(_rcf.made_from(r, node, x) for x in g)
+                        _memo[r] = k
+                    _n_in += k
+                n_outside = len(_cs) - _n_in
                 _nout[g] = n_outside
             if n_outside > SMALL_SET:
                 continue          # not specific (many non-family carriers)
