@@ -100,3 +100,15 @@ lists:
                         #   reads also fit related lineages (XFV.5, RE.2.2 …)
   broad_max: 25
   near_changes_max: 8
+
+# ── Tracking: is a found lineage big enough to add? (process.track) ─────────
+# "Check found lineages in deconvolution" runs a trial deconvolution of the
+# panel + the found lineages; + Add then needs, besides the weeks in a row,
+# at least add_min_share in one well-covered city (mean of the last_days).
+# UI only: a streamlit restart is enough. 2026-11-03: TA.1, PJ.2.1, ST.1 at
+# 8-43 %; lineages with coocs on 1 sample per city at 0.1-0.3 %; lineages not
+# there (LP.8, XEC, BA.3.2) up to ~0.8 %.
+track:
+  add_min_share: 0.02
+  small_share: 0.01
+  last_days: 14

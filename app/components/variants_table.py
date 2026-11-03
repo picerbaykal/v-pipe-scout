@@ -1460,7 +1460,7 @@ def _city_seen(d):
     return _state(d or {}) == "present"
 
 
-def _panel_overview(per_city, cities, wk=None):
+def _panel_overview(per_city, cities, wk=None, trial=None):
     res = [per_city[c] for c in cities if per_city.get(c)]
     if not res:
         return (_ovb("<b>In panel</b> · no result"), "", GREY, "#6b7280", "dashed")
@@ -1515,6 +1515,15 @@ def _panel_overview(per_city, cities, wk=None):
     where_all = ", ".join(_tag(c) for c in seen)
     tip = (f"In panel: seen in {len(seen)} of {len(meas)} cities"
            + (f" ({where_all})" if where_all else "") + ("\n" + tip if tip else ""))
+    # its share in the trial deconvolution (2026-11-03): "under 1 % in every
+    # city" for a lineage that is there but tiny; a parent's share is itself
+    # and its descendants not in the panel
+    if trial:
+        best = max(trial.values())
+        note += (" · under 1 % in every city" if best < 0.01
+                 else f" · up to {_pct_s(best)} ({city_code(max(trial, key=trial.get))})")
+        tip += (_size_tip(trial) + "\na lineage's share = it and its descendants not in the "
+                "panel; it drops when a child is added")
     # "seen in k of n (GR thin)" + confirmed or not (2026-10-28): the same
     # kind of answer as a found row's, so "In panel" doesn't read as a verdict
     return (_ovw(_ovb(f"<b style='color:#1f2328'>In panel</b> · seen in {len(seen)} of "
@@ -1863,6 +1872,36 @@ def _new_grade(f, cities):
     return False, f"{where}, {wk}", early
 
 
+def _pct_s(x):
+    x = 100 * float(x)
+    return f"{x:.1f} %" if x < 10 else f"{x:.0f} %"
+
+
+def _size_text(shares):
+    """' · up to 23 % (TI)' / ' · small: up to 1.7 %' / ' · negligible: 0.2 %'
+    from a trial deconvolution (process.track, 2026-11-03); '' without one"""
+    if not shares:
+        return "", None
+    from process.track import size
+    sz = size(shares)
+    if not sz:
+        return "", None
+    word, city, best = sz
+    txt = (f" · up to {_pct_s(best)} ({city_code(city)})" if word == "track" else
+           f" · small: up to {_pct_s(best)}" if word == "small" else
+           f" · negligible: {_pct_s(best)}")
+    return txt, word
+
+
+def _size_tip(shares):
+    if not shares:
+        return ""
+    return ("\nshare in the trial deconvolution (panel + found lineages, last 2 weeks): "
+            + ", ".join(f"{city_code(c)} {_pct_s(x)}" for c, x in
+                        sorted(shares.items(), key=lambda kv: -kv[1]))
+            + " · well-covered cities only")
+
+
 def _finding_overview(v, f, cities, current_panel, has_children=False):
     kind, why = _finding_status(v, f, cities, has_children)
     pc = f.get("per_city") or {}
@@ -1887,11 +1926,21 @@ def _finding_overview(v, f, cities, current_panel, has_children=False):
             rs = None
         hover = _short_hover(f, cities, rs, wk, why)
         strip = _weeks_strip(wk)
+        # its size in a trial deconvolution (2026-11-03, process.track): + Add
+        # needs both, the weeks in a row AND a share worth tracking
+        sz_txt, sz = _size_text(f.get("trial"))
+        hover += _size_tip(f.get("trial"))
         if f.get("add_ready") or (rs and rs["kind"] == "add"):
+            n = (wk or {}).get("in_a_row", 0)
+            if sz in ("small", "negligible"):
+                return (kind, _ovw(_ovb(f"<b>Watch</b> <span style='color:#4b5563'>· confirmed {n} "
+                                        f"weeks in a row{_e(sz_txt)}</span>",
+                                        "background:#eff6ff;color:#1d4ed8;"), strip),
+                        hover + "\nconfirmed, but too small to track: + Add needs at least "
+                        "2 % in one well-covered city", RED, RED, "ring")
             btn = ("<span class='added'>added · re-run needed</span>" if v in current_panel
                    else f"<button class='add' data-add='{_e(v)}'>+ Add</button>")
-            n = (wk or {}).get("in_a_row", 0)
-            return (kind, _ovw(_ovb(f"<b>Add</b> · {n} weeks in a row{btn}",
+            return (kind, _ovw(_ovb(f"<b>Add</b> · {n} weeks in a row{_e(sz_txt)}{btn}",
                                     "background:#fef2f2;color:#b91c1c;"), strip),
                     hover, RED, RED, "filled")
         if rs and rs["kind"] == "fading":
@@ -1904,10 +1953,10 @@ def _finding_overview(v, f, cities, current_panel, has_children=False):
                                     "color:#6b7280;box-shadow:inset 0 0 0 1px #e5e7eb;"), strip),
                     hover, "#d1d5db", "#6b7280", "ring")
         # confirmed in the newest weeks, not yet in a row: say how far it got
-        reason = (f"{rs['in_a_row']} of {rs['need']} weeks"
+        reason = (f"confirmed {rs['in_a_row']} of {rs['need']} weeks"
                   if rs and (wk or {}).get("weeks") and wk["weeks"][-1]["status"] == "confirmed"
                   else _short_reason(f, cities))
-        return (kind, _ovw(_ovb(f"<b>Watch</b> <span style='color:#4b5563'>· {_e(reason)}</span>",
+        return (kind, _ovw(_ovb(f"<b>Watch</b> <span style='color:#4b5563'>· {_e(reason + sz_txt)}</span>",
                                 "background:#eff6ff;color:#1d4ed8;"), strip), hover, RED, RED, "ring")
     if kind in ("folded", "suggested"):
         # no coocs of its own (2026-10-27): grey, the reason in the cells' words
@@ -2250,7 +2299,8 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
           novel=(), broad=(), novel_rest=None, near=None, near_min_days=2,
           novel_hotspot=None, data_until=None, novel_info=None,
           broad_total=None, named_hidden=0, quality=None, panel_weekly=None,
-          dates=None, clinical=None, pango_parent=None, sample_well=None) -> str:
+          dates=None, clinical=None, pango_parent=None, sample_well=None,
+          trial=None, trial_note=None) -> str:
     """cities: city names in column order; sel: the chosen city.
     rows: components.abundance_cooc_tree.tree_rows(...).
     verdicts: {city: {variant: {state, reason, n_present, n_measured, n_markers}}}.
@@ -2325,7 +2375,8 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
             # the dot, the name and the overview follow all cities, not the
             # selected one (2026-10-20); amber only for "in panel, not
             # seen in any city"
-            ov, ovtip, dcol, ncol, dk = _panel_overview(pc, cities, (panel_weekly or {}).get(v))
+            ov, ovtip, dcol, ncol, dk = _panel_overview(pc, cities, (panel_weekly or {}).get(v),
+                                                        (trial or {}).get(v))
             tip = f"{v}: in the panel" + (f" · {ovtip}" if ovtip else "")
             name = f"<span class='nm' style='color:{ncol}'>{_e(v)}</span>{chips}"
             tc = _tree_cell(r, dcol, dk, name, tip)
@@ -2531,6 +2582,8 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
                         f"({novel_rest} reads, summed over cities and days) — not listed</td></tr>")
 
     return (CSS + SHORT_LEGEND + _frames_note(findings, panel_weekly, dates) + _add_note(findings)
+            + (f"<div class='dim' style='font-size:12.5px;margin:2px 0 6px'>{trial_note}</div>"
+               if trial_note else "")
             + f"<div class='vtw'><table class='vt'><thead>{head}</thead>"
               f"<tbody>{''.join(body)}</tbody></table></div>")
 

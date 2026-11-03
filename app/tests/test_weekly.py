@@ -104,7 +104,7 @@ def test_button_only_when_ready():
     late = weekly({c: _city(ds, "2026-09-21") for c in C}, D0, D1)
     f = dict(f, add_ready=False, weekly=late)
     ov = vt._finding_overview("TK.1", f, C, [])[1]
-    assert "data-add" not in ov and "Watch" in ov and f"· {late['in_a_row']} of 3 weeks" in ov
+    assert "data-add" not in ov and "Watch" in ov and f"· confirmed {late['in_a_row']} of 3 weeks" in ov
     # dates too short: said once above the table, not on every row
     short = weekly({c: _city(_days("2026-09-05", D1)) for c in C}, "2026-09-05", D1)
     note = vt._add_note({"TK.1": dict(f, weekly=short), "TA.1": dict(f, weekly=short)})

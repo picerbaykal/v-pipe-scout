@@ -86,4 +86,4 @@ def test_watch_says_how_many_weeks_in_a_row():
                       "measured": ["2026-09-30"]}, "state": "present"}
     f = {"status": "confirmed", "per_city": {C[1]: {"days": 2, "check": seen}},
          "weekly": _wk(".......FFFFFCC")}
-    assert "<b>Watch</b> <span style='color:#4b5563'>· 2 of 3 weeks</span>" in vt._finding_overview("TK.1", f, C, [])[1]
+    assert "<b>Watch</b> <span style='color:#4b5563'>· confirmed 2 of 3 weeks</span>" in vt._finding_overview("TK.1", f, C, [])[1]
