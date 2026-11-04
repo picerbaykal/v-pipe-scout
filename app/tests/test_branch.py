@@ -83,3 +83,34 @@ def test_no_branch_row_when_mixed_or_all_in_the_signature():
     assert "No name yet" not in own
     off = _build(vt, {"25528T"}, None)                             # LAPIS not reached
     assert "No name yet" not in off and "clinical:" not in off
+
+
+def test_a_lineage_that_cannot_be_checked_still_shows_its_share():
+    # 2026-11-04: KP.3 held 9 % in Zürich with 0 ★ markers and the row showed
+    # no number at all, so "can't be checked" and the share were never read
+    # together. The three branches that can't judge a lineage now carry it.
+    vt = _vt()
+    cities = ["Genève (GE)", "Zürich (ZH)"]
+    tr = {"Zürich (ZH)": 0.092}
+    st = {"Zürich (ZH)": {"mean": 0.092, "last": 0.091, "last_date": "2026-10-16",
+                          "peak": 0.097, "peak_date": "2026-10-11"}}
+
+    def d(mk, meas, pres, **kw):
+        return dict(n_markers=mk, n_measured=meas, n_present=pres, **kw)
+
+    no_marker = {c: d(0, 0, 0) for c in cities}
+    html, tip, _dot, _ink, _k = vt._panel_overview(no_marker, cities, None, tr, st)
+    assert "can't be checked" in html and "ZH 9.2 % over 2 weeks" in html
+    assert "deconvolution share" in tip
+
+    no_pairs = {c: d(3, 0, 0, pairs_checked=True, pairs={}) for c in cities}
+    html, _t, _d2, _i, _k2 = vt._panel_overview(no_pairs, cities, None, tr, st)
+    assert "can't be checked with coocs" in html and "ZH 9.2 %" in html
+
+    absent = {c: d(4, 4, 0, pairs={"measured": 3, "positive": 0}) for c in cities}
+    html, _t, _d3, _i2, _k3 = vt._panel_overview(absent, cities, None, tr, st)
+    assert "not seen in any city" in html and "ZH 9.2 %" in html
+
+    # without a trial there is no share line, as before
+    html, _t, _d4, _i3, _k4 = vt._panel_overview(no_marker, cities)
+    assert "can't be checked" in html and "%" not in html

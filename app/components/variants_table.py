@@ -1466,25 +1466,43 @@ def _city_seen(d):
     return _state(d or {}) == "present"
 
 
+def _share_line(trial, stats):
+    """(html, tip) for a lineage's share in the deconvolution, or ("", "")."""
+    if not trial:
+        return "", ""
+    best = max(trial.values())
+    bc = max(trial, key=trial.get)
+    html = ("<span class='shr'>under 1 % in every city</span>" if best < 0.01
+            else f"<span class='shr'>{city_code(bc)} {_pct_s(best)} over 2 weeks"
+                 f"{_e(_trend((stats or {}).get(bc)))}</span>")
+    return html, (_size_tip(trial, stats)
+                  + "\na lineage's share = it and its descendants not in the panel; "
+                  "it drops when a child is added")
+
+
 def _panel_overview(per_city, cities, wk=None, trial=None, stats=None):
     res = [per_city[c] for c in cities if per_city.get(c)]
     if not res:
         return (_ovb("<b>In panel</b> · no result"), "", GREY, "#6b7280", "dashed")
+    shr, shr_tip = _share_line(trial, stats)
+    # these three can't judge the lineage; the share is still shown, so a
+    # number and "can't be checked" are read together (2026-11-04: KP.3 held
+    # 9 % in Zürich with 0 ★ markers, and the page showed no number at all)
     if all(_vote_counts(x)[0] == 0 for x in res):
-        return (_ovb("<b>In panel</b> · can't be checked", "color:#6b7280;"),
+        return (_ovb("<b>In panel</b> · can't be checked" + shr, "color:#6b7280;"),
                 "no mutation of its own: all its mutations are shared with other lineages in "
-                "the panel, so its share in Deconvolution can't be checked here",
+                "the panel, so its share in Deconvolution can't be checked here" + shr_tip,
                 GREY, "#6b7280", "filled")
     if all(_no_pairs(x) for x in res):
-        return (_ovb("<b>In panel</b> · can't be checked with coocs", "color:#6b7280;"),
+        return (_ovb("<b>In panel</b> · can't be checked with coocs" + shr, "color:#6b7280;"),
                 "no reads at a pair of its own mutations in any city (two within 300 bases, "
-                "or it has none): its single mutations alone are not counted",
+                "or it has none): its single mutations alone are not counted" + shr_tip,
                 GREY, "#6b7280", "filled")
     if _panel_warn(per_city, True):
-        return (_ovb("<b>In panel</b> · not seen in any city",
+        return (_ovb("<b>In panel</b> · not seen in any city" + shr,
                      f"background:#fffbeb;color:{AMBER_T};"),
                 _panel_warn(per_city, True).replace("<b style='color:" + AMBER_T + "'>", "")
-                .replace("</b>", "").rstrip(" ·"),
+                .replace("</b>", "").rstrip(" ·") + shr_tip,
                 AMBER, AMBER_T, "filled")
     meas = [c for c in cities if per_city.get(c) and _vote_counts(per_city[c])[0]
             and not _no_pairs(per_city[c])]
@@ -1524,15 +1542,7 @@ def _panel_overview(per_city, cities, wk=None, trial=None, stats=None):
     # its share in the trial deconvolution (2026-11-03): "under 1 % in every
     # city" for a lineage that is there but tiny; a parent's share is itself
     # and its descendants not in the panel
-    shr = ""
-    if trial:
-        best = max(trial.values())
-        bc = max(trial, key=trial.get)
-        shr = ("<span class='shr'>under 1 % in every city</span>" if best < 0.01
-               else f"<span class='shr'>{city_code(bc)} {_pct_s(best)} over 2 weeks"
-                    f"{_e(_trend((stats or {}).get(bc)))}</span>")
-        tip += (_size_tip(trial, stats) + "\na lineage's share = it and its descendants not in the "
-                "panel; it drops when a child is added")
+    tip += shr_tip
     # "seen in k of n (GR thin)" + confirmed or not (2026-10-28): the same
     # kind of answer as a found row's, so "In panel" doesn't read as a verdict
     return (_ovw(_ovb(f"<b style='color:#1f2328'>In panel</b> · seen in {len(seen)} of "
