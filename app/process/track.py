@@ -74,6 +74,32 @@ def trial_shares(results: Dict[str, dict], lineages: Iterable[str],
     return out
 
 
+def trial_stats(results: Dict[str, dict], lineages: Iterable[str],
+                well_cities: Iterable[str], cfg: Optional[dict] = None) -> Dict[str, Dict[str, dict]]:
+    """{lineage: {city: {mean, last, last_date, peak, peak_date}}} over the
+    last `last_days` (2026-11-04: the mean alone hid TA.1 in Zürich going
+    from 41 % on 3 Oct to 1.3 % on 16 Oct)"""
+    c = track_cfg(cfg)
+    well = set(well_cities)
+    out: Dict[str, Dict[str, dict]] = {}
+    for v in lineages:
+        for city, res in (results or {}).items():
+            if city not in well:
+                continue
+            s = _series(res, city, v)
+            if not s:
+                continue
+            last = s[-1][0]
+            win = [(d, p) for d, p in s if d > last - timedelta(days=int(c["last_days"]))]
+            if not win:
+                continue
+            pk = max(win, key=lambda x: x[1])
+            out.setdefault(v, {})[city] = {
+                "mean": sum(p for _d, p in win) / len(win), "last": win[-1][1],
+                "last_date": win[-1][0].isoformat(), "peak": pk[1], "peak_date": pk[0].isoformat()}
+    return out
+
+
 def size(shares: Optional[Dict[str, float]], cfg: Optional[dict] = None):
     """("track" | "small" | "negligible", best city, best share), or None
     without shares. track: >= add_min_share in one city; small: >= small_share."""

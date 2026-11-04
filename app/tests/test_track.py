@@ -56,11 +56,11 @@ def _f(trial):
 def test_add_needs_a_share_worth_tracking():
     vt = _vt()
     ov = vt._finding_overview("PJ.2.1", _f({"Lugano (TI)": 0.23}), C, [])[1]
-    assert "data-add" in ov and "up to 23 % (TI)" in ov
+    assert "data-add" in ov and "TI 23 % over 2 weeks" in ov
     ov = vt._finding_overview("SW.2.1", _f({"Lugano (TI)": 0.002}), C, [])[1]
     assert "data-add" not in ov and "Watch" in ov and "negligible: 0.2 %" in ov
     ov = vt._finding_overview("SB.1.1.1", _f({"Lugano (TI)": 0.017}), C, [])[1]
-    assert "data-add" not in ov and "small: up to 1.7 %" in ov
+    assert "data-add" not in ov and "small: 1.7 % over 2 weeks" in ov
     # no trial yet: + Add as before
     assert "data-add" in vt._finding_overview("TA.1", _f(None), C, [])[1]
 
@@ -72,3 +72,13 @@ def test_panel_row_says_under_one_percent():
          "n_present": 3, "n_measured": 3, "pairs_checked": True}
     ov = vt._panel_overview({c: d for c in C}, C, None, {"Lugano (TI)": 0.003})[0]
     assert "under 1 % in every city" in ov
+
+
+def test_last_sample_shows_a_fall():
+    from process.track import trial_stats
+    r = {"Zürich (ZH)": _res("Zürich (ZH)", "TA.1", [(3, 0.41), (7, 0.16), (11, 0.12), (15, 0.016), (16, 0.013)])}
+    st = trial_stats(r, ["TA.1"], ["Zürich (ZH)"])["TA.1"]["Zürich (ZH)"]
+    assert abs(st["peak"] - 0.41) < 1e-9 and st["last_date"] == "2026-10-16"
+    vt = _vt()
+    txt, word = vt._size_text({"Zürich (ZH)": st["mean"]}, {"Zürich (ZH)": st})
+    assert word == "track" and "ZH 14 % over 2 weeks · last sample 1.3 % ↓" in txt

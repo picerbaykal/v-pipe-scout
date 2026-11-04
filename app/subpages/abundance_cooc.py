@@ -961,10 +961,12 @@ def app():
                           if len(_nl) <= 2 else f"▶ Add {len(_nl)} cities to the run")
             _run_note = "keeps the current results"
         elif _scope["mode"] == "panel":
-            _run_label = "▶ Re-run panel check"
+            # 2026-11-04: the panel check, then the deconvolution by itself;
+            # the deep scan (slow on long dates) stays, with its own button
+            _run_label = "▶ Re-run with the new panel"
             _run_note = ("panel " + _panel_diff(_scope["ran_panel"], all_selected_variants)
-                         + " · keeps the deconvolution and the deep scan; re-run those "
-                         "from their own buttons")
+                         + " · panel check, then the deconvolution · the deep scan stays "
+                         "(Re-run deep scan to update it)")
         elif _scope["mode"] == "new":
             _run_label, _run_note = "▶ Start a new run", "asks before clearing the current results"
         else:
@@ -987,6 +989,7 @@ def app():
             elif _scope["mode"] == "panel":
                 st.session_state["acooc_trigger_panel"] = (
                     list(_scope["ran_locs"]) + list(_scope["new_locs"]))
+                st.session_state["acooc_chain_deconv"] = True
             elif _scope["mode"] == "new":
                 _ss = st.session_state
                 _clears = [f"panel check ({', '.join(_short(l) for l in _scope['ran_locs'])})"]
@@ -1072,7 +1075,10 @@ def app():
             _ss["acooc_section"] = "Panel check"
             _ss["acooc_notice"] = ("Panel check running again with the panel "
                                    + _panel_diff(_old, all_selected_variants)
-                                   + "; the deconvolution and the deep scan are kept.")
+                                   + ("; the deconvolution follows when it is in" if
+                                      _ss.get("acooc_chain_deconv") else
+                                      "; the deconvolution is kept")
+                                   + "; the deep scan is kept (Re-run deep scan to update it).")
             logger.info(f"Panel check re-run: {_panel_diff(_old, all_selected_variants)}")
 
         # task submission
@@ -1705,6 +1711,27 @@ def app():
                     if not _xt_now or any(_l not in _xr_now and _l not in _failed.get("cross-check", {})
                                           for _l in location_names):
                         _scan_outstanding = True
+            # "Re-run with the new panel" (2026-11-04): the panel check is in
+            # -> the deconvolution with the same panel, by itself
+            if (st.session_state.get("acooc_chain_deconv") and not _cooc_outstanding
+                    and _cr_now and not _deconv_outstanding):
+                st.session_state["acooc_chain_deconv"] = False
+                _cd0, _cd1 = st.session_state.get("acooc_ran_dates")
+                _cpan = sorted(st.session_state.get("acooc_ran_panel") or all_selected_variants)
+                st.session_state["acooc_location_tasks"] = {
+                    _l: celery_app.send_task(
+                        "tasks.run_deconvolve_lapis",
+                        kwargs={"location": _l, "start_date": _cd0, "end_date": _cd1,
+                                "variants": _cpan, "bootstraps": bootstraps,
+                                "bandwidth": bandwidth}).id
+                    for _l in location_names if _l in _cr_now}
+                st.session_state["location_results"] = {}
+                st.session_state["acooc_deconv_settings"] = (bootstraps, bandwidth)
+                st.session_state["acooc_deconv_panel"] = _cpan
+                _failed.pop("deconvolution", None)
+                st.session_state.setdefault("acooc_phase_t0", {})["deconvolution"] = time.time()
+                logger.info(f"Deconvolution chained after the panel check: {_cpan}")
+                st.rerun()
             _covvfit_outstanding = bool(_stage_open(*_RUN_STAGES[4]))
             _outstanding = (_cooc_outstanding or _deconv_outstanding or _scan_outstanding
                             or _covvfit_outstanding)
@@ -2620,6 +2647,10 @@ def app():
                             _findings[x["node"]] = _f(x, "1 day")
                         for x in _conf_ok + _broader:
                             _findings[x["node"]] = _f(x, "confirmed")
+                        # a lineage added since the deep scan is a panel row now
+                        # (2026-11-04): not also a found row until the next scan
+                        for _v in [v for v in _findings if v in set(_run_panel)]:
+                            _findings.pop(_v)
 
                     # ---- unnamed signal: novel patterns grouped by mutations ----
                     _nov = {}   # mutations -> {city: days}
@@ -2779,8 +2810,8 @@ def app():
                     _tr = st.session_state.get("acooc_trial")
                     if _tr and _tr.get("sig") != _tr_sig:
                         _tr = None                 # another run or other findings
-                    _tr_all, _tr_note = None, None
-                    from process.track import trial_shares as _tshares
+                    _tr_all, _tr_note, _tr_st = None, None, None
+                    from process.track import trial_shares as _tshares, trial_stats as _tstats
                     _thin = int(get_cooc_setting("check.thin_well_min", default=2))
                     _wellc = [c for c, (k, _n) in _qual.items() if k >= _thin]
                     _wcodes = ", ".join(_c.split('(')[-1].rstrip(')') for _c in sorted(_wellc))
@@ -2800,8 +2831,10 @@ def app():
                                         f"{len(_tr['tasks'])} cities done")
                         else:
                             _tr_all = _tshares(_tr["res"], _tr_pan, _wellc)
+                            _tr_st = _tstats(_tr["res"], _tr_pan, _wellc)
                             for _v in _tr_lin:
                                 _findings[_v]["trial"] = _tr_all.get(_v, {})
+                                _findings[_v]["trial_stats"] = _tr_st.get(_v, {})
                             _tr_note = ("Shares: a trial deconvolution of the panel + "
                                         f"{len(_tr_lin)} found {'lineage' if len(_tr_lin) == 1 else 'lineages'}, "
                                         f"the last 2 weeks, well-covered cities ({_wcodes}) · + Add "
@@ -2816,18 +2849,36 @@ def app():
                     _own_tk = st.session_state.get("acooc_location_tasks") or {}
                     _own_done = all(_c in _own_res for _c in _own_tk)
                     if _own_res and _own_pan and _own_done:
-                        _own_sh = _tshares(_own_res, [v for v in _own_pan if v in _run_panel], _wellc)
+                        # every lineage in it, whatever the panel check's panel
+                        # (2026-11-04: added + deconvolution re-run before ▶ Run
+                        # lost TA.1's and PJ.2.1's shares)
+                        _own_sh = _tshares(_own_res, _own_pan, _wellc)
+                        _own_st = _tstats(_own_res, _own_pan, _wellc)
                         if _own_sh:
                             _tr_all = {**(_tr_all or {}), **_own_sh}
+                            _tr_st = {**(_tr_st or {}), **_own_st}
+                            for _v, _f in _findings.items():
+                                if _v in _own_sh and not _f.get("trial"):
+                                    _f["trial"] = _own_sh[_v]
+                                    _f["trial_stats"] = _own_st.get(_v, {})
                             _tr_note = ((_tr_note + " · " if _tr_note else "")
-                                        + "In panel rows: your deconvolution, the last 2 weeks, "
-                                        f"well-covered cities ({_wcodes})")
+                                        + "Shares of lineages in your deconvolution: the last "
+                                        f"2 weeks, well-covered cities ({_wcodes})")
+                    # the found rows come from a deep scan with another panel
+                    # (2026-11-04): say so once, above the tree
+                    _scp = st.session_state.get("acooc_scanner_panels") or {}
+                    _scp_old = next((p for p in _scp.values() if set(p) != set(_run_panel)), None)
+                    if _scp_old is not None and _findings:
+                        _tr_note = ("Found rows: deep scan with the previous panel ("
+                                    + _panel_diff(_scp_old, _run_panel)
+                                    + ") · Re-run deep scan to update them"
+                                    + (" · " + _tr_note if _tr_note else ""))
                     from process.sample_qc import well_covered as _wc_q
                     _swell = {_c: {str(_d)[:10]: bool(_wc_q(_q)) for _d, _q in
                                    ((_cr_all.get(_c) or {}).get("sample_qc") or {}).items()}
                               for _c in _cities_all}
                     _view = _vt.build(_cities_all, _tcity, _rows, _verdicts_by_city, _findings,
-                                      trial=_tr_all, trial_note=_tr_note,
+                                      trial=_tr_all, trial_note=_tr_note, trial_stats=_tr_st,
                                       sample_well=_swell if any(_swell.values()) else None,
                                       clinical={k: x for k, x in _clin.items() if x is not None} or None,
                                       pango_parent=st.session_state["acooc_pango_parent"],
