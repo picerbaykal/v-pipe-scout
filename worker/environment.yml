@@ -16,7 +16,7 @@ dependencies:
   - zstandard>=0.20
   - click>=8.0
   - click-option-group>=0.5
-  - lollipop>=0.5.3
+  # LolliPop: from pip below (v0.6.0, 2026-11-04: the seed works, faster robust fit)
   - aiohttp
   - requests
   # pydantic 2 (2026-10-08): covvfit needs >= 2.10; app/api/signatures.py,
@@ -27,7 +27,7 @@ dependencies:
   - xsv=0.13.0
   - gawk=5.3.1
   
-  # git: pip installs covvfit from GitHub (see Dockerfile)
+  # git: pip installs covvfit (see Dockerfile) and LolliPop from GitHub
   - git
 
   # other python
@@ -44,3 +44,4 @@ dependencies:
   - pip:
     - pyarrow
     - redis==5.0.1
+    - "lollipop[cli] @ git+https://github.com/cbg-ethz/LolliPop.git@v0.6.0"
