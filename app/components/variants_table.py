@@ -83,6 +83,7 @@ CSS = """
 .vt .dim i.sq { display:inline-block; width:10px; height:10px; border-radius:2px; margin:0 2px 0 6px; vertical-align:-1px; }
 .vt .dh { font-size:12.5px; font-weight:600; margin:10px 0 2px; }
 .vt .ovw .ovb { white-space:nowrap; }
+.vt .ovb .shr { display:block; font-size:11.5px; color:#6b7280; font-weight:400; }
 .vt .wks { display:inline-flex; gap:2px; align-items:center; white-space:nowrap; flex:none; }
 .vt .wks i { display:inline-block; width:10px; height:13px; border-radius:2px; }
 .vt .wks .wkm { font-size:12px; color:#9ca3af; margin-right:2px; }
@@ -1518,16 +1519,18 @@ def _panel_overview(per_city, cities, wk=None, trial=None):
     # its share in the trial deconvolution (2026-11-03): "under 1 % in every
     # city" for a lineage that is there but tiny; a parent's share is itself
     # and its descendants not in the panel
+    shr = ""
     if trial:
         best = max(trial.values())
-        note += (" · under 1 % in every city" if best < 0.01
-                 else f" · up to {_pct_s(best)} ({city_code(max(trial, key=trial.get))})")
+        shr = ("<span class='shr'>under 1 % in every city</span>" if best < 0.01
+               else f"<span class='shr'>up to {_pct_s(best)} "
+                    f"({city_code(max(trial, key=trial.get))})</span>")
         tip += (_size_tip(trial) + "\na lineage's share = it and its descendants not in the "
                 "panel; it drops when a child is added")
     # "seen in k of n (GR thin)" + confirmed or not (2026-10-28): the same
     # kind of answer as a found row's, so "In panel" doesn't read as a verdict
     return (_ovw(_ovb(f"<b style='color:#1f2328'>In panel</b> · seen in {len(seen)} of "
-                      f"{len(meas)}{where}{note}"), _weeks_strip(wk)),
+                      f"{len(meas)}{where}{note}{shr}"), _weeks_strip(wk)),
             tip, GREEN if seen else "#d1d5db", "#15803d" if seen else "#6b7280", "filled")
 
 
@@ -1887,10 +1890,12 @@ def _size_text(shares):
     if not sz:
         return "", None
     word, city, best = sz
-    txt = (f" · up to {_pct_s(best)} ({city_code(city)})" if word == "track" else
-           f" · small: up to {_pct_s(best)}" if word == "small" else
-           f" · negligible: {_pct_s(best)}")
-    return txt, word
+    txt = (f"up to {_pct_s(best)} ({city_code(city)})" if word == "track" else
+           f"small: up to {_pct_s(best)}" if word == "small" else
+           f"negligible: {_pct_s(best)}")
+    # its own line under the status (2026-11-03: on one line it ran into
+    # the first city cell)
+    return f"<span class='shr'>{_e(txt)}</span>", word
 
 
 def _size_tip(shares):
@@ -1934,13 +1939,13 @@ def _finding_overview(v, f, cities, current_panel, has_children=False):
             n = (wk or {}).get("in_a_row", 0)
             if sz in ("small", "negligible"):
                 return (kind, _ovw(_ovb(f"<b>Watch</b> <span style='color:#4b5563'>· confirmed {n} "
-                                        f"weeks in a row{_e(sz_txt)}</span>",
+                                        f"weeks in a row</span>{sz_txt}",
                                         "background:#eff6ff;color:#1d4ed8;"), strip),
                         hover + "\nconfirmed, but too small to track: + Add needs at least "
                         "2 % in one well-covered city", RED, RED, "ring")
             btn = ("<span class='added'>added · re-run needed</span>" if v in current_panel
                    else f"<button class='add' data-add='{_e(v)}'>+ Add</button>")
-            return (kind, _ovw(_ovb(f"<b>Add</b> · {n} weeks in a row{_e(sz_txt)}{btn}",
+            return (kind, _ovw(_ovb(f"<b>Add</b> · {n} weeks in a row{btn}{sz_txt}",
                                     "background:#fef2f2;color:#b91c1c;"), strip),
                     hover, RED, RED, "filled")
         if rs and rs["kind"] == "fading":
@@ -1956,7 +1961,7 @@ def _finding_overview(v, f, cities, current_panel, has_children=False):
         reason = (f"confirmed {rs['in_a_row']} of {rs['need']} weeks"
                   if rs and (wk or {}).get("weeks") and wk["weeks"][-1]["status"] == "confirmed"
                   else _short_reason(f, cities))
-        return (kind, _ovw(_ovb(f"<b>Watch</b> <span style='color:#4b5563'>· {_e(reason + sz_txt)}</span>",
+        return (kind, _ovw(_ovb(f"<b>Watch</b> <span style='color:#4b5563'>· {_e(reason)}</span>{sz_txt}",
                                 "background:#eff6ff;color:#1d4ed8;"), strip), hover, RED, RED, "ring")
     if kind in ("folded", "suggested"):
         # no coocs of its own (2026-10-27): grey, the reason in the cells' words

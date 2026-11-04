@@ -2780,6 +2780,10 @@ def app():
                     if _tr and _tr.get("sig") != _tr_sig:
                         _tr = None                 # another run or other findings
                     _tr_all, _tr_note = None, None
+                    from process.track import trial_shares as _tshares
+                    _thin = int(get_cooc_setting("check.thin_well_min", default=2))
+                    _wellc = [c for c, (k, _n) in _qual.items() if k >= _thin]
+                    _wcodes = ", ".join(_c.split('(')[-1].rstrip(')') for _c in sorted(_wellc))
                     if _tr:
                         for _c, _tid in _tr["tasks"].items():
                             if _c in _tr["res"] or _c in _tr["err"]:
@@ -2795,19 +2799,29 @@ def app():
                             _tr_note = (f"Trial deconvolution running: {len(_tr['res'])} of "
                                         f"{len(_tr['tasks'])} cities done")
                         else:
-                            from process.track import trial_shares as _tshares
-                            _thin = int(get_cooc_setting("check.thin_well_min", default=2))
-                            _wellc = [c for c, (k, _n) in _qual.items() if k >= _thin]
                             _tr_all = _tshares(_tr["res"], _tr_pan, _wellc)
                             for _v in _tr_lin:
                                 _findings[_v]["trial"] = _tr_all.get(_v, {})
                             _tr_note = ("Shares: a trial deconvolution of the panel + "
                                         f"{len(_tr_lin)} found {'lineage' if len(_tr_lin) == 1 else 'lineages'}, "
-                                        "the last 2 weeks, well-covered cities ("
-                                        + ", ".join(_c.split('(')[-1].rstrip(')') for _c in sorted(_wellc))
-                                        + ") · + Add needs at least 2 % in one of them"
+                                        f"the last 2 weeks, well-covered cities ({_wcodes}) · + Add "
+                                        "needs at least 2 % in one of them"
                                         + (f" · failed: {', '.join(_c.split('(')[0].strip() for _c in _tr['err'])}"
                                            if _tr["err"] else ""))
+                    # panel rows: their share from YOUR deconvolution when there
+                    # is one with the same dates (2026-11-03), so a tracked
+                    # lineage's size shows next to its cells without the trial
+                    _own_res = st.session_state.get("location_results") or {}
+                    _own_pan = list(st.session_state.get("acooc_deconv_panel") or [])
+                    _own_tk = st.session_state.get("acooc_location_tasks") or {}
+                    _own_done = all(_c in _own_res for _c in _own_tk)
+                    if _own_res and _own_pan and _own_done:
+                        _own_sh = _tshares(_own_res, [v for v in _own_pan if v in _run_panel], _wellc)
+                        if _own_sh:
+                            _tr_all = {**(_tr_all or {}), **_own_sh}
+                            _tr_note = ((_tr_note + " · " if _tr_note else "")
+                                        + "In panel rows: your deconvolution, the last 2 weeks, "
+                                        f"well-covered cities ({_wcodes})")
                     from process.sample_qc import well_covered as _wc_q
                     _swell = {_c: {str(_d)[:10]: bool(_wc_q(_q)) for _d, _q in
                                    ((_cr_all.get(_c) or {}).get("sample_qc") or {}).items()}
