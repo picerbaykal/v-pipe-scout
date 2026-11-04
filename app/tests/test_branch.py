@@ -67,7 +67,8 @@ def _build(vt, sig, counts):
 def test_branch_row_under_its_carrier():
     vt = _vt()
     html = _build(vt, {"25528T", "232C"}, {"ST.1": 90})
-    assert "No name yet" in html and "class='branch'" in html
+    assert "No name yet" in html and "class='branch g-br-ST_1 hid'" in html   # folded
+    assert "◇ 1 branch, no name yet" in html and "data-grp='br-ST_1'" in html
     assert "+25409A +25455T" in html and "+25528T" not in html     # only what ST.1 lacks
     assert "clinical: 90 of 130 ST.1 sequences (69 %), no other lineage" in html
     assert "clinical: ST.1 (90 of 90 sequences) → under ST.1 in the tree" in html
@@ -77,7 +78,7 @@ def test_branch_row_under_its_carrier():
 def test_no_branch_row_when_mixed_or_all_in_the_signature():
     vt = _vt()
     mixed = _build(vt, {"25528T"}, {"ST.1": 50, "PJ.2.1": 40})
-    assert "No name yet" not in mixed and "clinical: mixed" in mixed
+    assert "No name yet" not in mixed and "clinical: mixed" in mixed and "◇" not in mixed
     own = _build(vt, {"25409A", "25455T", "25528T"}, {"ST.1": 90})
     assert "No name yet" not in own
     off = _build(vt, {"25528T"}, None)                             # LAPIS not reached

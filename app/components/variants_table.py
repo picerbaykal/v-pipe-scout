@@ -110,6 +110,8 @@ CSS = """
                 border-radius:10px; background:#dcfce7; color:#166534; cursor:pointer; vertical-align:1px; }
 .vt .near-tag:hover { background:#bbf7d0; }
 .vt .near-tag.off { background:#f3f4f6; color:#9ca3af; font-weight:500; }
+.vt .near-tag.br-tag { background:#eff6ff; color:#1d4ed8; }
+.vt .near-tag.br-tag:hover { background:#dbeafe; }
 .vt tr.near td { height:28px; }
 .vt .nl { color:#166534; font-size:13.5px; }
 .vt .nl .mono { font-size:13px; }
@@ -2285,7 +2287,7 @@ def _clin_ov(words, counts):
     return f"<span class='shr' data-tip='{_e(tip)}'>{_e(words)}</span>"
 
 
-def _branch_rows(r, v, items, cities, sel, last_ok=True):
+def _branch_rows(r, v, items, cities, sel, gid, last_ok=True):
     """"No name yet" rows under lineage v (2026-11-04): a recurring pattern that
     clinical says is v's, with mutations v's signature doesn't have — most
     likely a branch of v that has no name yet. No status, no + Add, no share:
@@ -2323,7 +2325,7 @@ def _branch_rows(r, v, items, cities, sel, last_ok=True):
                 continue
             cells.append(_cell(n, S_NEAR, f"{city_name(city)}: {' '.join(b['muts'])} on "
                                f"{n} {_pl(n, 'sample')}", city == sel))
-        out.append(f"<tr class='branch'>{tc}<td class='ov'>{ov}</td>{''.join(cells)}"
+        out.append(f"<tr class='branch g-{gid} hid'>{tc}<td class='ov'>{ov}</td>{''.join(cells)}"
                    f"<td class='ev'><span class='dim'>a hint, not a finding: no + Add</span></td></tr>")
     return out
 
@@ -2607,6 +2609,16 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
             tag = (f"<span class='{cls}' data-grp='{gid}' data-tip='{_e(tip)}'>"
                    f"{label} <span class='arr'>▸</span></span>")
             tc = tc.replace("</span></td>", f"</span>{tag}</td>", 1) if tc.endswith("</span></td>") else tc
+        # "No name yet" branches: folded behind a tag, like the ± 1 changes (2026-11-04)
+        bgid = "br-" + re.sub(r"[^A-Za-z0-9]", "_", v)
+        if v in branches:
+            nb = len(branches[v])
+            btip = (f"{nb} recurring {_pl(nb, 'pattern')} that clinical says {'is' if nb == 1 else 'are'} "
+                    f"{v}'s, with mutations no signature has: most likely a branch of {v} with no "
+                    "name yet. Click to show.")
+            btag = (f"<span class='near-tag br-tag' data-grp='{bgid}' data-tip='{_e(btip)}'>"
+                    f"◇ {nb} {_pl(nb, 'branch')}, no name yet <span class='arr'>▸</span></span>")
+            tc = tc.replace("</span></td>", f"</span>{btag}</td>", 1) if tc.endswith("</span></td>") else tc
         # data-gid: clicking a city cell of this row also opens its details
         gid_attr = f" data-gid='{dgid}'" if drow else ""
         if kind == "finding" and v in folded:
@@ -2621,7 +2633,7 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
         if drow:
             body.append(drow)
         if v in branches:
-            body += _branch_rows(r, v, branches[v], cities, sel, last_ok=not nch)
+            body += _branch_rows(r, v, branches[v], cities, sel, bgid, last_ok=not nch)
         if nch:
             body += _near_rows(r, v, nch[:near_max], cities, sel, gid, n_cols)
             if len(nch) > near_max:
