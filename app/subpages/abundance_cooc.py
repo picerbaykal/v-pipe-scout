@@ -45,6 +45,37 @@ def _clinical_weekly(d0: str, d1: str, region):
     return fetch_weekly(a.isoformat(), str(d1)[:10], region)
 
 
+@st.cache_data(ttl=86400, show_spinner=False)
+def _pattern_carriers_cached(muts: tuple, d0: str, d1: str):
+    """{lineage: n} of clinical sequences with all of a pattern's mutations,
+    once a day per pattern and dates (2026-11-04); raises when LAPIS can't be
+    reached, so a failure isn't kept for a day"""
+    from datetime import date as _date, timedelta as _td
+    from process.clinical import fetch_carriers
+    a = _date.fromisoformat(str(d0)[:10])
+    a -= _td(days=a.weekday())                     # the same weeks as the clinical rows
+    out = fetch_carriers(list(muts), a.isoformat(), str(d1)[:10])
+    if out is None:
+        raise RuntimeError("LAPIS not reached")
+    return out
+
+
+def _pattern_carriers(muts, d0, d1):
+    if not get_cooc_setting("clinical.enabled", default=True):
+        return None
+    try:
+        return _pattern_carriers_cached(tuple(muts), str(d0)[:10], str(d1)[:10])
+    except Exception:
+        return None
+
+
+def _signature_of(lineage):
+    try:
+        return set(cached_get_pango_loader().get_signature(lineage) or [])
+    except Exception:
+        return set()
+
+
 def _explorer_clinical(d0, d1):
     """the details' clinical rows for Investigate a variant (2026-10-27)"""
     if not get_cooc_setting("clinical.enabled", default=True):
@@ -2894,7 +2925,9 @@ def app():
                                       named_hidden=(0 if _scan_running
                                                     else len(_named_all) - len(_named)),
                                       near=_near, near_min_days=EVIDENCE_MIN_DAYS,
-                                      data_until={l: _dshort(d) for l, d in _until_short.items()})
+                                      data_until={l: _dshort(d) for l, d in _until_short.items()},
+                                      pattern_clinical=lambda _m: _pattern_carriers(_m, _run_d0, _run_d1),
+                                      signature_of=_signature_of)
                     _click = _vt.render(_view, key="acooc_variants_view")
                     # the trial's button and, while it runs, a poll that redraws
                     # the tree when every city is in (2026-11-03)

@@ -84,6 +84,9 @@ CSS = """
 .vt .dh { font-size:12.5px; font-weight:600; margin:10px 0 2px; }
 .vt .ovw .ovb { white-space:nowrap; }
 .vt .ovb .shr { display:block; font-size:11.5px; color:#6b7280; font-weight:400; }
+.vt td.ov .shr { display:block; font-size:11.5px; color:#6b7280; font-weight:400; }
+.vt .nny { display:inline-block; border:1px dashed #9ca3af; border-radius:6px; padding:0 6px;
+  font-size:11.5px; color:#4b5563; }
 .vt .wks { display:inline-flex; gap:2px; align-items:center; white-space:nowrap; flex:none; }
 .vt .wks i { display:inline-block; width:10px; height:13px; border-radius:2px; }
 .vt .wks .wkm { font-size:12px; color:#9ca3af; margin-right:2px; }
@@ -2248,7 +2251,7 @@ def _group(gid, label, n_cols, rows, open_=False):
     return [head] + body
 
 
-def _pattern_row(muts, days, cities, sel, style_full, style_one, color, evidence, tip_word):
+def _pattern_row(muts, days, cities, sel, style_full, style_one, color, evidence, tip_word, ov=""):
     nn = _num()
     cells = []
     for c in cities:
@@ -2265,11 +2268,65 @@ def _pattern_row(muts, days, cities, sel, style_full, style_one, color, evidence
                                f"{' '.join(muts)}", sel == c))
     m = " ".join(muts[:4]) + (" …" if len(muts) > 4 else "")
     return (f"<tr><td style='padding-left:14px'><span class='mono' style='color:{color}' "
-            f"data-tip='{_e(' '.join(muts))}'>{_e(m)}</span></td><td class='ov'></td>"
+            f"data-tip='{_e(' '.join(muts))}'>{_e(m)}</span></td><td class='ov'>{ov}</td>"
             f"{''.join(cells)}<td class='ev'>{evidence}</td></tr>")
 
 
 # ── the whole view ─────────────────────────────────────────────────────────
+
+def _clin_ov(words, counts):
+    """the clinical words on a recurring pattern's row, the lineages in the hover"""
+    tip = ""
+    if counts:
+        top = sorted(counts.items(), key=lambda kv: -kv[1])[:8]
+        tip = ("Clinical sequences in the chosen dates with all of the pattern's mutations "
+               "(open LAPIS, the world): " + ", ".join(f"{k or 'no lineage'} {n:,}" for k, n in top)
+               + ". Words only, never used for a decision.")
+    return f"<span class='shr' data-tip='{_e(tip)}'>{_e(words)}</span>"
+
+
+def _branch_rows(r, v, items, cities, sel, last_ok=True):
+    """"No name yet" rows under lineage v (2026-11-04): a recurring pattern that
+    clinical says is v's, with mutations v's signature doesn't have — most
+    likely a branch of v that has no name yet. No status, no + Add, no share:
+    counted in v through v's other mutations."""
+    d = r["depth"] + 1
+    guides = (r["guides"] + [not r["last"]]) if r["depth"] >= 1 else []
+    out = []
+    for i, b in enumerate(items):
+        last = last_ok and (i == len(items) - 1) and not r["has_children"]
+        pr = {"depth": d, "guides": guides, "last": last, "has_children": False}
+        plus = " ".join("+" + x for x in b["extra"])
+        name = f"<span class='nl'><i>{_e(v)} <span class='mono'>{_e(plus)}</span></i></span>"
+        tip = (f"{v} {plus}: reads with {' '.join(b['muts'])} together. No lineage's signature has "
+               f"{', '.join(b['extra'])}; in clinical, {b['n']:,} of {b['total']:,} sequences with "
+               f"them are {v} or below. Most likely a branch of {v} with no name yet. Counted in "
+               f"{v} through its other mutations; it gets its own row when Pango names it and "
+               "the tree is updated.")
+        tc = _tree_cell(pr, BLUE, "dashed", name, tip)
+        share = ""
+        if b.get("n_x"):
+            share = (f"{b['n']:,} of {b['n_x']:,} {v} sequences "
+                     f"({100 * b['n'] / b['n_x']:.0f} %)")
+        else:
+            share = f"{b['n']:,} sequences"
+        other = b["total"] - b["n"]
+        share += (", no other lineage" if not other else f", {other:,} in other lineages")
+        ov = (f"<span class='nny'>No name yet</span>"
+              f"<span class='shr'>clinical: {_e(share)}</span>"
+              f"<span class='shr'>not in any signature · counted in {_e(v)}</span>")
+        cells = []
+        for city in cities:
+            n = b["days"].get(city)
+            if not n:
+                cells.append(_empty(f"{city_name(city)}: not seen", city == sel))
+                continue
+            cells.append(_cell(n, S_NEAR, f"{city_name(city)}: {' '.join(b['muts'])} on "
+                               f"{n} {_pl(n, 'sample')}", city == sel))
+        out.append(f"<tr class='branch'>{tc}<td class='ov'>{ov}</td>{''.join(cells)}"
+                   f"<td class='ev'><span class='dim'>a hint, not a finding: no + Add</span></td></tr>")
+    return out
+
 
 def _near_rows(r, v, changes, cities, sel, gid, n_cols):
     """The folded "± 1 change" rows under panel variant v (hidden until its
@@ -2324,7 +2381,8 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
           novel_hotspot=None, data_until=None, novel_info=None,
           broad_total=None, named_hidden=0, quality=None, panel_weekly=None,
           dates=None, clinical=None, pango_parent=None, sample_well=None,
-          trial=None, trial_note=None, trial_stats=None) -> str:
+          trial=None, trial_note=None, trial_stats=None,
+          pattern_clinical=None, signature_of=None) -> str:
     """cities: city names in column order; sel: the chosen city.
     rows: components.abundance_cooc_tree.tree_rows(...).
     verdicts: {city: {variant: {state, reason, n_present, n_measured, n_markers}}}.
@@ -2344,7 +2402,12 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
       the cut list); named_hidden: found rows "named only" left out by the cap.
       Both show as "showing N of M" (lists.* caps in the config).
     quality: {city: (samples well covered, samples)} in the chosen dates
-      (process.sample_qc), shown under each city code."""
+      (process.sample_qc), shown under each city code.
+    pattern_clinical: mutations -> {lineage: n} of clinical sequences with all
+      of them, or None (process.clinical.fetch_carriers), for the recurring
+      unassigned patterns; signature_of: lineage -> its signature mutations.
+      A pattern whose carrier is a row of the tree gets a branch row under it
+      ("No name yet", 2026-11-04)."""
     nn = _num()
     near_max = _list_max("near_changes_max", 8)
     near = near or {}
@@ -2376,6 +2439,52 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
             # the last column takes the spare width, so the tree, the overview
             # and the cells stay together on the left (2026-10-20)
             + "<th style='width:100%'></th></tr>")
+    # ── unnamed signal: which patterns recur (needed by the tree rows' branches) ──
+    ed = nn["ed"]
+    # recurring (2026-10-27): evidence days on well-covered samples in >= 2
+    # different weeks, any city; days on thin samples are shown, not counted
+    _w = {tuple(m): _novel_weight(novel_info, sample_well, m) for m, d in novel}
+    if sample_well is not None:
+        rec = [(m, d) for m, d in novel if _w[tuple(m)][0] >= 2]
+        one = [(m, d) for m, d in novel if _w[tuple(m)][0] < 2 and max(d.values(), default=0) > 0]
+        rec.sort(key=lambda x: (-_w[tuple(x[0])][1], -_w[tuple(x[0])][0]))
+    else:                     # no per-sample coverage: as before
+        rec = [(m, d) for m, d in novel if max(d.values(), default=0) >= ed]
+        one = [(m, d) for m, d in novel if 0 < max(d.values(), default=0) < ed]
+    low = [(m, d) for m, d in novel if max(d.values(), default=0) == 0]
+    # who carries each recurring pattern in clinical (2026-11-04): words on
+    # the pattern's row, and a "No name yet" branch row under the carrier when
+    # it is a row of the tree and some of the mutations aren't in its signature
+    rec_clin, branches = {}, {}
+    if pattern_clinical is not None and rec:
+        from process.clinical import carrier_words as _cw, family as _fam
+        _nodes = {r["node"] for r in rows if r["kind"] in ("panel", "panel_ot", "finding")}
+        for m, d in rec:
+            try:
+                cnt = pattern_clinical(m)
+            except Exception:
+                cnt = None
+            words, x = _cw(cnt, pango_parent or {}, _nodes)
+            if words:
+                rec_clin[tuple(m)] = (words + (f" → under {x} in the tree" if x else ""), cnt)
+            if not x:
+                continue
+            try:
+                sig = set(signature_of(x) or []) if signature_of else set()
+            except Exception:
+                sig = set()
+            extra = [mu for mu in m if mu not in sig]
+            if not extra:
+                continue
+            n_x = None
+            w = ((clinical or {}).get("World") or {})
+            if w:
+                f_x = _fam(x, pango_parent or {})
+                n_x = sum(n for wk in w.values() for k, n in wk.items() if k in f_x)
+            n_p = sum(n for k, n in cnt.items()
+                      if k in _fam(x, pango_parent or {}))
+            branches.setdefault(x, []).append(dict(muts=m, days=d, extra=extra, n=n_p,
+                                                   total=sum(cnt.values()), n_x=n_x))
     body = []
     folded, folded_rows = [], []
     sname = city_name(sel)
@@ -2511,6 +2620,8 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
                     f"<td class='ev'>{ev}</td></tr>")
         if drow:
             body.append(drow)
+        if v in branches:
+            body += _branch_rows(r, v, branches[v], cities, sel, last_ok=not nch)
         if nch:
             body += _near_rows(r, v, nch[:near_max], cities, sel, gid, n_cols)
             if len(nch) > near_max:
@@ -2538,19 +2649,7 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
                        "(lists.named_only_max)")
                     + "</td></tr>")
 
-    # ── unnamed signal ──
-    ed = nn["ed"]
-    # recurring (2026-10-27): evidence days on well-covered samples in >= 2
-    # different weeks, any city; days on thin samples are shown, not counted
-    _w = {tuple(m): _novel_weight(novel_info, sample_well, m) for m, d in novel}
-    if sample_well is not None:
-        rec = [(m, d) for m, d in novel if _w[tuple(m)][0] >= 2]
-        one = [(m, d) for m, d in novel if _w[tuple(m)][0] < 2 and max(d.values(), default=0) > 0]
-        rec.sort(key=lambda x: (-_w[tuple(x[0])][1], -_w[tuple(x[0])][0]))
-    else:                     # no per-sample coverage: as before
-        rec = [(m, d) for m, d in novel if max(d.values(), default=0) >= ed]
-        one = [(m, d) for m, d in novel if 0 < max(d.values(), default=0) < ed]
-    low = [(m, d) for m, d in novel if max(d.values(), default=0) == 0]
+    # ── unnamed signal ── (recurring / one / low: before the tree rows, 2026-11-04)
     if novel or broad or novel_rest or novel_hotspot:
         body.append(f"<tr class='sec'><td colspan='{n_cols}'>Unassigned patterns</td></tr>")
         novel_info = novel_info or {}
@@ -2570,7 +2669,8 @@ def build(cities, sel, rows, verdicts, findings, current_panel, ot=(),
                  if sample_well is not None else f"· on ≥ {ed} days in a city · watch the next samples")
         body += _group("nrec", f"<b style='color:{BLUE}'>Unassigned, recurring ({len(rec)})</b> "
                        f"<span class='dim'>{_rlab}</span>", n_cols,
-                       [_pattern_row(m, d, cities, sel, S_NOVEL, S_NOVEL1, BLUE, nov_ev_for(m, d), "seen")
+                       [_pattern_row(m, d, cities, sel, S_NOVEL, S_NOVEL1, BLUE, nov_ev_for(m, d), "seen",
+                                     ov=_clin_ov(*rec_clin[tuple(m)]) if tuple(m) in rec_clin else "")
                         for m, d in rec], open_=True)
         one_lab = ("seen, not recurring" if sample_well is not None
                    else "1 day" if ed == 2 else f"1–{ed - 1} days")
