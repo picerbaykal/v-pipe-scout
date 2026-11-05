@@ -1997,10 +1997,17 @@ def _finding_overview(v, f, cities, current_panel, has_children=False):
                                         "background:#eff6ff;color:#1d4ed8;"), strip),
                         hover + "\nconfirmed, but your deconvolution puts it under 2 % in "
                         "every well-covered city, too small to track", RED, RED, "ring")
-            btn = ("<span class='added'>added · re-run needed</span>" if v in current_panel
-                   else f"<button class='add' data-add='{_e(v)}'>+ Add</button>")
-            return (kind, _ovw(_ovb(f"<b>Add</b> · {n} weeks in a row{btn}{sz_txt}",
-                                    "background:#fef2f2;color:#b91c1c;"), strip),
+            # once it is on the left it is Added, not Add (2026-11-05): the
+            # row still read "Add" next to "added · re-run needed"
+            if v in current_panel:
+                return (kind, _ovw(_ovb(f"<b>Added</b> · {n} weeks in a row"
+                                        "<span class='added'>re-run needed</span>"
+                                        f"{sz_txt}", "background:#f3f4f6;color:#4b5563;"), strip),
+                        hover + f"\n{v} is in your panel on the left; re-run to check it as a "
+                        "panel lineage", "#9ca3af", "#4b5563", "filled")
+            return (kind, _ovw(_ovb(f"<b>Add</b> · {n} weeks in a row"
+                                    f"<button class='add' data-add='{_e(v)}'>+ Add</button>"
+                                    f"{sz_txt}", "background:#fef2f2;color:#b91c1c;"), strip),
                     hover, RED, RED, "filled")
         if rs and rs["kind"] == "fading":
             return (kind, _ovw(_ovb(f"<b>Fading</b> · last confirmed {_e(_short_date(rs['last_confirmed']))}",

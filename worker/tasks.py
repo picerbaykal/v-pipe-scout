@@ -552,11 +552,23 @@ def run_cooc_deep_scan_lapis(self, location: str, start_date: str, end_date: str
                                                      list(variants), list(variants))
                 if dc < d0:
                     jobs["sample_qc_ext"] = _ex.submit(_sample_qc, location, dc, d0)
+        # one retry, then say so in the result (2026-11-05): a LAPIS connection
+        # error lost Genève's findings_check, the found rows there fell back to
+        # raw evidence counts and PJ.2.1 dropped from Add to Watch — with
+        # nothing on the page to say a city was missing
         for key, fut in jobs.items():
             try:
                 result[key] = fut.result()
+                continue
             except Exception as e:
-                logger.warning(f"[deep scan] {key} failed in {location}: {e}")
+                logger.warning(f"[deep scan] {key} failed in {location}: {e} — retrying once")
+                err = e
+            try:
+                result[key] = _retry_job(key, location, dc, d0, d1, nodes, variants, _p)
+                logger.info(f"[deep scan] {key} succeeded on the retry in {location}")
+            except Exception as e2:
+                logger.warning(f"[deep scan] {key} failed again in {location}: {e2}")
+                result.setdefault("failed", {})[key] = f"{type(err).__name__}: {err}"[:200]
         if jobs:
             _lap(f"checks at once ({len(nodes)} found)")
         logger.info(f"[deep scan] {location}: {time.time() - _t0:.1f} s · "
@@ -567,6 +579,19 @@ def run_cooc_deep_scan_lapis(self, location: str, start_date: str, end_date: str
     except Exception as e:
         _p(0, f"Error: {str(e)}")
         raise
+
+
+def _retry_job(key, location, dc, d0, d1, nodes, variants, _p):
+    """Run one of the deep scan's three parallel reads again (2026-11-05).
+    Same arguments as the first attempt, one at a time."""
+    from cooc import lineages_check
+    if key == "findings_check":
+        return lineages_check(location, dc, d1, nodes, variants, progress_callback=_p, step=4)
+    if key == "panel_check_ext":
+        return lineages_check(location, dc, d1, list(variants), list(variants))
+    if key == "sample_qc_ext":
+        return _sample_qc(location, dc, d0)
+    raise RuntimeError(f"no retry for {key}")
 
 
 @app.task(bind=True)

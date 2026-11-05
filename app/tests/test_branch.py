@@ -149,3 +149,22 @@ def test_a_found_row_without_a_share_still_offers_add():
     _k, html, hover, _d, _i, _dk = vt._finding_overview("TA.1", small, cities, (), wk)
     assert "<b>Watch</b>" in html and "+ Add" not in html
     assert "too small to track" in hover
+
+
+def test_an_added_lineage_says_added_not_add():
+    # 2026-11-05: the row read "Add · 4 weeks in a row" next to
+    # "added · re-run needed"
+    vt = _vt()
+    cities = ["Lugano (TI)", "Zürich (ZH)"]
+    wk = {"in_a_row": 4, "weeks": [{"status": "confirmed", "end": "2026-10-18"}]}
+    f = {"status": "confirmed", "add_ready": True, "weekly": wk,
+         "per_city": {c: {"check": {"state": "present",
+                                    "pairs": {"measured": ["a", "b"], "positive": ["a", "b"]}}}
+                      for c in cities}}
+    _k, html, _h, _d, _i, _dk = vt._finding_overview("TA.1", f, cities, (), wk)
+    assert "<b>Add</b>" in html and "+ Add" in html and "Added" not in html
+
+    _k, html, hover, _d, _i, _dk = vt._finding_overview("TA.1", f, cities, ("TA.1",), wk)
+    assert "<b>Added</b>" in html and "re-run needed" in html
+    assert "+ Add" not in html and "data-add=" not in html
+    assert "in your panel on the left" in hover

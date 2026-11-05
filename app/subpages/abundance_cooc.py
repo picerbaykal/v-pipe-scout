@@ -2867,6 +2867,25 @@ def app():
                                         + "Shares from your deconvolution: the last 2 weeks, "
                                         f"well-covered cities ({_wcodes}) · a found row gets one "
                                         "after you add it and re-run the deconvolution")
+                    # a city whose checks failed (2026-11-05, worker tasks
+                    # "failed"): its found-row cells fall back to raw evidence
+                    # counts and its weeks are missing, which can turn an Add
+                    # into a Watch — say so instead of letting it look like a
+                    # result
+                    _bad = {}
+                    for _l, _r in (_scan_res_all or {}).items():
+                        for _k in ((_r or {}).get("failed") or {}):
+                            _bad.setdefault(_k, []).append(_l.split("(")[0].strip())
+                    if _bad:
+                        _what = {"findings_check": "the found lineages' check",
+                                 "panel_check_ext": "the panel's weeks",
+                                 "sample_qc_ext": "the earlier samples' coverage"}
+                        st.warning("The last deep scan could not finish everything: "
+                                   + " · ".join(f"{_what.get(_k, _k)} in {', '.join(sorted(_c))}"
+                                                for _k, _c in sorted(_bad.items()))
+                                   + ". Those cities' rows are incomplete — a lineage can show "
+                                     "fewer weeks than it has, and lose its + Add. Re-run the "
+                                     "deep scan.")
                     # the found rows come from a deep scan with another panel
                     # (2026-11-04): say so once, above the tree
                     _scp = st.session_state.get("acooc_scanner_panels") or {}
