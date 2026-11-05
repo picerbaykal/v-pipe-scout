@@ -2831,47 +2831,18 @@ def app():
                             st.session_state["acooc_pango_parent"] = _vx_idx(cached_get_pango_loader())[2]
                         except Exception:
                             st.session_state["acooc_pango_parent"] = {}
-                    # ── trial deconvolution (2026-11-03, process.track): the panel
-                    #    + the found lineages, to tell whether each is big enough
-                    #    to track; + Add needs both, the weeks and the share ──
-                    _tr_lin = sorted(v for v, f in _findings.items()
-                                     if _vt._finding_status(v, f, _cities_all)[0] == "new")
-                    _tr_pan = sorted(set(_run_panel) | set(_tr_lin))
-                    _tr_sig = (_run_d0, _run_d1, tuple(sorted(_cities_all)), tuple(_tr_pan))
-                    _tr = st.session_state.get("acooc_trial")
-                    if _tr and _tr.get("sig") != _tr_sig:
-                        _tr = None                 # another run or other findings
+                    # ── shares from YOUR deconvolution (process.track) ──
+                    # 2026-11-05: the trial deconvolution and its button are gone.
+                    # Coocs decide whether to add a lineage; its size is read
+                    # afterwards from your own deconvolution, on the panel row.
+                    # The trial ran a second fit of panel + every found row,
+                    # which cost a run and made the other shares less stable
+                    # (adding 3 lineages moved them by up to 1.9 % points).
                     _tr_all, _tr_note, _tr_st = None, None, None
                     from process.track import trial_shares as _tshares, trial_stats as _tstats
                     _thin = int(get_cooc_setting("check.thin_well_min", default=2))
                     _wellc = [c for c, (k, _n) in _qual.items() if k >= _thin]
                     _wcodes = ", ".join(_c.split('(')[-1].rstrip(')') for _c in sorted(_wellc))
-                    if _tr:
-                        for _c, _tid in _tr["tasks"].items():
-                            if _c in _tr["res"] or _c in _tr["err"]:
-                                continue
-                            _ar = celery_app.AsyncResult(_tid)
-                            if _ar.ready():
-                                try:
-                                    _tr["res"][_c] = _ar.get()
-                                except Exception as _e:
-                                    _tr["err"][_c] = str(_e)[:200]
-                        _tr_open = [c for c in _tr["tasks"] if c not in _tr["res"] and c not in _tr["err"]]
-                        if _tr_open:
-                            _tr_note = (f"Trial deconvolution running: {len(_tr['res'])} of "
-                                        f"{len(_tr['tasks'])} cities done")
-                        else:
-                            _tr_all = _tshares(_tr["res"], _tr_pan, _wellc)
-                            _tr_st = _tstats(_tr["res"], _tr_pan, _wellc)
-                            for _v in _tr_lin:
-                                _findings[_v]["trial"] = _tr_all.get(_v, {})
-                                _findings[_v]["trial_stats"] = _tr_st.get(_v, {})
-                            _tr_note = ("Shares: a trial deconvolution of the panel + "
-                                        f"{len(_tr_lin)} found {'lineage' if len(_tr_lin) == 1 else 'lineages'}, "
-                                        f"the last 2 weeks, well-covered cities ({_wcodes}) · + Add "
-                                        "needs at least 2 % in one of them"
-                                        + (f" · failed: {', '.join(_c.split('(')[0].strip() for _c in _tr['err'])}"
-                                           if _tr["err"] else ""))
                     # panel rows: their share from YOUR deconvolution when there
                     # is one with the same dates (2026-11-03), so a tracked
                     # lineage's size shows next to its cells without the trial
@@ -2893,8 +2864,9 @@ def app():
                                     _f["trial"] = _own_sh[_v]
                                     _f["trial_stats"] = _own_st.get(_v, {})
                             _tr_note = ((_tr_note + " · " if _tr_note else "")
-                                        + "Shares of lineages in your deconvolution: the last "
-                                        f"2 weeks, well-covered cities ({_wcodes})")
+                                        + "Shares from your deconvolution: the last 2 weeks, "
+                                        f"well-covered cities ({_wcodes}) · a found row gets one "
+                                        "after you add it and re-run the deconvolution")
                     # the found rows come from a deep scan with another panel
                     # (2026-11-04): say so once, above the tree
                     _scp = st.session_state.get("acooc_scanner_panels") or {}
@@ -2929,39 +2901,6 @@ def app():
                                       pattern_clinical=lambda _m: _pattern_carriers(_m, _run_d0, _run_d1),
                                       signature_of=_signature_of)
                     _click = _vt.render(_view, key="acooc_variants_view")
-                    # the trial's button and, while it runs, a poll that redraws
-                    # the tree when every city is in (2026-11-03)
-                    _tr_busy = bool(_tr) and any(c not in _tr["res"] and c not in _tr["err"]
-                                                 for c in _tr["tasks"])
-                    if _tr_lin and not _scan_running:
-                        if st.button(("Trial deconvolution running…" if _tr_busy else
-                                      "Check again in deconvolution" if _tr else
-                                      "Check found lineages in deconvolution")
-                                     + f" · panel + {len(_tr_lin)} found",
-                                     key="acooc_btn_trial", disabled=_tr_busy,
-                                     help="Runs the deconvolution with your panel plus the "
-                                          "lineages the tree offers or watches, as a trial "
-                                          "(your own deconvolution is untouched), and shows each "
-                                          "one's share next to its row: + Add needs at least 2 % "
-                                          "in one well-covered city."):
-                            st.session_state["acooc_trial"] = {
-                                "sig": _tr_sig, "res": {}, "err": {},
-                                "tasks": {_c: celery_app.send_task(
-                                    "tasks.run_deconvolve_lapis",
-                                    kwargs={"location": _c, "start_date": _run_d0,
-                                            "end_date": _run_d1, "variants": list(_tr_pan),
-                                            "bootstraps": bootstraps,
-                                            "bandwidth": bandwidth}).id
-                                          for _c in _cities_all}}
-                            st.rerun()
-                        if _tr_busy:
-                            @st.fragment(run_every=3)
-                            def _poll_trial():
-                                _t = st.session_state.get("acooc_trial") or {}
-                                if all(celery_app.AsyncResult(_i).ready()
-                                       for _i in (_t.get("tasks") or {}).values()):
-                                    st.rerun(scope="app")
-                            _poll_trial()
                     if _click and _click.get("t") != st.session_state.get("acooc_vv_last_click"):
                         st.session_state["acooc_vv_last_click"] = _click.get("t")
                         if _click.get("add"):
