@@ -82,7 +82,10 @@ CSS = """
 .vt table.wkt i.sq { display:inline-block; width:10px; height:10px; border-radius:2px; margin:0 1px; vertical-align:-1px; }
 .vt .dim i.sq { display:inline-block; width:10px; height:10px; border-radius:2px; margin:0 2px 0 6px; vertical-align:-1px; }
 .vt .dh { font-size:12.5px; font-weight:600; margin:10px 0 2px; }
-.vt .ovw .ovb { white-space:nowrap; }
+.vt .ovw .ovb { white-space:nowrap; min-width:0; }
+/* the share line may be long (up to 3 cities, 2026-11-05): let it wrap inside
+   the overview cell while the status line above it stays on one line */
+.vt .ovw .ovb .shr { white-space:normal; }
 .vt .ovb .shr { display:block; font-size:11.5px; color:#6b7280; font-weight:400; }
 .vt td.ov .shr { display:block; font-size:11.5px; color:#6b7280; font-weight:400; }
 .vt .nny { display:inline-block; border:1px dashed #9ca3af; border-radius:6px; padding:0 6px;

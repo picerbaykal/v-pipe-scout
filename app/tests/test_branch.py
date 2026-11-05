@@ -114,3 +114,38 @@ def test_a_lineage_that_cannot_be_checked_still_shows_its_share():
     # without a trial there is no share line, as before
     html, _t, _d4, _i3, _k4 = vt._panel_overview(no_marker, cities)
     assert "can't be checked" in html and "%" not in html
+
+
+def test_the_share_line_names_up_to_three_cities():
+    # 2026-11-05: only the best city was shown, so "TA.1 ZH 14 %" hid that it
+    # was also in GE and BS. Cities under 1 % are left out.
+    vt = _vt()
+    shares = {"Zürich (ZH)": 0.14, "Genève (GE)": 0.048, "Basel (BS)": 0.021,
+              "Lugano (TI)": 0.002}
+    html, _tip = vt._share_line(shares, None)
+    assert "ZH 14 % over 2 weeks" in html
+    assert "· GE 4.8 %" in html and "· BS 2.1 %" in html
+    assert "TI" not in html                      # under 1 %, and only 2 extra
+    # one city alone is unchanged
+    html, _t = vt._share_line({"Zürich (ZH)": 0.14}, None)
+    assert html.count("·") == 0
+
+
+def test_a_found_row_without_a_share_still_offers_add():
+    # 2026-11-05: the trial deconvolution was removed, so a found row the
+    # deconvolution has never seen has no share. + Add then follows the weeks
+    # alone; a row your own deconvolution puts under 2 % is still held back.
+    vt = _vt()
+    cities = ["Lugano (TI)", "Zürich (ZH)"]
+    wk = {"in_a_row": 3, "weeks": [{"status": "confirmed", "end": "2026-10-18"}]}
+    f = {"status": "confirmed", "add_ready": True, "weekly": wk,
+         "per_city": {c: {"check": {"state": "present",
+                                   "pairs": {"measured": ["a", "b"], "positive": ["a", "b"]}}}
+                      for c in cities}}
+    _k, html, _h, _d, _i, _dk = vt._finding_overview("TA.1", f, cities, (), wk)
+    assert "<b>Add</b>" in html and "+ Add" in html
+
+    small = dict(f, trial={"Zürich (ZH)": 0.004}, trial_stats={})
+    _k, html, hover, _d, _i, _dk = vt._finding_overview("TA.1", small, cities, (), wk)
+    assert "<b>Watch</b>" in html and "+ Add" not in html
+    assert "too small to track" in hover
