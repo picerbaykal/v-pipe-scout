@@ -1466,6 +1466,14 @@ def _city_seen(d):
     return _state(d or {}) == "present"
 
 
+def _more_cities(shares, skip, n=2, floor=0.01):
+    """' · GE 4 % · BS 2 %': the next cities over `floor`, after the best one
+    (2026-11-05: one city hid that a lineage is in several)."""
+    rest = sorted(((c, x) for c, x in (shares or {}).items() if c != skip and x >= floor),
+                  key=lambda kv: -kv[1])[:n]
+    return "".join(f" · {city_code(c)} {_pct_s(x)}" for c, x in rest)
+
+
 def _share_line(trial, stats):
     """(html, tip) for a lineage's share in the deconvolution, or ("", "")."""
     if not trial:
@@ -1474,7 +1482,7 @@ def _share_line(trial, stats):
     bc = max(trial, key=trial.get)
     html = ("<span class='shr'>under 1 % in every city</span>" if best < 0.01
             else f"<span class='shr'>{city_code(bc)} {_pct_s(best)} over 2 weeks"
-                 f"{_e(_trend((stats or {}).get(bc)))}</span>")
+                 f"{_e(_trend((stats or {}).get(bc)))}{_e(_more_cities(trial, bc))}</span>")
     return html, (_size_tip(trial, stats)
                   + "\na lineage's share = it and its descendants not in the panel; "
                   "it drops when a child is added")
@@ -1739,7 +1747,13 @@ def _short_hover(f, cities, rs, wk, why):
         last = [_short_date(e) for e in conf[-rs["in_a_row"]:]]
         l1 = f"Add to panel: confirmed {rs['in_a_row']} weeks in a row ({', '.join(last)})"
     elif rs and rs["kind"] == "fading":
-        l1 = f"Fading: last confirmed {_short_date(rs['last_confirmed'])}, not since"
+        # 2026-11-03: RV.2.1.1 read "Fading" here while it was 16 % of Europe's
+        # clinical sequences and rising. "Fading" is about the coocs in these
+        # cities, not about the lineage everywhere.
+        l1 = (f"Fading: last confirmed {_short_date(rs['last_confirmed'])}, not since — "
+              "no pair of its own mutations on a well-covered sample since then. That can "
+              "mean it is going away, or that too little of it reaches these samples to be "
+              "read; the clinical rows in the details say which.")
     elif rs and rs["kind"] == "earlier":
         l1 = (f"Earlier only: last seen {_short_date(rs['last_found'])}, never confirmed"
               if rs.get("last_found") else "Earlier only: never confirmed")
@@ -1918,7 +1932,8 @@ def _size_text(shares, stats=None):
         return "", None
     word, city, best = sz
     st = (stats or {}).get(city)
-    txt = (f"{city_code(city)} {_pct_s(best)} over 2 weeks{_trend(st)}" if word == "track" else
+    txt = (f"{city_code(city)} {_pct_s(best)} over 2 weeks{_trend(st)}{_more_cities(shares, city)}"
+           if word == "track" else
            f"small: {_pct_s(best)} over 2 weeks" if word == "small" else
            f"negligible: {_pct_s(best)}")
     # its own line under the status (2026-11-03: on one line it ran into
@@ -1965,8 +1980,10 @@ def _finding_overview(v, f, cities, current_panel, has_children=False):
             rs = None
         hover = _short_hover(f, cities, rs, wk, why)
         strip = _weeks_strip(wk)
-        # its size in a trial deconvolution (2026-11-03, process.track): + Add
-        # needs both, the weeks in a row AND a share worth tracking
+        # its size, when your own deconvolution already has it (process.track,
+        # 2026-11-05: the trial deconvolution was removed, so a row the
+        # deconvolution has never seen has no share and + Add follows the weeks
+        # alone — the size is then read on its panel row after you add it)
         sz_txt, sz = _size_text(f.get("trial"), f.get("trial_stats"))
         hover += _size_tip(f.get("trial"), f.get("trial_stats"))
         if f.get("add_ready") or (rs and rs["kind"] == "add"):
@@ -1975,8 +1992,8 @@ def _finding_overview(v, f, cities, current_panel, has_children=False):
                 return (kind, _ovw(_ovb(f"<b>Watch</b> <span style='color:#4b5563'>· confirmed {n} "
                                         f"weeks in a row</span>{sz_txt}",
                                         "background:#eff6ff;color:#1d4ed8;"), strip),
-                        hover + "\nconfirmed, but too small to track: + Add needs at least "
-                        "2 % in one well-covered city", RED, RED, "ring")
+                        hover + "\nconfirmed, but your deconvolution puts it under 2 % in "
+                        "every well-covered city, too small to track", RED, RED, "ring")
             btn = ("<span class='added'>added · re-run needed</span>" if v in current_panel
                    else f"<button class='add' data-add='{_e(v)}'>+ Add</button>")
             return (kind, _ovw(_ovb(f"<b>Add</b> · {n} weeks in a row{btn}{sz_txt}",
@@ -2838,8 +2855,9 @@ _LEGEND_ROWS = (
         _ld(f"background:{RED}", "<b>Add</b> · N weeks in a row: confirmed 3 Sundays in a row → + Add"),
         _ld(f"border:2px solid {RED}", "<b>Watch</b> · why: found, not ready (1 city, thin "
             "samples only, k of 3 weeks)"),
-        _ld("border:2px solid #d1d5db", "<b>Fading</b> · last confirmed … · <b>Earlier only</b> · "
-            "last seen …"),
+        _ld("border:2px solid #d1d5db", "<b>Fading</b> · last confirmed … · no coocs here "
+            "since then — going away, or too little of it reaches these samples: compare the "
+            "clinical rows in the details · <b>Earlier only</b> · last seen …"),
         _ld(f"background:{GREEN}", "<b>In panel</b> · seen in k of n cities · confirmed or not: "
             "seen = this lineage <b>or its children not in the panel</b>; a found child takes its "
             "share out once added"),
