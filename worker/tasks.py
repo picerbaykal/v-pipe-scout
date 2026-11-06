@@ -520,6 +520,24 @@ def run_cooc_deep_scan_lapis(self, location: str, start_date: str, end_date: str
         _lap("naming")
         result["deep"] = {"data_positions": len(extra),
                           "hotspots": len(hot) if hot is not None else None}
+        # the completeness graph for THIS read set (2026-11-05): the panel
+        # check reads the panel's positions only, so a lineage whose mutations
+        # lie elsewhere can never show there. Computed here because `res` is
+        # thrown away after this — the rows are a few numbers per date, while
+        # the patterns behind them are tens of thousands.
+        try:
+            from process.completeness_composition import compute_completeness_composition
+            from api.pango_loader import PangoLoader, get_pango_summary_path
+            _pl = PangoLoader(get_pango_summary_path())
+            _pu = {}
+            for _v in variants:
+                for _m in (_pl.get_signature(_v) or []):
+                    if _m and _m[-1] in "ACGT":
+                        _pu.setdefault(_v, set()).add(_m)
+            result["deep_composition"] = compute_completeness_composition(
+                res, result, panel_union=_pu)
+        except Exception as e:
+            logger.warning(f"[deep scan] composition failed in {location}: {e}")
         # the lineages it found get the panel's own check (★ markers present /
         # measurable per day), so their table cells mean the same as the panel's
         nodes_all = list(dict.fromkeys(

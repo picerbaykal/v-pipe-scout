@@ -220,22 +220,29 @@ def cached_fetch_locations() -> list:
 
 
 def _render_composition(cooc_result: dict, scanner_result: dict, key: str = "",
-                        show_legend: bool = True, panel_union=None) -> None:
+                        show_legend: bool = True, panel_union=None, rows=None) -> None:
     """Normalized (0-100%) per-date composition: explained / + 1 change /
     addable / not attributed (2026-10-06: no novel band — see
     process.completeness_composition). Green height = completeness; other bands = what the gap is made of.
     Empty/low-read dates dropped. Built from existing outputs — scanner untouched."""
-    try:
-        from process.completeness_composition import compute_completeness_composition
-    except Exception:
-        return
-    rows = compute_completeness_composition(cooc_result, scanner_result or {},
-                                            panel_union=panel_union)
+    if rows is None:
+        try:
+            from process.completeness_composition import compute_completeness_composition
+        except Exception:
+            return
+        rows = compute_completeness_composition(cooc_result, scanner_result or {},
+                                                panel_union=panel_union)
     if not rows:
         st.caption("Not enough co-occurrence reads to show composition.")
         return
     import plotly.graph_objects as go
     dates = [r["date"] for r in rows]
+    # 2026-11-05: no red "new lineage" band any more. It could only ever hold
+    # the sliver of a finding whose mutations fall on a PANEL position, so its
+    # height was an accident of which lineage it was: PJ.2.1 read 0.1 % in
+    # Lugano on 11 Oct while the deep scan had 284,064 evidence reads for it
+    # the same day. Those reads are gap reads, so they go back into grey; the
+    # tree is where the deep scan's findings are counted.
     layers = [
         # the tree's colours and words (2026-10-20): green as in the Lineages
         # tree (was #0F6E56); grey stays "not explained" — it holds everything
@@ -243,9 +250,10 @@ def _render_composition(cooc_result: dict, scanner_result: dict, key: str = "",
         # unassigned patterns, which sit at positions this graph doesn't read
         ("explained by the panel", "explained_pct", "#16a34a", "rgba(22,163,74,0.85)"),
         ("panel ± 1 change", "near_pct", "#4ade80", "rgba(134,239,172,0.85)"),
-        ("new lineage suggested by the reads", "addable_pct", "#dc2626", "rgba(220,38,38,0.55)"),
-        ("not explained", "noise_pct", "#9ca3af", "rgba(156,163,175,0.40)"),
+        ("not explained", "noise_rest_pct", "#9ca3af", "rgba(156,163,175,0.40)"),
     ]
+    for _r in rows:
+        _r["noise_rest_pct"] = _r.get("noise_pct", 0) + _r.get("addable_pct", 0)
     fig = go.Figure()
     _near_txt = ["<br>".join(f"{_l} ({_n:,} reads)" for _l, _n in r.get("near_top", []))
                  for r in rows]
@@ -2244,9 +2252,13 @@ def app():
                           "no samples yet.")
                   st.caption("How much of each city's reads the lineages in the panel "
                              "explain (green) vs the rest. Light green = a panel lineage "
-                             "with one change (hover for which) · red = a new lineage the reads "
-                             "suggest · grey = not explained (too broad to name, new "
-                             "combinations, errors).")
+                             "with one change (hover for which); a band that grows over the "
+                             "weeks is a sublineage of a panel lineage spreading · grey = not "
+                             "explained (too broad to name, new combinations, errors).")
+                  st.caption("This graph reads the panel's own positions only. A new lineage "
+                             "whose mutations lie elsewhere cannot appear here however common "
+                             "it is — the deep scan reads those positions, and its findings are "
+                             "in the Lineages tree.")
                   # One shared legend ABOVE the grid; every plot has
                   # show_legend=False and the same fixed height, so all plot areas
                   # are identical. (Previously the legend went on the first plot
@@ -2254,7 +2266,6 @@ def app():
                   _comp_leg = [
                       ("#16a34a", "explained by the panel"),
                       ("#4ade80", "panel ± 1 change"),
-                      ("#dc2626", "new lineage suggested by the reads"),
                       ("#9ca3af", "not explained"),
                   ]
                   # panel union (city-independent) for the near-panel split —
@@ -2279,6 +2290,25 @@ def app():
                           f"vertical-align:-1px;margin-right:5px;'></span>{_t}</span>"
                           for _c, _t in _comp_leg)
                       + "</div>", unsafe_allow_html=True)
+                  # which read set (2026-11-05): the panel check reads the
+                  # panel's positions only; the deep scan also reads the
+                  # positions where the data shows a mutation, so a lineage
+                  # whose mutations lie elsewhere can show up there. The deep
+                  # rows come ready from the worker (result["deep_composition"]).
+                  _deep_rows = {l: (_sr_all.get(l) or {}).get("deep_composition")
+                                for l in location_names}
+                  _have_deep = any(_deep_rows.values())
+                  _use_deep = False
+                  if _have_deep:
+                      _use_deep = st.radio(
+                          "Positions read", ["the panel's own (fast)",
+                                             "all the deep scan read"],
+                          horizontal=True, key="acooc_comp_positions",
+                          help="The panel check reads only the positions the panel's lineages "
+                               "carry. The deep scan also reads the positions where the data "
+                               "shows a mutation, so a lineage whose mutations lie elsewhere "
+                               "can appear there — with more sequencing noise in the grey band."
+                      ) == "all the deep scan read"
                   _grid_locs = list(location_names)
                   def _one_city(_lc):
                       _du = (f" <span style='font-weight:400;color:#6b7280;'>· data until "
@@ -2286,10 +2316,15 @@ def app():
                       if (_cr_all.get(_lc) is not None and _sr_all.get(_lc) is None
                               and st.session_state.get("acooc_want_scan")):
                           _du += (" <span style='font-weight:400;color:#6b7280;'>· deep scan "
-                                  "running — red appears when it ends</span>")
+                                  "running</span>")
                       st.markdown(f"<div style='font-size:12px;font-weight:600;'>"
                                   f"{_lc}{_du}</div>", unsafe_allow_html=True)
-                      if _cr_all.get(_lc) is not None:
+                      if _use_deep and _deep_rows.get(_lc):
+                          _render_composition({}, {}, key=_lc + "-deep", show_legend=False,
+                                              rows=_deep_rows[_lc])
+                      elif _use_deep:
+                          st.caption("No deep scan for this city yet.")
+                      elif _cr_all.get(_lc) is not None:
                           _render_composition(_cr_all[_lc], _sr_all.get(_lc) or {}, key=_lc,
                                               show_legend=False,
                                               panel_union=_panel_union)
