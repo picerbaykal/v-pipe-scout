@@ -741,7 +741,7 @@ def accumulate_check_stats(rows: List[dict],
         return
     pos_set = set(positions)
     if pairs:
-        _accumulate_pairs(rows, pos_set, pairs, stats)
+        _accumulate_pairs(rows, pos_set, pairs, stats, variant_signatures)
     prepared = []
     for v, mks in markers.items():
         if not mks:
@@ -885,7 +885,14 @@ def pair_evidence(per_date: Dict[str, Dict[str, List[float]]],
                 continue
             any_meas = True
             f = x[1] / x[0]
-            if f >= c["present_freq"] and x[1] >= c.get("pair_min_hit", 50):
+            # linkage (2026-11-10): the reads carrying the pair must look like
+            # the lineage at its other positions they reach, as a marker's must
+            # (link_min). Too few such reads (< min_link): judged on its share
+            # alone, as a marker with no neighbour in reach. Results saved
+            # before kept link = hit, so they read as linked.
+            lk_n, lk_ok = (x[2], x[3]) if len(x) > 3 else (x[1], x[1])
+            linked = lk_n < c["min_link"] or lk_ok >= c["link_min"] * lk_n
+            if f >= c["present_freq"] and x[1] >= c.get("pair_min_hit", 50) and linked:
                 # true: neither mutation is common background (`common`)
                 true = not (common and any(m in common for m in k.split("+")))
                 seen.append((k, [k, round(f, 4), int(x[0]), true]))
@@ -907,8 +914,20 @@ def pair_evidence(per_date: Dict[str, Dict[str, List[float]]],
 
 
 def _accumulate_pairs(rows: List[dict], pos_set: Set[int], pairs: Dict[str, List[str]],
-                      stats: Dict[str, Dict[str, Dict[str, List[int]]]]) -> None:
-    """The pair half of accumulate_check_stats (2026-10-26)."""
+                      stats: Dict[str, Dict[str, Dict[str, List[int]]]],
+                      variant_signatures: Optional[Dict[str, Set[str]]] = None) -> None:
+    """The pair half of accumulate_check_stats (2026-10-26).
+
+    Linkage (2026-11-10): of the reads carrying both mutations, link_n counts
+    those that also cover another position of the lineage's signature and
+    link_ok those that match it at every such position -- the test the marker
+    path has had since 2026-09. Until now link_n = link_ok = hit, so every
+    pair passed it. NB.1.8.1, Zürich 11 and 15 Oct: 22930A+23039G on 13,870
+    reads, all showing C at 22896 and 22995 where NB.1.8.1 has A and T -- the
+    reads of another lineage, counted as NB.1.8.1's, and its only
+    background-free pair on 11 Oct, the second of the two weeks that
+    confirmed it. Without signatures (old callers) the old numbers are kept."""
+    sigs = variant_signatures or {}
     prepared = []
     for v, prs in pairs.items():
         pp = []
@@ -919,9 +938,12 @@ def _accumulate_pairs(rows: List[dict], pos_set: Set[int], pairs: Dict[str, List
                 continue
             pa, pb = int(ma.group(1)), int(mb.group(1))
             if pa in pos_set and pb in pos_set:
-                pp.append((f"[{pa}]", ma.group(2), f"[{pb}]", mb.group(2), key))
+                pp.append((f"[{pa}]", ma.group(2), f"[{pb}]", mb.group(2), key, pa, pb))
         if pp:
-            prepared.append((v, pp))
+            # the lineage's other signature positions in this batch: a read
+            # only reaches those on its own amplicon, the rest read N
+            sm = {p: b for p, b in _sig_map(sigs.get(v, set())).items() if p in pos_set}
+            prepared.append((v, pp, sm))
     if not prepared:
         return
     for row in rows:
@@ -929,17 +951,29 @@ def _accumulate_pairs(rows: List[dict], pos_set: Set[int], pairs: Dict[str, List
         if cnt <= 0:
             continue
         date = str(row.get("date", ""))[:10]
-        for v, pp in prepared:
-            for ka, ba, kb, bb, key in pp:
+        for v, pp, sm in prepared:
+            cov_pos = None
+            for ka, ba, kb, bb, key, pa, pb in pp:
                 xa, xb = row.get(ka), row.get(kb)
                 if xa in _CHECK_UNCOVERED or xb in _CHECK_UNCOVERED or xa is None or xb is None:
                     continue
                 cell = stats.setdefault(v, {}).setdefault(date, {}).setdefault(key, [0, 0, 0, 0])
                 cell[0] += cnt
-                if xa == ba and xb == bb:
-                    cell[1] += cnt
+                if not (xa == ba and xb == bb):
+                    continue
+                cell[1] += cnt
+                if not sm:                        # no signature given: as before
                     cell[2] += cnt
                     cell[3] += cnt
+                    continue
+                if cov_pos is None:
+                    cov_pos = {q: row.get(f"[{q}]", "N") for q in sm}
+                nb = [q for q, bq in cov_pos.items()
+                      if q not in (pa, pb) and bq is not None and bq not in _CHECK_UNCOVERED]
+                if nb:
+                    cell[2] += cnt
+                    if all(cov_pos[q] == sm[q] for q in nb):
+                        cell[3] += cnt
 
 
 def own_markers(variant: str, markers: Optional[List[str]],
