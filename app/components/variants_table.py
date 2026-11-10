@@ -752,15 +752,38 @@ def _together_text(x):
 # ── Which mutations "reads together" is about (2026-10-26) ──────────────────
 # The check counts, for a marker, the reads that also reach another position of
 # the lineage and match it there (process.cooc.accumulate_check_stats). Those
-# neighbours are the lineage's own mutations within a read's reach: the same
+# neighbours are the lineage's own mutations on the same amplicon: the same
 # combination W-ASAP shows per amplicon (TA.1, Zürich, Sep–Oct: 6196A with
 # 6183G, its amplicon 20 at Jaccard .97; 23157G with 23148C and 23401T, its
 # amplicon 75 at 1.0). The hover names them, with how many lineages carry each:
 # the marker is the specific part, a neighbour carried by thousands of lineages
 # only places it on the right background.
-NB_SPAN = 300      # bases one read covers (process.variant_explorer.marker_blocks)
+NB_SPAN = 300      # bases one read covers -- FALLBACK since 2026-11-10: with the
+                   # amplicon inserts readable, a neighbour is any mutation on an
+                   # amplicon that carries the marker (a read comes off one)
 NB_RARE = 500      # neighbours carried by fewer lineages are named one by one
 _NB_CACHE: dict = {}
+
+
+def _amps_safe():
+    """The amplicon inserts [(name, start, end)], or [] without a BED
+    (2026-11-10): what one read can carry is decided by the amplicon."""
+    try:
+        from process.amplicons import get_inserts
+        return get_inserts()
+    except Exception:
+        return []
+
+
+def _amp_num(name):
+    """'SARS-CoV-2_INSERT_75' -> '75'."""
+    m = re.search(r"(\d+)$", str(name or ""))
+    return m.group(1) if m else str(name or "")
+
+
+def _reach_words():
+    return ("on the same amplicon" if _amps_safe()
+            else f"within a read's reach ({NB_SPAN} bases)")
 
 
 def _pango_sig():
@@ -786,14 +809,22 @@ def _pango_sig():
 
 def _neighbours(v, m):
     """[(mutation, inherited from the parent, lineages carrying it)] of `v`
-    within NB_SPAN bases of marker `m`, nearest first; None without pango data."""
+    that one read can carry together with marker `m`, nearest first; None
+    without pango data. With the amplicon inserts: every mutation on an
+    amplicon that carries m (2026-11-10); without: within NB_SPAN bases."""
     ps = _pango_sig()
     if not ps:
         return None
     sigs, parent, car = ps
     pos = lambda t: int("".join(ch for ch in t if ch.isdigit()) or 0)   # noqa: E731
     p, psig = pos(m), sigs.get(parent.get(v, ""), set())
-    nb = [t for t in sigs.get(v, set()) if t != m and 0 < abs(pos(t) - p) <= NB_SPAN]
+    reach = [(s, e) for _n, s, e in _amps_safe() if s <= p <= e]
+    if reach:
+        lo, hi = min(s for s, _e in reach), max(e for _s, e in reach)
+        near = lambda q: lo <= q <= hi                                    # noqa: E731
+    else:
+        near = lambda q: 0 < abs(q - p) <= NB_SPAN                        # noqa: E731
+    nb = [t for t in sigs.get(v, set()) if t != m and near(pos(t))]
     return [(t, t in psig, car.get(t, 0)) for t in sorted(nb, key=lambda t: abs(pos(t) - p))]
 
 
@@ -805,7 +836,7 @@ def _together_tip(v, x):
     if nb is None:
         return ""
     if not nb:
-        return (f"no other {v} mutation within a read's reach ({NB_SPAN} bases) of {m}: "
+        return (f"no other {v} mutation that one read can carry with {m} ({_reach_words()}): "
                 "judged on its share alone")
     rare = sorted([t for t in nb if t[2] < NB_RARE], key=lambda t: t[2])
     common = [t for t in nb if t[2] >= NB_RARE]
@@ -818,7 +849,7 @@ def _together_tip(v, x):
             if common else "")
     head = (f"{100 * x['link']:.0f} % of {x['link_n']:,} reads carrying {m} also carry {v}'s "
             "mutations they reach. " if x.get("link") is not None and x.get("link_n") else "")
-    return (head + f"{v}'s mutations within a read's reach ({NB_SPAN} bases): "
+    return (head + f"{v}'s mutations {_reach_words()} as {m}: "
             + "; ".join(t for t in (named, more) if t)
             + f". {m} is the specific part; a common one only shows it sits on the "
             "lineage's background, not on another branch's")
@@ -1000,10 +1031,13 @@ def _pair_pos(k):
 
 
 def _cooc_table(per_city, cities):
-    """Its coocs seen, one row per stretch of genome (2026-10-27): pairs with a
-    gap of at most check.stretch_span bases are one stretch (they count once
-    for a sample); cell = samples where a pair of the stretch was seen · best
-    share; the pairs are in the hover."""
+    """Its coocs seen, one row per amplicon (2026-11-10; per stretch of genome
+    since 2026-10-27): pairs on one amplicon count once for a sample, since a
+    read comes off one amplicon. Without the inserts, pairs with a gap of at
+    most check.stretch_span bases are one stretch, as before. Cell = samples
+    where a pair of the row was seen · best share; the pairs are in the hover.
+    This regroups the saved pairs itself, so it follows the inserts without a
+    re-scan."""
     seen, backbone = {}, set()                 # pair -> city -> {date: share}
     for c in cities:
         pev = (per_city.get(c) or {}).get("pairs") or {}
@@ -1019,16 +1053,32 @@ def _cooc_table(per_city, cities):
                 d[day] = max(d.get(day, 0.0), share)
     if not seen:
         return ""
-    span = int((_check_cfg_safe() or {}).get("stretch_span", 400))
-    groups, last = [], None
-    for k in sorted(seen, key=_pair_pos):
-        lo, hi = _pair_pos(k)
-        if groups and lo - last <= span:
-            groups[-1].append(k)
-            last = max(last, hi)
-        else:
-            groups.append([k])
-            last = hi
+    amps, amp_of = _amps_safe(), {}
+    if amps:
+        # one row per amplicon (2026-11-10): TA.1's 23,148-23,604 was one row
+        # under the distance rule and is amplicons 75 and 76, as W-ASAP shows
+        from process.amplicons import amplicon_of_pair
+        by_amp, loose = {}, []
+        for k in sorted(seen, key=_pair_pos):
+            lo, hi = _pair_pos(k)
+            a = amplicon_of_pair(lo, hi, amps)
+            if a is None:
+                loose.append([k])          # no read can carry it: its own row
+            else:
+                by_amp.setdefault(a, []).append(k)
+        groups = sorted(by_amp.values(), key=lambda g: _pair_pos(g[0])) + loose
+        amp_of = {id(g): a for a, g in by_amp.items()}
+    else:
+        span = int((_check_cfg_safe() or {}).get("stretch_span", 400))
+        groups, last = [], None
+        for k in sorted(seen, key=_pair_pos):
+            lo, hi = _pair_pos(k)
+            if groups and lo - last <= span:
+                groups[-1].append(k)
+                last = max(last, hi)
+            else:
+                groups.append([k])
+                last = hi
     def stat(g, c):
         days = {}
         for k in g:
@@ -1058,7 +1108,9 @@ def _cooc_table(per_city, cities):
                if any(k in backbone for k in g) else ""))
         # mutations, not pairs (2026-10-28): 13 mutations of one amplicon make
         # 78 pairs; the mutations are what an amplicon view lists
-        lab = (f"{lo:,}–{hi:,} · {len(muts)} {_pl(len(muts), 'mutation')}"
+        an = amp_of.get(id(g))
+        lab = ((f"amplicon {_amp_num(an)} · " if an else "")
+               + f"{lo:,}–{hi:,} · {len(muts)} {_pl(len(muts), 'mutation')}"
                + (f" ({len(g)} {_pl(len(g), 'pair')})" if len(g) > 1 else "")
                + (" · with a backbone mutation" if weak else ""))
         best = max(g, key=lambda k: sum(len(v) for v in seen[k].values()))
@@ -1068,15 +1120,19 @@ def _cooc_table(per_city, cities):
                     + _ext(_CLIN_WORLD.format(muts=q), "World", f"clinical sequences carrying {best.replace('+', ' and ')}, worldwide")
                     + " " + _ext(_CLIN_EUROPE.format(muts=q), "Europe", "the same, Europe only")
                     + "</td></tr>")
-    return ("<div class='dh'>Its coocs seen, by genome region <span class='dim'>(its own mutations "
-            "together on the same reads; pairs closer than a read count once; in genome order; "
+    return ("<div class='dh'>Its coocs seen, by " + ("amplicon" if amp_of else "genome region")
+            + " <span class='dim'>(its own mutations together on the same reads; "
+            + ("pairs on one amplicon count once" if amp_of else "pairs closer than a read count once")
+            + "; in genome order; "
             "cell = samples where seen · best share; hover a region for its mutations and pairs)"
             "</span></div>"
-            f"<table class='wkt'><tr><th style='text-align:left'>genome region</th>{head}"
+            f"<table class='wkt'><tr><th style='text-align:left'>"
+            f"{'amplicon · positions' if amp_of else 'genome region'}</th>{head}"
             "<th style='text-align:left'>clinical</th></tr>"
             f"{''.join(rows)}</table>"
-            + (f"<div class='dim' style='font-size:11px'>+ {more} more genome "
-               f"{_pl(more, 'region')}, seen on fewer samples</div>"
+            + (f"<div class='dim' style='font-size:11px'>+ {more} more "
+               f"{_pl(more, 'amplicon') if amp_of else 'genome ' + _pl(more, 'region')}, "
+               "seen on fewer samples</div>"
                if more else ""))
 
 
@@ -2844,8 +2900,9 @@ def _lrow(title, items):
 _LEGEND_ROWS = (
     _lrow("A cell · one city, the chosen dates", [
         "<b>k/n</b> = samples with its coocs / samples where its pairs were read · a "
-        "<b>cooc</b> = two of its own mutations on the same reads · a sample counts with coocs "
-        "in 2 or more genome regions, at least one without a backbone mutation",
+        "<b>cooc</b> = two of its own mutations on the same reads, so on one amplicon · a "
+        "sample counts with coocs on 2 or more amplicons, at least one without a backbone "
+        "mutation",
         _chip(S_YES, "2/8") + "seen",
         _chip(S_YES + _LOWQ_CELL, "1/8") + "seen only on thin samples: shown, not counted",
         _chip(S_SINGLE, "0/8") + "only single mutations seen: shown, not counted",
@@ -2883,9 +2940,9 @@ _LEGEND_ROWS = (
         "<b>weeks</b>: wastewater samples with coocs; Europe and World clinical sequences "
         "(X and below / all; striped = under 20 or still filling in); one square per sample "
         "and city",
-        "<b>coocs, by genome region</b>: pairs closer than a read count once; "
-        "“13 mutations (78 pairs)” is one region; pale = only pairs with a backbone mutation "
-        "(carried by most lineages)",
+        "<b>coocs, by amplicon</b>: a read comes off one amplicon (ARTIC v5.4.2 inserts), so "
+        "pairs on one amplicon count once; “amplicon 75 · 13 mutations (78 pairs)” is one row; "
+        "pale = only pairs with a backbone mutation (carried by most lineages)",
         "<b>its mutations</b>: share of reads per city · <100 too few reads · 1–5 % in between "
         "· link = its reads don't look like the lineage",
     ])

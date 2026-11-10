@@ -198,7 +198,10 @@ def get_inserts(bed_path=None) -> List[Tuple[str, int, int]]:
     Resolution: the path given, then $AMPLICON_BED, then the container default.
     """
     import os
-    for p in (bed_path, os.environ.get("AMPLICON_BED"), _INSERTS_DEFAULT):
+    # app/data next to app/process: the same file in the worker (/app_shared)
+    # and in streamlit (/app), whatever the mount point (2026-11-10)
+    _here = Path(__file__).resolve().parent.parent / "data" / "ArticV542inserts.bed"
+    for p in (bed_path, os.environ.get("AMPLICON_BED"), _INSERTS_DEFAULT, _here):
         if not p:
             continue
         key = str(p)
