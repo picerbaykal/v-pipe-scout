@@ -395,8 +395,17 @@ CHECK_DEFAULTS = {
     "pair_span": 300,        # specific pairs: two of a lineage's mutations at most
                              #   this many bases apart, so one read can carry both
                              #   (process.variant_explorer.marker_blocks uses 300)
+                             #   FALLBACK since 2026-11-10: with ArticV542inserts.bed
+                             #   readable, "one read can carry both" is decided by the
+                             #   amplicon insert instead. 300 was too strict (amplicon
+                             #   74's insert is 345 bases) and the wrong shape -- a
+                             #   distance cannot know where an amplicon ends.
     "stretch_span": 400,     # seen pairs with a gap of at most this many bases count as
                              #   one stretch (they can sit on one read, one jackpot).
+                             #   FALLBACK since 2026-11-10, as pair_span: a stretch is
+                             #   an amplicon. TA.1's 23,148-23,604 is 456 bases across
+                             #   amplicons 75 and 76 and was chained into one stretch,
+                             #   which no read can produce.
                              #   diag_span.py, Zürich Sep 2026, 1.67 M reads on a 10-base
                              #   grid: read span median 330, 99 % 360, max 370 (+ up to
                              #   20); 70 % of reads span more than 300. With 300 (until
@@ -648,6 +657,10 @@ def specific_pairs(variant_signatures: Dict[str, Set[str]],
     from process.recombinants import get_recombinants
     c = _check_cfg(cfg)
     span = int(c.get("pair_span", 300))
+    # the amplicon inserts decide what one read can carry (2026-11-10);
+    # check.pair_span is the fallback when no BED is readable
+    from process.amplicons import amplicon_of_pair, get_inserts, pair_reach
+    _amps = get_inserts()
     idx = _carrier_index(lineage_signatures)
     kids = _children_map(parent_map)
     rc = get_recombinants(parent_map, lineage_signatures)
@@ -665,8 +678,19 @@ def specific_pairs(variant_signatures: Dict[str, Set[str]],
         mk = set(marks.get(v) or [])
         pairs = []
         for i, (pa, a) in enumerate(subs):
+            # a pair is observable when ONE amplicon insert holds both
+            # positions (2026-11-10). Amplicon 74's insert is 22775-23119,
+            # 345 bases, so pair_span 300 was dropping pairs a read can show.
+            # `continue`, not `break`: amplicons overlap, so a later position
+            # can share one with pa when an intermediate position does not.
+            _reach = pair_reach(pa, _amps) if _amps else None
             for pb, b in subs[i + 1:]:
-                if pb - pa > span:
+                if _amps:
+                    if _reach is not None and pb > _reach:
+                        break
+                    if amplicon_of_pair(pa, pb, _amps) is None:
+                        continue
+                elif pb - pa > span:
                     break
                 both = (idx.get(a, set()) & idx.get(b, set())) - fam
                 if any(w in both or ((variant_signatures.get(w) or set()) >= {a, b})
@@ -795,6 +819,10 @@ def pair_evidence(per_date: Dict[str, Dict[str, List[float]]],
     from process.sample_qc import well_covered
     c = _check_cfg(cfg)
     span = int(c.get("stretch_span", 400))
+    # a stretch is an amplicon when the BED is readable (2026-11-10);
+    # check.stretch_span is the fallback
+    from process.amplicons import amplicon_of_pair, get_inserts
+    _amps = get_inserts()
     keys = sorted({k for cells in (per_date or {}).values() for k in (cells or {}) if "+" in k},
                   key=lambda k: (int(_SUB_RE.match(k.split("+")[0]).group(1))
                                  if _SUB_RE.match(k.split("+")[0]) else 0))
@@ -809,10 +837,32 @@ def pair_evidence(per_date: Dict[str, Dict[str, List[float]]],
         return (min(out), max(out)) if out else (0, 0)
 
     def _fragments(pairs):
-        """Seen pairs -> groups that one read could join: a gap of at most
-        stretch_span bases, chained (Lugano TA.1, 21 Sep: 23277A+23401T and
-        23401T+23423T are one fragment, not two; 2026-10-26)."""
+        """Seen pairs -> groups that one read could join.
+
+        With the amplicon inserts a group IS an amplicon (2026-11-10): a read
+        comes off one, so every pair inside one could share a read and no pair
+        across two ever can. Read span is 330 median / ~390 max against a
+        ~345-base insert, so the whole insert is reachable. TA.1's
+        23,148-23,604 spans amplicons 75 and 76 and was one stretch under the
+        distance rule, which no read can produce.
+        Without a BED, chain by a gap of at most stretch_span, as before
+        (Lugano TA.1, 21 Sep: 23277A+23401T and 23401T+23423T are one
+        fragment, not two; 2026-10-26)."""
         items = sorted(pairs, key=lambda kv: _pos(kv[0]))
+        if _amps:
+            by_amp, loose = {}, []
+            for k, val in items:
+                lo, hi = _pos(k)
+                amp = amplicon_of_pair(lo, hi, _amps)
+                if amp is None:
+                    # the BED cannot place it: its own group, counted once
+                    # and never merged with anything
+                    loose.append((k, val))
+                else:
+                    by_amp.setdefault(amp, []).append((k, val))
+            return ([by_amp[a] for a in sorted(
+                        by_amp, key=lambda n: min(_pos(k)[0] for k, _v in by_amp[n]))]
+                    + [[p] for p in loose])
         groups, last_end = [], None
         for k, val in items:
             lo, hi = _pos(k)

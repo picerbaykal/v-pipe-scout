@@ -168,3 +168,75 @@ def build_amp_dict_from_variants(
             amp_dict[pos].add(alt)
 
     return {pos: sorted(alts) for pos, alts in amp_dict.items()}
+# ─────────────────────────────────────────────────────────────────────────
+# Pair and stretch geometry (2026-11-10)
+#
+# process.cooc approximates "can one read carry both positions" with
+# check.pair_span (300) and chains stretches with check.stretch_span (400).
+# Both are distances standing in for a physical fact: a read comes off ONE
+# amplicon. ArticV542inserts.bed says amplicon 74's insert is 22775-23119,
+# 345 bases -- so pair_span 300 discards observable pairs -- while TA.1's
+# stretch 23,148-23,604 is 456 bases spanning amplicons 75 and 76, which no
+# read can produce and stretch_span 400 merged into one.
+#
+# group_positions_by_amplicon assigns each position to a single amplicon
+# independently, so two positions of one pair can land in different groups
+# when either sits in a tiling overlap. These helpers answer the pair
+# question directly instead.
+#
+# Everything returns None / [] when the BED is unreadable, so callers keep
+# their distance behaviour.
+# ─────────────────────────────────────────────────────────────────────────
+
+_INSERTS_DEFAULT = "/app_shared/data/ArticV542inserts.bed"
+_inserts_cache: Dict[str, List[Tuple[str, int, int]]] = {}
+
+
+def get_inserts(bed_path=None) -> List[Tuple[str, int, int]]:
+    """load_amplicons on the inserts BED, cached. [] when unreadable.
+
+    Resolution: the path given, then $AMPLICON_BED, then the container default.
+    """
+    import os
+    for p in (bed_path, os.environ.get("AMPLICON_BED"), _INSERTS_DEFAULT):
+        if not p:
+            continue
+        key = str(p)
+        if key in _inserts_cache:
+            if _inserts_cache[key]:
+                return _inserts_cache[key]
+            continue
+        try:
+            amps = load_amplicons(Path(key))
+        except OSError:
+            _inserts_cache[key] = []
+            continue
+        _inserts_cache[key] = amps
+        if amps:
+            return amps
+    return []
+
+
+def amplicon_of_pair(p1: int, p2: int,
+                     amplicons: List[Tuple[str, int, int]]):
+    """Name of an amplicon whose insert holds BOTH positions, else None.
+
+    Lowest start wins, so a pair always groups into the same stretch however
+    it is reached when amplicons overlap.
+    """
+    lo, hi = (p1, p2) if p1 <= p2 else (p2, p1)
+    best = None
+    for name, start, end in amplicons:
+        if start <= lo and hi <= end:
+            if best is None or start < best[1]:
+                best = (name, start)
+    return best[0] if best else None
+
+
+def pair_reach(pos: int, amplicons: List[Tuple[str, int, int]]):
+    """Highest position that could share a read with pos, else None.
+
+    Used only to keep the early exit in specific_pairs' inner loop.
+    """
+    ends = [end for _n, start, end in amplicons if start <= pos <= end]
+    return max(ends) if ends else None
